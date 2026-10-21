@@ -442,7 +442,20 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
       {prospect.suggestedGeneratedAt && <small> — suggested {dateLabel(prospect.suggestedGeneratedAt)}{prospect.suggestedScore != null ? `, evidence score ${prospect.suggestedScore.toFixed(2)}` : ""}. Current CRM status may have changed since -- see Prepare for Meeting for up-to-date detail.</small>}
     </p>
 
-    {prospect.meetingAt && !scheduling && !completing && <p className="travel-planning-meeting-time">{prospect.status === "meeting_completed" ? "Met" : "Meeting"} {dateTimeLabelInZone(prospect.meetingAt, timezone)} ({timezone}){prospect.meetingLocation ? ` at ${prospect.meetingLocation}` : ""}.</p>}
+    {prospect.meetingAt && !scheduling && !completing && <p className="travel-planning-meeting-time">
+      {prospect.status === "meeting_completed" ? "Met" : "Meeting"} {dateTimeLabelInZone(prospect.meetingAt, timezone)} ({timezone}){prospect.meetingLocation ? ` at ${prospect.meetingLocation}` : ""}.
+      {/* AI meeting notes from Trip Planning (2026-10-21, see
+          docs/AI-HANDOFF.md): only ever shown once a real interaction
+          exists for this meeting (linkedInteractionId is set exactly
+          when status is meeting_scheduled/meeting_completed), never
+          guessed for an earlier-stage prospect. Reuses the SAME
+          interaction the donor profile's own "Add Meeting Notes"
+          workflow reads and writes -- never a separate trip-only copy. */}
+      {prospect.linkedInteractionId && <a
+        className="travel-planning-ai-meeting-notes"
+        href={`/travel-planning/${encodeURIComponent(tripId)}/prospects/${encodeURIComponent(prospect.id)}/meeting-notes?returnTo=${encodeURIComponent(returnTo)}`}
+      >✦ AI meeting notes</a>}
+    </p>}
 
     {prospect.status === "meeting_scheduled" && prospect.meetingAt && !scheduling && !completing &&
       <AddToGoogleCalendarLink donorDisplayName={prospect.donorDisplayName} meetingAtEpoch={prospect.meetingAt} meetingLocation={prospect.meetingLocation} />}
@@ -460,9 +473,19 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
       </div>}
 
       {completing && <div className="travel-planning-confirm-panel">
+        {/* AI Meeting Notes preservation (2026-10-21, see docs/AI-HANDOFF.md):
+            completing never silently replaces notes already saved on this
+            SAME linked interaction -- it only appends alongside them. This
+            link lets the fundraiser review what is already saved before
+            confirming, satisfying "review any intentional replacement"
+            even though nothing is ever actually replaced. */}
+        {prospect.linkedInteractionId && <a
+          className="travel-planning-ai-meeting-notes"
+          href={`/travel-planning/${encodeURIComponent(tripId)}/prospects/${encodeURIComponent(prospect.id)}/meeting-notes?returnTo=${encodeURIComponent(returnTo)}`}
+        >✦ Review saved meeting notes before completing</a>}
         <label>Actual meeting date &amp; time -- local time at destination ({timezone})<input type="datetime-local" value={meetingAtDraft || (prospect.meetingAt ? toDateTimeInputValueInZone(prospect.meetingAt, timezone) : "")} onChange={(event) => setMeetingAtDraft(event.target.value)} /></label>
         <label>Meeting notes (required)<textarea value={completionNotesDraft} onChange={(event) => setCompletionNotesDraft(event.target.value)} maxLength={5000} placeholder="What happened, decisions made, any commitments" /></label>
-        <p className="travel-planning-confirm-hint">This records a real completed interaction on this donor&rsquo;s timeline -- the same place every other logged meeting lives.</p>
+        <p className="travel-planning-confirm-hint">This records a real completed interaction on this donor&rsquo;s timeline -- the same place every other logged meeting lives. Any notes already saved above are kept; this is added alongside them, never in place of them.</p>
         <div className="travel-planning-confirm-actions"><button type="button" onClick={confirmCompletion} disabled={!meetingAtDraft || completionNotesDraft.trim().length < 2}>Confirm meeting completed</button><button type="button" onClick={() => setCompleting(false)}>Cancel</button></div>
       </div>}
 

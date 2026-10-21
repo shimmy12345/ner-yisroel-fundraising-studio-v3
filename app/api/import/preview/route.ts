@@ -17,7 +17,7 @@ import { donationExportRange, isoDate } from "../../../../lib/import/jl-refresh"
 import { ACTIVE_PAYMENT_ASSIGNMENTS_SQL } from "../../../../lib/import/import-deduplication";
 import { findLikelyManualDonorMatches, type ManualDonorMatchRow } from "../../../../lib/donors/merge-preview";
 import { buildExistingDonorReviews } from "../../../../lib/import/household-review";
-import { pendingGiftMatches, type PendingGiftMatchRow } from "../../../../lib/giving/management";
+import { pendingGiftMatches, pendingPledgeMatches, type PendingGiftMatchRow } from "../../../../lib/giving/management";
 import { buildKnownAttributionsByCode, type RawDonorSourceAttributionRow } from "../../../../lib/import/donor-source-attribution";
 
 type PreviewRequest = { rows?: ImportRow[]; mapping?: ColumnMapping; fileHash?: string; fileName?: string; compactPaymentStatus?: "review" | "fully_paid"; forceType?: "household" | "donation"; previewSessionId?: string };
@@ -196,9 +196,17 @@ export async function POST(request: Request) {
       ...match.newActivities.map((activity) => ({ fingerprint: activity.fingerprint, donorId: activity.donorId, activityDate: activity.activityDate, committedCents: activity.committedCents })),
       ...paymentAssignments.filter((candidate) => candidate.donorId && !candidate.alreadyApplied).map((candidate) => ({ fingerprint: candidate.fingerprint, donorId: candidate.donorId!, activityDate: candidate.paymentDate, committedCents: candidate.amountCents })),
     ];
-    const pendingDonorIds = [...new Set(pendingInputs.map((item) => item.donorId))];
-    const pending = pendingDonorIds.length ? await env.DB.prepare(`SELECT id,donor_id,activity_date,committed_cents,description,private_note,workspace_status,category,confirmed_by_activity_id FROM giving_activities WHERE owner_user_id=? AND record_origin='live' AND category='pending_gift' AND workspace_status='active' AND confirmed_by_activity_id IS NULL AND donor_id IN (SELECT value FROM json_each(?))`).bind(profile.id, JSON.stringify(pendingDonorIds)).all<PendingGiftMatchRow>() : { results: [] as PendingGiftMatchRow[] };
+    // Pending-Pledge Import Reconciliation (2026-10-21, see docs/AI-HANDOFF.md):
+    // pledge matching only ever considers brand-new real pledges from
+    // THIS import (match.newActivities, filtered by category inside
+    // pendingPledgeMatches itself) -- never a payment-assignment
+    // candidate, which applies only to an ALREADY-existing open pledge,
+    // never a newly created one.
+    const pledgeInputs = match.newActivities.map((activity) => ({ fingerprint: activity.fingerprint, donorId: activity.donorId, activityDate: activity.activityDate, committedCents: activity.committedCents, category: activity.category }));
+    const pendingDonorIds = [...new Set([...pendingInputs.map((item) => item.donorId), ...pledgeInputs.map((item) => item.donorId)])];
+    const pending = pendingDonorIds.length ? await env.DB.prepare(`SELECT id,donor_id,activity_date,committed_cents,description,private_note,workspace_status,category,confirmed_by_activity_id FROM giving_activities WHERE owner_user_id=? AND record_origin='live' AND category IN ('pending_gift','pending_pledge') AND workspace_status='active' AND confirmed_by_activity_id IS NULL AND donor_id IN (SELECT value FROM json_each(?))`).bind(profile.id, JSON.stringify(pendingDonorIds)).all<PendingGiftMatchRow>() : { results: [] as PendingGiftMatchRow[] };
     const pendingMatches = pendingGiftMatches(pendingInputs, pending.results).map((match) => ({ fingerprint: match.fingerprint, candidates: match.candidates.map((candidate) => ({ id: candidate.id, activityDate: candidate.activity_date, amountCents: candidate.committed_cents, designation: candidate.description, note: candidate.private_note })) }));
+    const pendingPledgeMatchResults = pendingPledgeMatches(pledgeInputs, pending.results).map((match) => ({ fingerprint: match.fingerprint, candidates: match.candidates.map((candidate) => ({ id: candidate.id, activityDate: candidate.activity_date, amountCents: candidate.committed_cents, designation: candidate.description, note: candidate.private_note })) }));
     // Persist the parsed rows server-side (or reuse this owner's existing
     // open draft for the exact same fileHash, restoring its decisions) so
     // the final commit request can send this id instead of re-uploading
@@ -240,6 +248,7 @@ export async function POST(request: Request) {
       rangeEnd: isoDate(range.end),
       paymentAssignments: publicPaymentAssignments,
       pendingGiftMatches: pendingMatches,
+      pendingPledgeMatches: pendingPledgeMatchResults,
       crossImportRows: crossImportMatches.map((item) => {
         const activity = crossImportSourceByFingerprint.get(item.fingerprint);
         return {

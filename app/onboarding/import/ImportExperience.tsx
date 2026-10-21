@@ -73,6 +73,14 @@ type PaymentDecisionState = { action: PaymentAction; pledgeId: string | null; al
 type PendingGiftMatch = { id: string; activityDate: number; amountCents: number; designation: string | null; note: string | null };
 type PendingGiftMatchPreview = { fingerprint: string; candidates: PendingGiftMatch[] };
 type PendingGiftDecisionState = { action: "needs_decision" | "merge" | "keep_separate"; pendingGiftId: string | null };
+// Pending-Pledge Import Reconciliation (2026-10-21, see docs/AI-HANDOFF.md):
+// the pledge-side counterpart to the three types above -- same shape,
+// reviewed through its own, separate panel (never mixed into the gift
+// one, so a fundraiser is never asked to pick a pledge for a gift match
+// or vice versa).
+type PendingPledgeMatch = PendingGiftMatch;
+type PendingPledgeMatchPreview = { fingerprint: string; candidates: PendingPledgeMatch[] };
+type PendingPledgeDecisionState = { action: "needs_decision" | "merge" | "keep_separate"; pendingPledgeId: string | null };
 type ReviewRowItem = { row: number; fingerprint: string; reason: string; donor: string | null; jlCode: string | null; transactionType: string | null; campaign: string | null; date: number | null; originalDateValue: string | null; amountCents: number | null; duplicateGroupKey: string | null; duplicateGroupSize: number; dateIssue: "invalid" | "suspicious" | null; resolvable: boolean };
 type ReviewDecisionAction = "needs_decision" | "import_anyway" | "skip" | "review_later";
 type ReviewDecisionState = { action: ReviewDecisionAction };
@@ -83,7 +91,7 @@ type RejectedRowCategory = "duplicate_transaction_id" | "unmatched_jl_code" | "n
 type RejectedRowItem = { fingerprint: string; row: number; category: RejectedRowCategory; severity: "hard" | "reviewable"; reason: string; donor: string | null; jlCode: string | null; campaign: string | null; date: number | null; amountCents: number | null; existingMatchRow: number | null; knownAttribution: KnownAttributionPreview | null };
 type RejectionDecisionAction = "needs_decision" | "import_anyway" | "match_donor" | "skip" | "review_later";
 type RejectionDecisionState = { action: RejectionDecisionAction; correctedJlCode?: string; donorId?: string };
-type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number; conflicts: number; reviewRows: ReviewRowItem[]; crossImportRows: CrossImportRow[]; rejectedRows: number; rejectedRowDetails: RejectedRowItem[]; rangeStart: string | null; rangeEnd: string | null; paymentAssignments: PaymentAssignmentPreview[]; pendingGiftMatches?: PendingGiftMatchPreview[] };
+type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number; conflicts: number; reviewRows: ReviewRowItem[]; crossImportRows: CrossImportRow[]; rejectedRows: number; rejectedRowDetails: RejectedRowItem[]; rangeStart: string | null; rangeEnd: string | null; paymentAssignments: PaymentAssignmentPreview[]; pendingGiftMatches?: PendingGiftMatchPreview[]; pendingPledgeMatches?: PendingPledgeMatchPreview[] };
 const REJECTED_ROW_CATEGORY_LABELS: Record<RejectedRowCategory, string> = { duplicate_transaction_id: "Duplicate transaction ID", unmatched_jl_code: "Unmatched JL Code", nonfinancial_entry: "Zero-dollar / nonfinancial entry" };
 type ResumableDraft = { id: string; file_name: string; file_hash: string; row_count: number; progress_resolved: number; progress_total: number; created_at: number; updated_at: number; expires_at: number };
 type ResumableReviewLater = ResumableDraft & { reviewLaterCount: number };
@@ -186,6 +194,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
   const [donationPreview, setDonationPreview] = useState<DonationPreview | null>(null);
   const [paymentDecisions, setPaymentDecisions] = useState<Record<string, PaymentDecisionState>>({});
   const [pendingGiftDecisions, setPendingGiftDecisions] = useState<Record<string, PendingGiftDecisionState>>({});
+  const [pendingPledgeDecisions, setPendingPledgeDecisions] = useState<Record<string, PendingPledgeDecisionState>>({});
   const [mergeDecisions, setMergeDecisions] = useState<Record<string, MergeDecision>>({});
   const [fieldDecisions, setFieldDecisions] = useState<Record<string, FieldDecision>>({});
   const [reviewMode, setReviewMode] = useState<ReviewMode>(initialReviewMode);
@@ -340,6 +349,9 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       const pendingInit = Object.fromEntries((payload.donation?.pendingGiftMatches ?? []).map((item) => [item.fingerprint, { action: "needs_decision", pendingGiftId: null }]));
       const pendingRestore = restoreDecisions(restored.pendingGiftDecisions, (payload.donation?.pendingGiftMatches ?? []).map((item) => item.fingerprint));
       setPendingGiftDecisions({ ...pendingInit, ...pendingRestore.restored } as Record<string, PendingGiftDecisionState>);
+      const pendingPledgeInit = Object.fromEntries((payload.donation?.pendingPledgeMatches ?? []).map((item) => [item.fingerprint, { action: "needs_decision", pendingPledgeId: null }]));
+      const pendingPledgeRestore = restoreDecisions(restored.pendingPledgeDecisions, (payload.donation?.pendingPledgeMatches ?? []).map((item) => item.fingerprint));
+      setPendingPledgeDecisions({ ...pendingPledgeInit, ...pendingPledgeRestore.restored } as Record<string, PendingPledgeDecisionState>);
       const reviewFingerprints = (payload.donation?.reviewRows ?? []).filter((item) => item.resolvable && item.dateIssue === null).map((item) => item.fingerprint);
       const reviewRestore = restoreDecisions(restored.reviewDecisions, reviewFingerprints);
       setReviewDecisions({ ...Object.fromEntries(reviewFingerprints.map((fingerprint) => [fingerprint, { action: "needs_decision" as const }])), ...reviewRestore.restored } as Record<string, ReviewDecisionState>);
@@ -352,7 +364,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       const dateFingerprints = (payload.donation?.reviewRows ?? []).filter((item) => item.dateIssue !== null).map((item) => item.fingerprint);
       const dateRestore = restoreDecisions(restored.dateDecisions, dateFingerprints);
       setDateDecisions({ ...Object.fromEntries(dateFingerprints.map((fingerprint) => [fingerprint, { action: "needs_decision" as const }])), ...dateRestore.restored } as Record<string, DateDecisionState>);
-      setChangedRowsNotice(paymentRestore.dropped + pendingRestore.dropped + reviewRestore.dropped + crossImportRestore.dropped + rejectionRestore.dropped + dateRestore.dropped);
+      setChangedRowsNotice(paymentRestore.dropped + pendingRestore.dropped + pendingPledgeRestore.dropped + reviewRestore.dropped + crossImportRestore.dropped + rejectionRestore.dropped + dateRestore.dropped);
       setRejectedRowFilter("all");
       setConfirmedType(forceType);
       // A server-stored draft for this reviewed file, and a fresh
@@ -440,7 +452,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
         // The full parsed file is only sent when there is no server-stored
         // preview session for it (e.g. the household/general import paths).
         rows: previewSessionId ? undefined : rows,
-        paymentDecisions: Object.entries(paymentDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })), pendingGiftDecisions: Object.entries(pendingGiftDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })).filter((decision) => decision.action !== "needs_decision"), reviewDecisions: Object.entries(reviewDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, groupKey: donationPreview?.reviewRows.find((item) => item.fingerprint === fingerprint)?.duplicateGroupKey ?? null })).filter((decision) => decision.action !== "needs_decision"), crossImportDecisions: Object.entries(crossImportDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action })).filter((decision) => decision.action !== "needs_decision"), rejectionDecisions: Object.entries(rejectionDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, correctedJlCode: decision.action === "match_donor" ? decision.correctedJlCode : undefined, donorId: decision.action === "match_donor" ? decision.donorId : undefined })).filter((decision) => decision.action !== "needs_decision"), dateDecisions: Object.entries(dateDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, correctedDate: decision.action === "correct_date" ? decision.correctedDate : undefined })).filter((decision) => decision.action !== "needs_decision"), mergeDecisions: Object.entries(mergeDecisions).map(([externalId, decision]) => ({ externalId, ...decision })), existingDonorDecisions: Object.entries(existingDonorDecisions).map(([externalId, decision]) => ({ externalId, ...decision })).filter((decision) => decision.action !== "needs_decision"), fieldDecisions: (jlPreview?.changes ?? []).map((change) => ({ externalId: change.externalId, field: change.field, action: fieldDecisions[`${change.externalId}:${change.field}`] })).filter((decision) => decision.action !== "needs_decision"), forceReprocess, forceConfirmation: forceReprocess ? forceConfirmation : undefined,
+        paymentDecisions: Object.entries(paymentDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })), pendingGiftDecisions: Object.entries(pendingGiftDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })).filter((decision) => decision.action !== "needs_decision"), pendingPledgeDecisions: Object.entries(pendingPledgeDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })).filter((decision) => decision.action !== "needs_decision"), reviewDecisions: Object.entries(reviewDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, groupKey: donationPreview?.reviewRows.find((item) => item.fingerprint === fingerprint)?.duplicateGroupKey ?? null })).filter((decision) => decision.action !== "needs_decision"), crossImportDecisions: Object.entries(crossImportDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action })).filter((decision) => decision.action !== "needs_decision"), rejectionDecisions: Object.entries(rejectionDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, correctedJlCode: decision.action === "match_donor" ? decision.correctedJlCode : undefined, donorId: decision.action === "match_donor" ? decision.donorId : undefined })).filter((decision) => decision.action !== "needs_decision"), dateDecisions: Object.entries(dateDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, correctedDate: decision.action === "correct_date" ? decision.correctedDate : undefined })).filter((decision) => decision.action !== "needs_decision"), mergeDecisions: Object.entries(mergeDecisions).map(([externalId, decision]) => ({ externalId, ...decision })), existingDonorDecisions: Object.entries(existingDonorDecisions).map(([externalId, decision]) => ({ externalId, ...decision })).filter((decision) => decision.action !== "needs_decision"), fieldDecisions: (jlPreview?.changes ?? []).map((change) => ({ externalId: change.externalId, field: change.field, action: fieldDecisions[`${change.externalId}:${change.field}`] })).filter((decision) => decision.action !== "needs_decision"), forceReprocess, forceConfirmation: forceReprocess ? forceConfirmation : undefined,
       });
       const response = await fetch("/api/import", { method: "POST", headers: { "content-type": "application/json" }, body });
       const payload = await response.json() as ImportReport | ImportFailure | DuplicateImportBlock | UnresolvedDecisionsFailure;
@@ -693,6 +705,16 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
     const decision = pendingGiftDecisions[match.fingerprint];
     return !decision || decision.action === "needs_decision" || (decision.action === "merge" && !match.candidates.some((candidate) => candidate.id === decision.pendingGiftId));
   }).length;
+  // Pending-Pledge Import Reconciliation (2026-10-21, see docs/AI-HANDOFF.md):
+  // pledge matches are built only from brand-new pledge-category rows
+  // (never a payment-assignment candidate -- see the server's own
+  // pledgeInputs), so unlike relevantPendingMatches above there is no
+  // payment-decision overlap to filter out here.
+  const pendingPledgeMatchList = donationPreview?.pendingPledgeMatches ?? [];
+  const unresolvedPendingPledges = pendingPledgeMatchList.filter((match) => {
+    const decision = pendingPledgeDecisions[match.fingerprint];
+    return !decision || decision.action === "needs_decision" || (decision.action === "merge" && !match.candidates.some((candidate) => candidate.id === decision.pendingPledgeId));
+  }).length;
   const resolvableReviewRows = donationPreview?.reviewRows.filter((item) => item.resolvable && item.dateIssue === null) ?? [];
   const unresolvedReviewRows = resolvableReviewRows.filter((item) => (reviewDecisions[item.fingerprint]?.action ?? "needs_decision") === "needs_decision").length;
   const dateReviewRows = donationPreview?.reviewRows.filter((item) => item.dateIssue !== null) ?? [];
@@ -740,7 +762,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           previewSessionId,
-          decisions: { reviewDecisions, crossImportDecisions, rejectionDecisions, dateDecisions, paymentDecisions, pendingGiftDecisions },
+          decisions: { reviewDecisions, crossImportDecisions, rejectionDecisions, dateDecisions, paymentDecisions, pendingGiftDecisions, pendingPledgeDecisions },
           progressResolved: draftProgressResolved,
           progressTotal: draftProgressTotal,
         }),
@@ -748,7 +770,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
     }, 1200);
     return () => { if (saveDraftTimeoutRef.current) clearTimeout(saveDraftTimeoutRef.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, previewSessionId, donationDetected, reviewDecisions, crossImportDecisions, rejectionDecisions, dateDecisions, paymentDecisions, pendingGiftDecisions]);
+  }, [step, previewSessionId, donationDetected, reviewDecisions, crossImportDecisions, rejectionDecisions, dateDecisions, paymentDecisions, pendingGiftDecisions, pendingPledgeDecisions]);
 
   return (
     <main className="import-page">
@@ -1145,6 +1167,26 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
                   </article>;
                 })}</div>
               </section>}
+              {/* Pending-Pledge Import Reconciliation (2026-10-21, see
+                  docs/AI-HANDOFF.md): same review requirement as pending
+                  gift matches above, in its own panel so a fundraiser is
+                  never offered a pledge as a candidate for a gift match
+                  or vice versa. A possible match is never merged
+                  automatically here either. */}
+              {pendingPledgeMatchList.length > 0 && <section className="payment-assignment-section pending-gift-match-section" aria-labelledby="pending-pledge-match-title">
+                <div><p className="eyebrow">PENDING PLEDGE MATCHES</p><h2 id="pending-pledge-match-title">Confirm whether these JL pledges replace pending entries.</h2><p>A possible match is never merged automatically. Choose the pending entry to confirm, or keep both records separate.</p></div>
+                <div className="payment-assignment-list">{pendingPledgeMatchList.map((match) => {
+                  const decision = pendingPledgeDecisions[match.fingerprint] ?? { action: "needs_decision" as const, pendingPledgeId: null };
+                  return <article className="payment-assignment-card" key={match.fingerprint}>
+                    <label><span>Pending pledge decision</span><select required aria-label="Pending pledge match decision" value={decision.action === "merge" ? decision.pendingPledgeId ?? "needs_decision" : decision.action} onChange={(event) => {
+                      const value = event.target.value;
+                      setPendingPledgeDecisions((current) => ({ ...current, [match.fingerprint]: value === "keep_separate" ? { action: "keep_separate", pendingPledgeId: null } : value === "needs_decision" ? { action: "needs_decision", pendingPledgeId: null } : { action: "merge", pendingPledgeId: value } }));
+                    }}><option value="needs_decision" disabled>Choose what to do</option>{match.candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>Confirm pending pledge from {epochDateLabel(candidate.activityDate)} · {centsLabel(candidate.amountCents)}{candidate.designation ? ` · ${candidate.designation}` : ""}</option>)}<option value="keep_separate">Keep as separate pledges</option></select></label>
+                    {decision.action === "merge" && <p className="payment-proposal">The selected pending entry will be marked confirmed and excluded from totals; the imported JL pledge becomes the counted commitment, using its own actual committed, paid, and outstanding-balance figures. No amount is double-counted.</p>}
+                    {decision.action === "keep_separate" && <p className="payment-review-note">Both records will remain. The pending entry stays unconfirmed and excluded from totals.</p>}
+                  </article>;
+                })}</div>
+              </section>}
               <p className="import-privacy">Paid totals use Paid. Commitments use Amount. Open balances use Balance Due. Nothing has been written yet.</p>
             </> : <div className="import-counts">
               <article><strong>{preview.donors.length.toLocaleString()}</strong><span>{jlDetected ? "households" : "donors"}</span></article>
@@ -1185,7 +1227,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
             <div className="import-footer-actions">
               <button type="button" onClick={cancelImport}>Cancel import</button>
               <button type="button" onClick={() => setStep("recognition")}>Review column setup</button>
-              {!duplicateBlock && <button className="onboarding-primary" type="button" onClick={() => void importData()} disabled={unresolvedPayments + unresolvedPendingGifts + unresolvedReviewRows + unresolvedRejectedRows + unresolvedDateRows + unresolvedMerges + unresolvedExisting + codeCollisions > 0}>{codeCollisions > 0 ? "Resolve duplicate JL Codes" : unresolvedExisting > 0 ? `Review ${unresolvedExisting} existing donor${unresolvedExisting === 1 ? "" : "s"}` : unresolvedPayments > 0 ? `Review ${unresolvedPayments} payment${unresolvedPayments === 1 ? "" : "s"}` : unresolvedPendingGifts > 0 ? `Review ${unresolvedPendingGifts} pending gift match${unresolvedPendingGifts === 1 ? "" : "es"}` : unresolvedDateRows > 0 ? `Review ${unresolvedDateRows} flagged date${unresolvedDateRows === 1 ? "" : "s"}` : unresolvedReviewRows > 0 ? `Review ${unresolvedReviewRows} possible duplicate row${unresolvedReviewRows === 1 ? "" : "s"}` : unresolvedRejectedRows > 0 ? `Review ${unresolvedRejectedRows} rejected row${unresolvedRejectedRows === 1 ? "" : "s"}` : unresolvedMerges > 0 ? `Review ${unresolvedMerges} possible match${unresolvedMerges === 1 ? "" : "es"}` : "Confirm and import"}</button>}
+              {!duplicateBlock && <button className="onboarding-primary" type="button" onClick={() => void importData()} disabled={unresolvedPayments + unresolvedPendingGifts + unresolvedPendingPledges + unresolvedReviewRows + unresolvedRejectedRows + unresolvedDateRows + unresolvedMerges + unresolvedExisting + codeCollisions > 0}>{codeCollisions > 0 ? "Resolve duplicate JL Codes" : unresolvedExisting > 0 ? `Review ${unresolvedExisting} existing donor${unresolvedExisting === 1 ? "" : "s"}` : unresolvedPayments > 0 ? `Review ${unresolvedPayments} payment${unresolvedPayments === 1 ? "" : "s"}` : unresolvedPendingGifts > 0 ? `Review ${unresolvedPendingGifts} pending gift match${unresolvedPendingGifts === 1 ? "" : "es"}` : unresolvedPendingPledges > 0 ? `Review ${unresolvedPendingPledges} pending pledge match${unresolvedPendingPledges === 1 ? "" : "es"}` : unresolvedDateRows > 0 ? `Review ${unresolvedDateRows} flagged date${unresolvedDateRows === 1 ? "" : "s"}` : unresolvedReviewRows > 0 ? `Review ${unresolvedReviewRows} possible duplicate row${unresolvedReviewRows === 1 ? "" : "s"}` : unresolvedRejectedRows > 0 ? `Review ${unresolvedRejectedRows} rejected row${unresolvedRejectedRows === 1 ? "" : "s"}` : unresolvedMerges > 0 ? `Review ${unresolvedMerges} possible match${unresolvedMerges === 1 ? "" : "es"}` : "Confirm and import"}</button>}
             </div>
           </section>
         )}
