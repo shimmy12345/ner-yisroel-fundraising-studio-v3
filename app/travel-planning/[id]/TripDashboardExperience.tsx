@@ -705,8 +705,8 @@ function TripFinancialResultsSection({ summary, attributions }: { summary: TripF
       />
     ) : <p className="payment-plan-note-inline">This trip has no fundraising goal set.</p>}
     <FinancialSummaryGrid>
-      <FinancialSummaryCard label="New pledges secured" value={money(summary.newPledgesSecuredCents)} sublabel={`${summary.pledgeCount} pledge${summary.pledgeCount === 1 ? "" : "s"}${summary.awaitingJlCount > 0 ? ` (${summary.awaitingJlCount} awaiting JL)` : ""}`} />
-      <FinancialSummaryCard label="New donations secured" value={money(summary.newDonationsSecuredCents)} sublabel={`${summary.donationCount} donation${summary.donationCount === 1 ? "" : "s"}`} />
+      <FinancialSummaryCard label="New pledges secured" value={money(summary.newPledgesSecuredCents)} sublabel={`${summary.pledgeCount} pledge${summary.pledgeCount === 1 ? "" : "s"}${summary.awaitingJlPledgeCount > 0 ? ` (${summary.awaitingJlPledgeCount} awaiting JL)` : ""}`} />
+      <FinancialSummaryCard label="New donations secured" value={money(summary.newDonationsSecuredCents)} sublabel={`${summary.donationCount} donation${summary.donationCount === 1 ? "" : "s"}${summary.awaitingJlDonationCount > 0 ? ` (${summary.awaitingJlDonationCount} awaiting JL)` : ""}`} />
       <FinancialSummaryCard label="Cash collected" value={money(summary.cashCollectedCents)} sublabel={`${money(summary.cashCollectedRecordedInJlCents)} recorded in JL, ${money(summary.cashCollectedAwaitingJlCents)} awaiting JL`} />
       <FinancialSummaryCard label="Outstanding pledge balance" value={money(summary.outstandingCommittedBalanceCents)} tone="muted" sublabel={summary.outstandingBalanceAwaitingJlCents > 0 ? `${money(summary.outstandingBalanceAwaitingJlCents)} provisional, awaiting JL` : undefined} />
     </FinancialSummaryGrid>

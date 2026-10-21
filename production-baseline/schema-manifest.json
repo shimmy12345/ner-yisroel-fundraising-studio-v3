@@ -50,7 +50,8 @@
     "0045_trips.sql",
     "0046_trip_financial_attributions.sql",
     "0047_trip_prospect_selection.sql",
-    "0050_trip_attribution_confirmation.sql"
+    "0050_trip_attribution_confirmation.sql",
+    "0051_trip_reconciliation_concurrency_guard.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -6324,6 +6325,16 @@
             "sql": "CREATE UNIQUE INDEX `trip_financial_attributions_active_giving_activity_uidx` ON `trip_financial_attributions` (`giving_activity_id`) WHERE `removed_at` IS NULL"
           },
           {
+            "name": "trip_financial_attributions_active_reconciled_pending_uidx",
+            "columns": [
+              "reconciled_pending_attribution_id"
+            ],
+            "unique": true,
+            "partial": true,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `trip_financial_attributions_active_reconciled_pending_uidx` ON `trip_financial_attributions` (`reconciled_pending_attribution_id`) WHERE `removed_at` IS NULL AND `reconciled_pending_attribution_id` IS NOT NULL"
+          },
+          {
             "name": "trip_financial_attributions_donor_idx",
             "columns": [
               "donor_id"
@@ -7811,6 +7822,11 @@
       "type": "index",
       "name": "trip_financial_attributions_active_giving_activity_uidx",
       "sql": "CREATE UNIQUE INDEX `trip_financial_attributions_active_giving_activity_uidx` ON `trip_financial_attributions` (`giving_activity_id`) WHERE `removed_at` IS NULL"
+    },
+    {
+      "type": "index",
+      "name": "trip_financial_attributions_active_reconciled_pending_uidx",
+      "sql": "CREATE UNIQUE INDEX `trip_financial_attributions_active_reconciled_pending_uidx` ON `trip_financial_attributions` (`reconciled_pending_attribution_id`) WHERE `removed_at` IS NULL AND `reconciled_pending_attribution_id` IS NOT NULL"
     },
     {
       "type": "index",

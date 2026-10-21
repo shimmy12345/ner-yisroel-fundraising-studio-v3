@@ -85,8 +85,9 @@ const record = (overrides) => ({
 
 // A donor-confirmed pending_pledge counts in full immediately -- as a
 // pledge, with its full committed amount outstanding (nothing paid
-// pre-JL by construction) -- labeled "awaiting JL" via awaitingJlCount,
-// never silently merged into the ordinary "recorded in JL" figures.
+// pre-JL by construction) -- labeled "awaiting JL" via
+// awaitingJlPledgeCount, never silently merged into the ordinary
+// "recorded in JL" figures.
 {
   const summary = summarizeTripFinancials([
     record({ category: "pending_pledge", committedCents: 10_000_00, paidCents: 0, balanceCents: 10_000_00, donorConfirmedAt: 1_700_000_000 }),
@@ -99,7 +100,8 @@ const record = (overrides) => ({
   assert.equal(summary.outstandingBalanceRecordedInJlCents, 0);
   assert.equal(summary.outstandingCommittedBalanceCents, 10_000_00);
   assert.equal(summary.pledgeCount, 1);
-  assert.equal(summary.awaitingJlCount, 1);
+  assert.equal(summary.awaitingJlPledgeCount, 1);
+  assert.equal(summary.awaitingJlDonationCount, 0, "a pledge must never inflate the donation card's own awaiting-JL count");
   assert.equal(summary.pendingOpportunitiesCents, 0, "a confirmed entry is no longer a pending opportunity");
   assert.equal(summary.pendingCount, 0);
 }
@@ -119,7 +121,8 @@ const record = (overrides) => ({
   assert.equal(summary.cashCollectedRecordedInJlCents, 0);
   assert.equal(summary.outstandingCommittedBalanceCents, 0);
   assert.equal(summary.donationCount, 1);
-  assert.equal(summary.awaitingJlCount, 1);
+  assert.equal(summary.awaitingJlDonationCount, 1);
+  assert.equal(summary.awaitingJlPledgeCount, 0, "a gift must never inflate the pledge card's own awaiting-JL count");
 }
 
 // Mixed: an unconfirmed opportunity and a donor-confirmed one of the
@@ -133,7 +136,26 @@ const record = (overrides) => ({
   assert.equal(summary.totalNewCommitmentsCents, 10_000_00, "only the donor-confirmed pledge counts");
   assert.equal(summary.pendingOpportunitiesCents, 50_000_00, "the unconfirmed one stays a pending opportunity, excluded from every confirmed total");
   assert.equal(summary.pendingCount, 1);
-  assert.equal(summary.awaitingJlCount, 1);
+  assert.equal(summary.awaitingJlPledgeCount, 1);
+}
+
+// Summary label fix (2026-10-21, see docs/AI-HANDOFF.md): a donor-
+// confirmed pledge AND a donor-confirmed donation on the same trip must
+// never share one counter -- the "New pledges secured" card's own
+// awaiting-JL count must reflect ONLY the pledge, never be inflated by
+// the donation sitting alongside it (the actual bug this round fixes:
+// a single combined `awaitingJlCount` reported 2 here, which the
+// pledge card would have shown as "2 awaiting JL" even though only 1 of
+// them was a pledge).
+{
+  const summary = summarizeTripFinancials([
+    record({ attributionId: "a", givingActivityId: "g1", category: "pending_pledge", committedCents: 10_000_00, balanceCents: 10_000_00, donorConfirmedAt: 1_700_000_000 }),
+    record({ attributionId: "b", givingActivityId: "g2", category: "pending_gift", committedCents: 5_000_00, donorConfirmedAt: 1_700_000_000 }),
+  ], null);
+  assert.equal(summary.pledgeCount, 1);
+  assert.equal(summary.donationCount, 1);
+  assert.equal(summary.awaitingJlPledgeCount, 1, "the pledge card's own awaiting-JL count must be exactly 1, never 2");
+  assert.equal(summary.awaitingJlDonationCount, 1, "the donation card's own awaiting-JL count must be exactly 1, never 2");
 }
 
 // Collecting on a pledge from BEFORE this trip must never be presented
@@ -273,19 +295,43 @@ assert.match(attributionsRoute, /recorded_but_not_attributed/);
 
 // --- Donor-confirmation correction (2026-10-20, see docs/AI-HANDOFF.md):
 // structural coverage for the new reconciliation/confirmation functions,
-// matching this file's own established source-inspection convention. ---
+// matching this file's own established source-inspection convention.
+// The ambiguous-match guard's actual CORRECTNESS -- including the
+// concurrency fix below -- is no longer proven by source inspection
+// alone: tests/trip-reconciliation-concurrency.test.mjs (2026-10-21)
+// calls this exact, unmodified function against a real, in-memory
+// node:sqlite database built from every real migration, including two
+// genuinely racing requests, and is what actually catches a regression
+// here. What remains below are the cheaper, still-useful structural
+// checks a full behavioral test doesn't replace (that the right
+// identifiers/error reasons exist at all, scoped roughly correctly) --
+// not a substitute for running that file. ---
 
 // Ambiguous-match guard: attributing a REAL record must check for
 // reconcilable candidates and require an explicit choice -- never
 // silently pick one solely by donor and amount.
-assert.match(tripsData, /attributeGivingActivityToTrip[\s\S]{0,2500}listReconcilableTripAttributions\(userId, tripId, prospect\.donorId\)/, "attributing a real record must look up reconcilable pending entries for the SAME donor on the SAME trip");
+assert.match(tripsData, /attributeGivingActivityToTrip[\s\S]{0,3500}listReconcilableTripAttributions\(userId, tripId, prospect\.donorId\)/, "attributing a real record must look up reconcilable pending entries for the SAME donor on the SAME trip");
 assert.match(tripsData, /reconciliation_choice_required/, "an ambiguous match (candidates exist, none explicitly chosen) must be rejected, never auto-resolved");
 assert.doesNotMatch(tripsData, /reconcilesAttributionId \?\? "none"|reconcilesAttributionId \|\| candidates\[0\]/, "never a default/first-candidate auto-pick");
 
-// The insert-and-retire-the-reconciled-entry write must be atomic (one
-// D1 batch) -- never two separate writes that could leave both active
-// (double-counted) or both removed (the commitment silently disappears).
-assert.match(tripsData, /attributeGivingActivityToTrip[\s\S]{0,4500}env\.DB\.batch\(\[[\s\S]{0,600}INSERT INTO trip_financial_attributions[\s\S]{0,600}UPDATE trip_financial_attributions SET removed_at/, "the new attribution and the reconciled (retired) pending entry must be written in the SAME atomic batch");
+// Reconciliation Concurrency Fix (2026-10-21, see docs/AI-HANDOFF.md): the
+// explicit-choice handling must never be gated on `candidates.length > 0`
+// -- that was the actual bug (a stale, explicitly-named target silently
+// fell through to "treat as a separate commitment" once the candidate
+// list had already emptied out). The fix reads the caller's own choice
+// FIRST, independent of how many candidates currently exist.
+assert.match(tripsData, /const requestedReconcileId = options\.reconcilesAttributionId;\s*\n\s*if \(requestedReconcileId === undefined \|\| requestedReconcileId === null\) \{\s*\n\s*if \(candidates\.length > 0\)/, "the explicit-choice branch must be checked independently of candidates.length -- never `if (candidates.length > 0) { ...handle the explicit choice... }`, which silently drops a stale explicit choice once candidates empties out");
+
+// The database-level concurrency guard (drizzle/0051) and the
+// EXISTS-conditional insert that closes the other half of the race --
+// see tests/trip-reconciliation-concurrency.test.mjs for the actual
+// proof this works, including against the real pre-fix code (reverted
+// temporarily during that test's own development) producing a real,
+// reproduced double-count without either of these.
+assert.match(tripsData, /SELECT \?, \?, \?, \?, \?, \?, \?, \?, \?, \? WHERE EXISTS \(SELECT 1 FROM trip_financial_attributions WHERE id = \? AND removed_at IS NULL\)/, "reconciling a pending attribution must use a conditional INSERT, re-checking the target is still active fresh inside the same transaction -- never trust the earlier read");
+assert.match(tripsData, /isReconciledPendingUniqueViolation/, "a UNIQUE-constraint violation on the new concurrency-guard index must be classified and reported as a stale reconciliation target, never the unrelated generic 'already_attributed'");
+const reconciliationMigration = await readFile(new URL("../drizzle/0051_trip_reconciliation_concurrency_guard.sql", import.meta.url), "utf8");
+assert.match(reconciliationMigration, /CREATE UNIQUE INDEX `trip_financial_attributions_active_reconciled_pending_uidx` ON `trip_financial_attributions` \(`reconciled_pending_attribution_id`\) WHERE `removed_at` IS NULL AND `reconciled_pending_attribution_id` IS NOT NULL/, "the real structural guard: at most one ACTIVE attribution can ever claim to reconcile a given pending attribution id");
 
 // A pre-existing pledge collection can only ever be set on an already-
 // real (already-JL) category -- a record that does not exist in JL yet

@@ -520,36 +520,107 @@ export async function attributeGivingActivityToTrip(userId: string, tripId: stri
 
   // Ambiguous-match guard: attributing a REAL record never silently
   // reconciles an existing pending trip entry solely by donor and amount.
+  // The caller's own explicit choice (not "whether candidates happen to
+  // still be non-empty") is what decides this -- an explicitly-named
+  // target that is no longer among the freshly-read candidates (already
+  // reconciled or removed by someone else since the caller last saw the
+  // list) is rejected outright, never silently reinterpreted as "no
+  // candidates, so this must be a separate commitment" (Reconciliation
+  // Concurrency Fix, 2026-10-21, see docs/AI-HANDOFF.md -- a real
+  // defect this round fixes: the previous version gated this ENTIRE
+  // block on `candidates.length > 0`, so a stale explicit
+  // reconcilesAttributionId silently fell through to "new, separate
+  // commitment" the moment candidates had already emptied out).
   let reconciles: ReconcilableAttribution | null = null;
   if (REAL_COMMITMENT_CATEGORIES.has(givingActivity.category)) {
     const candidates = await listReconcilableTripAttributions(userId, tripId, prospect.donorId);
-    if (candidates.length > 0) {
-      if (options.reconcilesAttributionId === undefined || options.reconcilesAttributionId === null) {
-        return { ok: false, reason: "reconciliation_choice_required", candidates };
-      }
-      if (options.reconcilesAttributionId !== "none") {
-        reconciles = candidates.find((candidate) => candidate.attributionId === options.reconcilesAttributionId) ?? null;
-        if (!reconciles) return { ok: false, reason: "reconciliation_target_not_found" };
-      }
+    const requestedReconcileId = options.reconcilesAttributionId;
+    if (requestedReconcileId === undefined || requestedReconcileId === null) {
+      if (candidates.length > 0) return { ok: false, reason: "reconciliation_choice_required", candidates };
+    } else if (requestedReconcileId !== "none") {
+      reconciles = candidates.find((candidate) => candidate.attributionId === requestedReconcileId) ?? null;
+      if (!reconciles) return { ok: false, reason: "reconciliation_target_not_found" };
     }
   }
 
   const id = crypto.randomUUID();
   const reportedCashCollectedCents = commitmentKind === "preexisting_pledge_collection" ? (options.reportedCashCollectedCents ?? 0) : null;
   try {
-    // Inserting the new attribution and retiring the pending entry it
-    // reconciles happen in the SAME atomic D1 batch -- there is never a
-    // moment where both are active (double-counted) or both are removed
-    // (the commitment silently disappears).
-    await env.DB.batch([
-      env.DB.prepare(`INSERT INTO trip_financial_attributions (id, user_id, trip_id, donor_id, giving_activity_id, note, commitment_kind, reported_cash_collected_cents, reconciled_pending_attribution_id, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, userId, tripId, prospect.donorId, givingActivityId, note, commitmentKind, reportedCashCollectedCents, reconciles?.attributionId ?? null, now),
-      ...(reconciles ? [env.DB.prepare(`UPDATE trip_financial_attributions SET removed_at = ?, removed_reason = 'Reconciled with JL-imported record' WHERE id = ? AND removed_at IS NULL`).bind(now, reconciles.attributionId)] : []),
-    ]);
+    // Reconciliation Concurrency Fix (2026-10-21, see docs/AI-HANDOFF.md):
+    // the read above can go stale before this write runs -- two
+    // concurrent requests can both read the SAME pending attribution as
+    // a valid candidate, then each try to reconcile it under a
+    // DIFFERENT new real attribution. An atomic batch alone does not
+    // stop this: it only guarantees THIS request's own insert-and-retire
+    // happen together, never that the thing it read moments earlier is
+    // still true. Two real, database-enforced mechanisms close it,
+    // together, at the write boundary itself, never trusting the
+    // earlier read:
+    //   1. The INSERT is conditional (`WHERE EXISTS`) on the target
+    //      pending attribution STILL being active, re-checked fresh
+    //      inside this SAME transaction -- if it vanished for ANY
+    //      reason (reconciled by a competing request, or separately
+    //      removed) between the read above and now, the INSERT itself
+    //      inserts zero rows, checked below.
+    //   2. `trip_financial_attributions_active_reconciled_pending_uidx`
+    //      (drizzle/0051) is a real UNIQUE index: at most one ACTIVE
+    //      attribution can ever claim to reconcile a given pending id.
+    //      If this request's own EXISTS check raced past a competitor's
+    //      (impossible under D1's serialized writes, but never assumed
+    //      true by construction alone), the second INSERT still fails
+    //      on this constraint, and the whole batch rolls back -- never
+    //      a moment with two active attributions for one commitment.
+    // The retiring UPDATE uses the identical `WHERE ... removed_at IS
+    // NULL` guard, so it can only ever retire the SAME row the INSERT's
+    // own EXISTS check just confirmed was still active -- both read the
+    // same consistent transactional snapshot, so the INSERT succeeding
+    // guarantees the UPDATE affects exactly the one row intended.
+    const statements = reconciles
+      ? [
+          env.DB.prepare(`INSERT INTO trip_financial_attributions (id, user_id, trip_id, donor_id, giving_activity_id, note, commitment_kind, reported_cash_collected_cents, reconciled_pending_attribution_id, created_at)
+              SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM trip_financial_attributions WHERE id = ? AND removed_at IS NULL)`)
+            .bind(id, userId, tripId, prospect.donorId, givingActivityId, note, commitmentKind, reportedCashCollectedCents, reconciles.attributionId, now, reconciles.attributionId),
+          env.DB.prepare(`UPDATE trip_financial_attributions SET removed_at = ?, removed_reason = 'Reconciled with JL-imported record' WHERE id = ? AND removed_at IS NULL`)
+            .bind(now, reconciles.attributionId),
+        ]
+      : [
+          env.DB.prepare(`INSERT INTO trip_financial_attributions (id, user_id, trip_id, donor_id, giving_activity_id, note, commitment_kind, reported_cash_collected_cents, reconciled_pending_attribution_id, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+            .bind(id, userId, tripId, prospect.donorId, givingActivityId, note, commitmentKind, reportedCashCollectedCents, null, now),
+        ];
+    const results = await env.DB.batch(statements) as unknown as Array<{ meta: { changes?: number } }>;
+    if (reconciles && (results[0]?.meta.changes ?? 0) === 0) {
+      // The EXISTS check failed -- the chosen target stopped being a
+      // valid reconciliation target between the read above and this
+      // write (reconciled by a competing request, or separately
+      // removed). Nothing was inserted (the conditional INSERT is a
+      // true no-op in this case) and nothing needs cleaning up; this is
+      // reported exactly like a target that was already stale at read
+      // time, never silently treated as a separate commitment.
+      return { ok: false, reason: "reconciliation_target_not_found" };
+    }
     return { ok: true, attributionId: id };
-  } catch {
+  } catch (error) {
+    // The backstop half of the concurrency fix above: a UNIQUE
+    // constraint violation on reconciled_pending_attribution_id means a
+    // competing request's own insert already claimed this exact
+    // reconciliation target (the two-different-real-records-racing-for-
+    // the-same-pending-entry case) -- reported the same way as any other
+    // reason the target is no longer valid, never the unrelated
+    // "already_attributed" (which means the giving_activity_id itself,
+    // not the reconciliation target, is already claimed).
+    if (reconciles && isReconciledPendingUniqueViolation(error)) return { ok: false, reason: "reconciliation_target_not_found" };
     return { ok: false, reason: "already_attributed" };
   }
+}
+
+const RECONCILED_PENDING_UNIQUE_VIOLATION_PATTERN = /UNIQUE constraint failed.*reconciled_pending_attribution_id/i;
+function isReconciledPendingUniqueViolation(error: unknown): boolean {
+  if (error instanceof Error) {
+    if (RECONCILED_PENDING_UNIQUE_VIOLATION_PATTERN.test(error.message)) return true;
+    if (error.cause instanceof Error && RECONCILED_PENDING_UNIQUE_VIOLATION_PATTERN.test(error.cause.message)) return true;
+  }
+  return false;
 }
 
 // Reconciliation candidates (2026-10-20, see docs/AI-HANDOFF.md): every

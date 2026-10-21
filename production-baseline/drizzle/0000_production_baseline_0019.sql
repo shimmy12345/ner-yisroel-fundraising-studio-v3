@@ -985,6 +985,8 @@ CREATE INDEX `shared_activity_recipient_audits_activity_date_idx` ON `shared_act
 
 CREATE UNIQUE INDEX `trip_financial_attributions_active_giving_activity_uidx` ON `trip_financial_attributions` (`giving_activity_id`) WHERE `removed_at` IS NULL;
 
+CREATE UNIQUE INDEX `trip_financial_attributions_active_reconciled_pending_uidx` ON `trip_financial_attributions` (`reconciled_pending_attribution_id`) WHERE `removed_at` IS NULL AND `reconciled_pending_attribution_id` IS NOT NULL;
+
 CREATE INDEX `trip_financial_attributions_donor_idx` ON `trip_financial_attributions` (`donor_id`);
 
 CREATE INDEX `trip_financial_attributions_trip_idx` ON `trip_financial_attributions` (`trip_id`, `removed_at`);

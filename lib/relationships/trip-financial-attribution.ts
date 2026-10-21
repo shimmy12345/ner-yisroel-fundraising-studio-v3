@@ -130,9 +130,15 @@ export type TripFinancialSummary = {
   pledgeCount: number;
   donationCount: number;
   pendingCount: number;
-  // Confirmed pending_gift/pending_pledge records now counted above but
-  // not yet reflected in a JL import.
-  awaitingJlCount: number;
+  // Confirmed pending_pledge/pending_gift records now counted above but
+  // not yet reflected in a JL import -- split by category (2026-10-21
+  // fix, see docs/AI-HANDOFF.md: a combined `awaitingJlCount` let a
+  // donor-confirmed DONATION inflate the "New pledges secured" card's
+  // own awaiting-JL count, since both categories incremented the same
+  // counter). `awaitingJlPledgeCount` is always <= `pledgeCount`;
+  // `awaitingJlDonationCount` is always <= `donationCount`.
+  awaitingJlPledgeCount: number;
+  awaitingJlDonationCount: number;
 };
 
 export function summarizeTripFinancials(records: AttributedGivingRecord[], goalCents: number | null): TripFinancialSummary {
@@ -147,7 +153,8 @@ export function summarizeTripFinancials(records: AttributedGivingRecord[], goalC
   let pledgeCount = 0;
   let donationCount = 0;
   let pendingCount = 0;
-  let awaitingJlCount = 0;
+  let awaitingJlPledgeCount = 0;
+  let awaitingJlDonationCount = 0;
 
   for (const record of records) {
     const committed = record.committedCents ?? 0;
@@ -174,15 +181,16 @@ export function summarizeTripFinancials(records: AttributedGivingRecord[], goalC
       }
       // Donor-confirmed, awaiting JL import -- counts immediately,
       // before any JL import, per the task's own core requirement.
-      awaitingJlCount += 1;
       if (record.category === "pending_pledge") {
         newPledgesSecuredCents += committed;
         outstandingBalanceAwaitingJlCents += committed; // nothing paid pre-JL by construction (insertPendingPledge always writes paid_cents = 0)
         pledgeCount += 1;
+        awaitingJlPledgeCount += 1;
       } else {
         newDonationsSecuredCents += committed;
         cashCollectedAwaitingJlCents += committed; // a confirmed gift is reported received in full -- it has no partial-payment concept
         donationCount += 1;
+        awaitingJlDonationCount += 1;
       }
       continue;
     }
@@ -234,6 +242,7 @@ export function summarizeTripFinancials(records: AttributedGivingRecord[], goalC
     pledgeCount,
     donationCount,
     pendingCount,
-    awaitingJlCount,
+    awaitingJlPledgeCount,
+    awaitingJlDonationCount,
   };
 }
