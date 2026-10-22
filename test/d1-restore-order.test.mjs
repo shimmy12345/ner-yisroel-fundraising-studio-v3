@@ -399,8 +399,20 @@ test('planD1Restore accepts a real INSERT for pledge_balance_corrections, orderi
 // FUNDRAISING_DATA_TABLES disagree in EITHER direction, which is what
 // should have caught this drift automatically the next time either file
 // was touched.
-test('STAGING_RESET_TABLE_ORDER is exactly FUNDRAISING_DATA_TABLES, in some order (bidirectional -- closes the gap that let run 33515781926 fail silently)', () => {
-  assert.deepEqual([...STAGING_RESET_TABLE_ORDER].sort(), [...FUNDRAISING_DATA_TABLES].sort());
+// calendar_event_link_history/calendar_event_links (migration 0048) are
+// the one known, documented exception: they exist on the real
+// fundraising-os-staging-db (so STAGING_RESET_TABLE_ORDER must cover
+// them) but migration 0048 has never been applied to Production (confirmed
+// 2026-10-22, docs/AI-HANDOFF.md, "Backup Restore Verification"), so they
+// are correctly absent from FUNDRAISING_DATA_TABLES, which is derived from
+// the PRODUCTION baseline manifest. Named here, not inferred, so any OTHER
+// divergence still fails this check exactly as before.
+const STAGING_ONLY_NOT_YET_IN_PRODUCTION = ['calendar_event_link_history', 'calendar_event_links'];
+
+test('STAGING_RESET_TABLE_ORDER is exactly FUNDRAISING_DATA_TABLES, in some order (bidirectional -- closes the gap that let run 33515781926 fail silently), aside from the one named staging-only exception above', () => {
+  const stagingResetWithoutKnownException = [...STAGING_RESET_TABLE_ORDER].filter((table) => !STAGING_ONLY_NOT_YET_IN_PRODUCTION.includes(table));
+  assert.deepEqual(stagingResetWithoutKnownException.sort(), [...FUNDRAISING_DATA_TABLES].sort());
+  for (const table of STAGING_ONLY_NOT_YET_IN_PRODUCTION) assert.ok(STAGING_RESET_TABLE_ORDER.includes(table), `${table} must still be covered by STAGING_RESET_TABLE_ORDER`);
 });
 
 test('parseRestoreStatements splits every statement shape correctly, including multi-line CREATE TABLE', () => {

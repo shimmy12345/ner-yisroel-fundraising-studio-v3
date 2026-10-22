@@ -64,6 +64,13 @@ export const STAGING_RESET_TABLE_ORDER = [
   "gift_acknowledgments",
   "gifts",
   "recommendations",
+  // AI Meeting Notes save-identity ledger (migration 0053, docs/
+  // AI-HANDOFF.md) -- references interactions.id directly, so it is
+  // deleted before interactions itself, further down. No dependents of
+  // its own. Added on feature/independent-cloudflare-sandbox, synced here
+  // (2026-10-22) in the same restore-tracking sync that also added
+  // migration 0052 -- see docs/D1-MIGRATION-SYNC-PROCESS.md.
+  "meeting_note_save_identities",
   "relationship_queue_dismissals",
   // trip_prospects references trip_id (trips.id) and donor_id (donors.id)
   // -- and optionally interactions.id via linked_interaction_id -- so it
@@ -86,17 +93,20 @@ export const STAGING_RESET_TABLE_ORDER = [
   "trip_financial_attributions",
   "trip_prospects",
   "trips",
-  // Google Calendar sync core (2026-10-18, docs/GOOGLE-CALENDAR-
-  // INTEGRATION-DESIGN.md) -- NOT wired into any live route/cron yet, but
-  // the tables exist as of migration 0048, so they must be covered here
-  // now, matching this routine's own "a newly added fundraising table can
-  // never be silently skipped" invariant. calendar_event_link_history
-  // references calendar_event_links.id, so it is deleted first.
-  // calendar_event_links references interactions.id and users.id (users
-  // kept, never reset) -- interactions is deleted further down this
-  // list, so this pair must come before it. Added by migration 0048 on
-  // feature/independent-cloudflare-sandbox, ported here 2026-10-21 -- see
-  // docs/AI-HANDOFF.md.
+  // Google Calendar sync core (migration 0048, docs/GOOGLE-CALENDAR-
+  // INTEGRATION-DESIGN.md) -- the tables exist on the real
+  // fundraising-os-staging-db this routine resets, so they stay covered
+  // here. calendar_event_link_history references calendar_event_links.id,
+  // so it is deleted first; calendar_event_links references
+  // interactions.id and users.id (users kept, never reset) -- interactions
+  // is deleted further down this list, so this pair must come before it.
+  // NOT part of the PRODUCTION baseline (production-baseline/schema-
+  // manifest.json): confirmed 2026-10-22 (docs/AI-HANDOFF.md, "Backup
+  // Restore Verification") that migration 0048 has never been applied to
+  // Production, only to Staging -- see the FUNDRAISING_DATA_TABLES
+  // exception in test/d1-restore-order.test.mjs's bidirectional coverage
+  // check for why that divergence is expected and covered, not a drift
+  // bug.
   "calendar_event_link_history",
   "calendar_event_links",
   // yahrtzeit_changes references yahrtzeit_id (not FK-enforced, so a

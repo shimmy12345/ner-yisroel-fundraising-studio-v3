@@ -9,34 +9,53 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 51 as of 0051_trip_reconciliation_concurrency_guard.sql
-// Manual sync (prepared 2026-10-21; the automated prepare-sync could not
-// handle this one -- see below), see docs/D1-MIGRATION-SYNC-PROCESS.md.
-// production-baseline/schema-manifest.json was replaced verbatim from
-// feature/independent-cloudflare-sandbox's own current, verified
-// manifest -- the same sync mechanism used for every prior round (see
-// docs/AI-HANDOFF.md's "D1 Monthly Restore Verification Repair"
-// entries). PRODUCTION_BASELINE_LEVEL stays "0019": that label
-// identifies the single bootstrap file's origin, not its current
-// contents.
+// 52 as of 0053_meeting_note_save_identity.sql
+// Manual sync (prepared 2026-10-22; the automated prepare-sync tool
+// (scripts/prepare-main-restore-sync-patch.mjs) again refused this one --
+// see below), see docs/D1-MIGRATION-SYNC-PROCESS.md.
+// production-baseline/schema-manifest.json was replaced verbatim from the
+// release candidate branch's own current, verified manifest -- the same
+// sync mechanism used for every prior round (see docs/AI-HANDOFF.md's "D1
+// Monthly Restore Verification Repair" entries). PRODUCTION_BASELINE_LEVEL
+// stays "0019": that label identifies the single bootstrap file's origin,
+// not its current contents.
 //
-// Covers three migrations main was behind on: 0048_google_calendar_sync.sql
-// (two new tables, calendar_event_links/calendar_event_link_history --
-// lib/operations/staging-reset.ts's STAGING_RESET_TABLE_ORDER updated
-// separately, in the same change, to place them correctly: NOT
-// automatable, since placing a new table requires human judgment about
-// its real foreign-key dependencies, per this process's own documented
-// scope), 0050_trip_attribution_confirmation.sql and
-// 0051_trip_reconciliation_concurrency_guard.sql (both pure additions --
-// new columns/an index on the EXISTING trip_financial_attributions
-// table only, no new table -- automatable on their own, but bundled with
-// 0048 in the same drift here since they landed on the canonical branch
-// first). None of these three migrations has been applied to Production;
-// 0050/0051 are applied to fundraising-os-staging-db only, 0048 is not
-// applied anywhere. This sync updates ONLY main's own restore/schema
-// TRACKING to match the canonical branch's real, intended schema -- it
-// does not itself apply any migration anywhere.
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 51;
+// This round closes the gap left by the PRIOR manual sync (52 lines
+// above, in git history): that sync added 0048_google_calendar_sync.sql,
+// 0050_trip_attribution_confirmation.sql, and
+// 0051_trip_reconciliation_concurrency_guard.sql to this file on the
+// assumption that none of the three had reached Production yet. Since
+// then, a real Production deployment (docs/AI-HANDOFF.md, "Production
+// Deployment -- AI Meeting Notes + JL Pending-Reconciliation
+// Confirmation") applied 0050, 0051, 0052_interaction_write_proof_
+// token.sql, and 0053_meeting_note_save_identity.sql to the real
+// fundraising-os-production-db -- confirmed directly against live
+// Production (read-only `sqlite_schema` queries, 2026-10-22,
+// docs/AI-HANDOFF.md's "Backup Restore Verification" entries): Production
+// now has `interactions.write_token` (0052) and the
+// `meeting_note_save_identities` table (0053), matching the release
+// candidate branch exactly. The SAME queries confirmed 0048 (Google
+// Calendar sync -- `interactions.all_day`/`all_day_date`/`end_at`/
+// `location`, `users.calendar_sync_enabled`, and the `calendar_event_
+// links`/`calendar_event_link_history` tables) is NOT present in
+// Production; it exists only on fundraising-os-staging-db and in this
+// migration file. The automated prepare-sync tool refuses this sync
+// because main's OWN manifest (pre-fix) listed 0048 as a source
+// migration the canonical branch does not have -- it only ever handles
+// main being purely BEHIND, never genuinely diverged -- so this round's
+// resolution (keep 0052+0053, drop 0048's columns/tables from the
+// PRODUCTION baseline this file exists to describe) is a human judgment
+// call, prepared here for review rather than auto-applied.
+//
+// drizzle/0048_google_calendar_sync.sql itself is left untouched -- still
+// present in this repository, still tracked in lib/operations/staging-
+// reset.ts's STAGING_RESET_TABLE_ORDER (which describes resetting the
+// real fundraising-os-staging-db, where 0048 IS applied) -- only this
+// file's and production-baseline/schema-manifest.json's claim about what
+// defines the PRODUCTION baseline is corrected to match verified live
+// Production. If 0048 is later deployed to Production, it needs its own
+// sync round, same as any other new migration.
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 52;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is
