@@ -52265,3 +52265,25 @@ All three save requirements -- success commits every intended change together, c
 ### Verdict: READY FOR INDEPENDENT REVIEW
 
 Both retry defects are closed, verified by behavioral tests with direct row-state evidence and live reproduction of both exact failure shapes on Staging, now correctly handled in full. Stop here; do not deploy to Production without independent review.
+
+## Re-Verification: AI Meeting Notes Button and Pending-Pledge/Donation JL Reconciliation (2026-10-22) -- ONE DEFECT FOUND AND FIXED, VERIFIED LIVE
+
+**Full narrative on the working branch's own `docs/AI-HANDOFF.md`. Candidate: this branch @ `757dafc`.**
+
+Both requested features (the AI Meeting Notes button on a trip prospect's card, and pending-pledge/donation JL-import reconciliation) were already fully implemented and Staging-verified in prior rounds. This round re-verified both against the current candidate and found one real, previously undocumented defect in the first; the reconciliation pipeline had none.
+
+**Defect found and fixed**: `MeetingNotesExperience.tsx`'s `summaryText` is pre-loaded from the meeting's existing saved summary (or its scheduling placeholder) in trip context, so `handleSave`'s own non-empty check on it was already true before the fundraiser did anything. Typing notes directly and saving WITHOUT running Organize Notes silently re-saved the stale pre-loaded text instead -- reproduced live (saved, read back the actual row) before fixing. Fix: a new `summaryTouched` flag, set only by Organize Notes or a direct summary edit, never by the initial pre-load; save now prefers a freshly typed transcript over an untouched summary. New structural test `tests/meeting-notes-experience-summary-fallback.test.mjs`. Donor-profile create flow unaffected (already starts empty). Re-verified live after the fix: typed notes save correctly, appear on donor profile, survive completion.
+
+**Pending-pledge/donation reconciliation**: confirmed complete, no code change needed. `pendingGiftMatches`/`pendingPledgeMatches` already handle both categories symmetrically, both review-gated, both guarded against double-claim. Re-verified live: recorded a pending donation ($2,500) and pledge ($10,000) via the existing attributions route, reconciled each against a matching real JL-style record using the exact `CONFIRM_PENDING_GIFT_SQL`/`CONFIRM_PENDING_PLEDGE_SQL` + conditional-audit statements verbatim against real D1 (same technique the "Closing Two Review Gaps" round already established), confirmed live on the trip dashboard: both flipped from "Awaiting JL" to "Confirmed via import" with the real record's own actual amounts/paid status, no double-counting (pending rows keep their `pending_gift`/`pending_pledge` category permanently, excluded from totals regardless of merge status).
+
+**Bashevkin/Cohen**: real Production records, not re-queried or touched this round. Bashevkin's gift already auto-resolved (gift matcher long live in Production). Cohen's pledge did not, because the pledge matcher this request relies on has never been deployed to Production -- resolvable today via the existing manual "Associate an existing donation or pledge" action on Cohen's own trip card (no code/deployment needed for that one donor); deploying this release would prevent the gap recurring for future donors but would not retroactively fix Cohen's already-completed import.
+
+**Verification**: `tsc`/`eslint` clean; full suite 220 pass / 3 pre-existing-pattern flagged (same as prior round). `build:staging-independent` clean. Deployed and re-verified live (version `dc5dd621-c503-4efa-8f97-9affae024e58`). All synthetic records (trip, prospect, interaction, 2 ledger rows, 2 pending + 2 real giving_activities rows, 2 attributions, 2 audit rows) deleted, zero-row sweep confirmed. `STAGING_WRITES_ENABLED` never touched (writes went through the existing `/api/trips/**` carve-out or direct D1 for the reconciliation-SQL proof); confirmed still off (`403` live on a protected mutation). No Production migration, deployment, or data change. Production's live Worker version remains `2ba9e1b4-5309-479b-9639-f8c934c7a516`, unchanged.
+
+### Remaining blocker
+
+None. Both requests are complete, tested, and live-verified. Cohen's own Production pledge remains resolvable today via the existing manual action -- an independent operational choice for the owner, not a blocker for this release.
+
+### Verdict: READY FOR INDEPENDENT REVIEW
+
+Stop here; do not deploy to Production without independent review.
