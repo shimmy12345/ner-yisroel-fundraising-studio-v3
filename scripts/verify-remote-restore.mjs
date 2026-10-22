@@ -24,9 +24,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { FUNDRAISING_DATA_TABLES, PRODUCTION_BASELINE_HASH, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
 import { findInsertedRow } from "../lib/operations/d1-backup-rows.ts";
+import { planD1Restore } from "../lib/operations/d1-restore-order.ts";
 
 const backupArgument = process.argv.slice(2).find((argument) => argument !== "--");
 const backupPath = backupArgument ? path.resolve(backupArgument) : null;
@@ -58,6 +60,76 @@ function wranglerJson(args) {
   throw new Error(`Could not find JSON in wrangler output for: ${args.join(" ")}\n${result.stdout}`);
 }
 
+// Restoring the whole decrypted export through one `wrangler d1 execute
+// --remote --file=...` call (the previous approach) fails against a real,
+// full-size backup -- confirmed 2026-10-22 (docs/AI-HANDOFF.md, "Backup
+// Restore Verification Root-Cause and Fix") via a minimal, isolated
+// reproduction: a table whose own CREATE TABLE statement declares a
+// FOREIGN KEY to a table that is not yet both CREATED and already holding
+// its referenced rows fails with "no such table: main.<target>" the
+// moment D1's remote Import pipeline reaches that table's own INSERT
+// statements -- `PRAGMA defer_foreign_keys=TRUE` (set once, at the top of
+// the file) does not defer this far. `wrangler d1 export`'s own output
+// orders CREATE TABLE and INSERT statements by each table's position in
+// sqlite_master, not by foreign-key dependency, so a real export reliably
+// contains such forward references (e.g. `ask_changes`, exported near the
+// top of the file, has a foreign key to `donors`, exported hundreds of
+// tables later). A second, independent problem (found on `main` in an
+// earlier round, 2026-08-16, same root file) compounds this for any very
+// large single INSERT statement: D1's Import pipeline enforces a hard
+// SQL-TEXT-length ceiling per statement (between 100,000 and 102,400
+// bytes, confirmed empirically), unrelated to total row data size --
+// restoring one oversized row (e.g. a `data_imports.report_json` blob)
+// as inline literal SQL fails with "statement too long: SQLITE_TOOBIG"
+// regardless of chunking.
+//
+// `lib/operations/d1-restore-order.ts`'s `planD1Restore` (already proven
+// correct by its own regression tests, `tests/d1-restore-order.test.mjs`)
+// already exists to solve both: it restores the full schema once (CREATE
+// TABLE order does not matter on its own -- confirmed empirically that a
+// schema-only restore tolerates forward references fine, since no INSERT
+// ever runs to trigger the check), then each table's data as its OWN
+// `wrangler d1 execute --file` call, in dependency order (every table a
+// foreign key could reference is fully populated before that table's own
+// rows are inserted) -- and parameterizes any statement at or above the
+// SQLITE_TOOBIG ceiling for the D1 HTTP query API instead of inlining it.
+// It was already available in this file's own imports' dependency graph
+// but never wired into the actual restore step below -- this was that
+// gap.
+async function restoreBackup(databaseName) {
+  const plan = planD1Restore(backupSql);
+  console.log(`Restore plan: schema + ${plan.steps.length} per-table data step(s) (${plan.skippedTables.length > 0 ? `skipping data for: ${plan.skippedTables.join(", ")}` : "no tables skipped"}).`);
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "fundraising-os-restore-"));
+  try {
+    const execStepFile = (label, sql) => {
+      const file = path.join(tmpDir, `${label.replace(/[^a-zA-Z0-9_.-]/g, "_")}.sql`);
+      fs.writeFileSync(file, sql);
+      console.log(`Restoring ${label}...`);
+      wrangler(["d1", "execute", databaseName, "--remote", "--file", file, "--yes"]);
+    };
+    const execOversizedStatement = async (table, sql, params) => {
+      console.log(`Restoring one oversized statement for ${table} via the D1 HTTP query API (parameterized, not inlined)...`);
+      const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/d1/database/${scratchDatabaseId}/query`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ sql, params }),
+      });
+      const body = await response.json();
+      if (!response.ok || body.success !== true) throw new Error(`D1 query API failed for an oversized ${table} statement: ${JSON.stringify(body.errors ?? body)}`);
+    };
+
+    execStepFile("00-schema", plan.schemaSql);
+    for (const step of plan.steps) {
+      if (step.kind === "file") execStepFile(`data-${step.table}`, step.sql);
+      else await execOversizedStatement(step.table, step.sql, step.params);
+    }
+    if (plan.trailingStatsSql) execStepFile("99-trailing-stats", plan.trailingStatsSql);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 let scratchDatabaseId = null;
 try {
   console.log(`Creating scratch database ${scratchDatabaseName}...`);
@@ -68,7 +140,7 @@ try {
   console.log(`Created ${scratchDatabaseName} (${scratchDatabaseId}).`);
 
   console.log("Restoring backup into scratch database...");
-  wrangler(["d1", "execute", scratchDatabaseName, "--remote", "--file", backupPath, "--yes"]);
+  await restoreBackup(scratchDatabaseName);
 
   console.log("Running PRAGMA integrity_check...");
   const integrity = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", "PRAGMA integrity_check;"]);
