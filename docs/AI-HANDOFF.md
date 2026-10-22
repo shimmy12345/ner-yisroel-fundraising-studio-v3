@@ -52287,3 +52287,59 @@ None. Both requests are complete, tested, and live-verified. Cohen's own Product
 ### Verdict: READY FOR INDEPENDENT REVIEW
 
 Stop here; do not deploy to Production without independent review.
+
+## Release Candidate: Two Save-Key Gaps Closed, JL Reconciliation Verified Through the Real Upload-and-Review Flow (2026-10-22) -- VERIFIED LIVE
+
+**Scope: `release/trip-ai-notes-and-pledge-reconciliation` only, starting from `2b9d931`. New candidate: this branch @ `87633f6`. The working branch was not touched or pushed this round.**
+
+### 1. Two save-key validation gaps closed
+
+Independent review found two ways `saveConcurrentSummaryAndFollowUps`'s `meeting_note_save_identities` ledger check (`drizzle/0053`, introduced in the fourth/fifth follow-up reviews above) could be bypassed:
+
+- **Empty-follow-up-list bypass**: the CAS-missed disambiguation branch short-circuited with `if (followUps.length === 0) return { status: "replayed" }` BEFORE ever consulting the ledger, so a retry that dropped every follow-up from the original payload was reported as a safe replay regardless of what the ledger actually recorded.
+- **Notes/target excluded from the signature**: `payloadSignature` was computed from the follow-up list alone (`(followUps)`), so a save key reused with a different `newSummary`, or even a completely different `interactionId`/`donorId` target, could still match the stored signature as long as the follow-ups happened to match.
+
+**Fix** (`lib/meeting-notes/concurrent-save.ts`): `payloadSignature` now serializes `{interactionId, donorId, summary: newSummary, followUps}`, so target and notes are both load-bearing. The CAS-missed branch's early return on an empty follow-up list was removed entirely -- the ledger's stored `payload_signature` is now always read back and compared, never trusted from the retrying request's own body, and never skipped based on list length. A genuine replay (identical target, notes, and follow-ups) still returns `replayed`; anything else returns `conflict`/`followup_mismatch`. Completed follow-ups are preserved exactly as before (the existing two-statement-per-follow-up INSERT-if-new + verify-or-throw UPDATE mechanism and the single-batch `write_token` transaction are unchanged).
+
+**Tests** (`tests/meeting-notes-concurrent-save.test.mjs`): test 2b's expected outcome was corrected from `replayed` to `conflict`/`followup_mismatch` (a coincidental match with no ledger record must never be assumed a replay). Three new cases:
+- **Test 10**: two follow-ups saved, one completed, retried with an EMPTY follow-up list via both the CAS-hit and CAS-missed paths -- both must return `conflict`/`followup_mismatch`, with both original follow-up rows and the completed status surviving untouched.
+- **Test 11**: same save identity and follow-up, but a DIFFERENT `newSummary` with a CAS baseline that would otherwise succeed -- must be `conflict`/`followup_mismatch`.
+- **Test 12**: same save identity, notes, and follow-up, but a DIFFERENT target (`interactionId`/`donorId`) -- must be `conflict`/`followup_mismatch`, with each target's own summary left correctly unaffected by the other.
+
+Full suite: 220 pass / 3 flagged, same as every prior round (`ai-workers-ai-client.test.mjs` and `meeting-notes-workers-ai-provider.test.mjs` are sweep-timeout-flaky but pass individually; `production-baseline.test.mjs` is genuinely pre-existing, confirmed via `git stash` on an earlier round -- disclosed per this round's own instruction, not expanded into a fix). `tsc --noEmit` and `eslint` clean on the changed files. `build:staging-independent` clean.
+
+### 2. JL reconciliation verified through the real `/api/import/preview` -> `/api/import` HTTP flow (not direct D1)
+
+Unlike the prior round's reconciliation check (which proved the `CONFIRM_PENDING_*_SQL` statements directly against D1), this round drove the actual upload-and-review routes end to end, per this round's explicit instruction that direct database reconciliation is insufficient.
+
+Opened the Staging write window (`STAGING_WRITES_ENABLED=true`, rebuilt, deployed -- version `9bd3aced-4e1f-4807-ab86-dcd3d9481815`) because recording the pending entries goes through `/api/trips/**`'s own attribution route, which still needs the override for its non-trip-scoped side effects; the import preview/commit routes themselves were exercised live without any write-guard carve-out of their own.
+
+- Created a synthetic JL-sourced donor (`external_source='JL Solutions'`, `external_id='ZZTEST99'`) and a synthetic trip/prospect.
+- Recorded one pending trip donation ($1,500) and one pending trip pledge ($5,000) against that donor via the trip's existing attribution route.
+- Built a correctly-shaped synthetic JL donation export file with one `completed_gift` row and one `partially_paid_pledge` row matching `ZZTEST99`'s donor identity.
+- `POST /api/import/preview` with that file correctly surfaced both rows as matches against the two pending entries (not as new/unmatched activity).
+- `POST /api/import` with both match decisions accepted returned `pendingGiftsConfirmed: 1, pendingPledgesConfirmed: 1`.
+- The trip dashboard UI showed both entries as **"Confirmed via import"**, retaining their trip association, with the correct real amounts ($1,500 gift, $5,000 pledge) -- not the pending placeholders.
+- Confirmed no double-counting directly in D1: the two original pending rows permanently keep `category='pending_gift'`/`'pending_pledge'` (excluded from totals regardless of merge status); only the two new real `completed_gift`/`partially_paid_pledge` rows count toward the trip's totals.
+
+All synthetic records created for this check (donor, trip, trip_prospect, interaction, 4 giving_activities rows, trip_financial_attributions, 4 giving_activity_management_audits rows, giving_activity_import_changes, meeting_note_save_identities, import_preview_sessions + its chunk row, data_imports) were deleted afterward in FK-safe order; a zero-row sweep confirmed full cleanup.
+
+### 3. AI Meeting Notes button rechecked
+
+Opened the saved-notes view on an existing trip prospect -- loads the previously saved structured content correctly. Typed a new raw transcript, ran "Organize Notes," confirmed the AI correctly organized it into structured fields, saved, and reopened the button to confirm the full saved structured content persisted correctly. No regression from the `757dafc` fix (which specifically concerned skipping Organize Notes) -- this check explicitly exercised the AI tool itself, which the prior round's targeted fix-verification had not needed to.
+
+### Write-guard restored and reconfirmed live
+
+`wrangler.staging.jsonc`'s `STAGING_WRITES_ENABLED` line was commented back out (`git diff --stat wrangler.staging.jsonc` empty against the committed file), rebuilt, and redeployed (**live version `dd053f8d-e0e2-4e9f-baeb-8a4f1e3e7a39`**, rollback target `dc5dd621-c503-4efa-8f97-9affae024e58`). Reconfirmed live through an authenticated browser session rather than inferred from config alone: `PATCH /api/interactions/:id` returns `403` with the standard read-only message; `PATCH /api/trips/:id` correctly passes the guard and reaches real route logic (`404 Trip not found` for a nonexistent id, not a guard block), confirming the `/api/trips/**` carve-out is still intact.
+
+No Production migration, deployment, or data change occurred this round. Production's live Worker version remains `2ba9e1b4-5309-479b-9639-f8c934c7a516`, unchanged.
+
+### Remaining blocker
+
+None for this release's own scope. The 3 pre-existing baseline check failures noted above are disclosed, not fixed, per this round's own instruction not to expand scope.
+
+### Verdict: READY FOR INDEPENDENT REVIEW
+
+Both previously reported save-key validation gaps are closed and covered by focused tests with direct row-state evidence. The JL reconciliation behavior is now verified through the real upload-and-review HTTP flow end to end, not direct database reconciliation, with no double-counting. The AI Meeting Notes button's open/organize/save path is confirmed working. The write guard is restored and proven live. **Next step per the requester's own framing: Production deployment, with a fresh backup and rollback target -- not part of this round.**
+
+Stop here; do not deploy to Production without independent review.
