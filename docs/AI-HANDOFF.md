@@ -52547,3 +52547,37 @@ No restore, import, or write of any kind was run against Production this round -
 - **Not yet verified**: the actual encrypted nightly R2 backup has not been decrypted or restored by anyone or anything in this session. This is the one remaining gap, and it requires either a manual run of the real workflow or GitHub Actions API access this session does not have -- stated above, precisely, with no secret extracted and no substitute used in its place.
 - **Separately prepared, not merged**: `main`'s restore/baseline tracking fix for migrations 0052/0053 (and the newly-discovered 0048-never-reached-Production correction), on branch `fix/main-restore-tracking-0052-0053`, self-verified against `main`'s own test suite and drift-check tool, awaiting review.
 - Production itself: untouched throughout, confirmed again just above.
+
+## Backup Restore Verification, Final Round -- Real Encrypted Backup Tested, Tracking Fix Merged, Fresh Backup/Re-Verify Pending Manual Dispatch (2026-10-22)
+
+### Real workflow run: GitHub Actions run `39782341193`
+
+You ran the real `d1-restore-verify-monthly-production.yml` workflow against `main` as it stood before the merge below. Result, as reported: the encrypted October 21 backup was downloaded, decrypted, and restored into a throwaway scratch database; `PRAGMA quick_check` and `PRAGMA foreign_key_check` both passed; schema comparison then failed; scratch-database cleanup succeeded. This is exactly the outcome predicted in this document's prior entry: the restore itself works end-to-end against the real encrypted backup (the thing this whole investigation needed to prove), and the only failure was the known, already-diagnosed tracking gap (`main`'s pre-merge manifest was missing migrations 0052/0053 and still carried migration 0048's never-applied-to-Production columns/tables) -- not a defect in the backup, the decryption, or the restore mechanism.
+
+This is the first real confirmation in this investigation that the actual encrypted nightly backup (not a diagnostic export) restores correctly, with real quick_check/FK integrity, via the real secrets-enabled pipeline.
+
+### Merged the reviewed tracking correction into main
+
+Per explicit authorization this round, fast-forward merged `fix/main-restore-tracking-0052-0053` (commit `f8e1581`, prepared and self-verified in the prior round) into `main`: `origin/main` moved `2d22c49` -> `f8e1581`, a clean fast-forward (no merge commit, main had not moved since the branch was cut). This changes only `main`'s own restore/schema-tracking files (`lib/data-health/production-baseline.ts`, `lib/operations/staging-reset.ts`, `production-baseline/schema-manifest.json`, `test/d1-restore-order.test.mjs`) -- no Production application code, no migration, no schema change, no donor data. Nothing was deployed; `wrangler deploy` was not run.
+
+Re-verified at the merged commit:
+- `main`'s own `test/d1-restore-order.test.mjs`, `test/d1-backup-identity-metadata.test.mjs`, `test/d1-backup-status-publish.test.mjs` (50 tests): all pass, including the bidirectional `STAGING_RESET_TABLE_ORDER`/`FUNDRAISING_DATA_TABLES` check with its one named exception (the migration-0048 calendar tables, preserved for Staging's own cleanup, correctly absent from the Production baseline).
+- `node scripts/check-main-restore-sync.mjs` against the real `origin/main`: still reports the same one, expected divergence (`calendar_event_link_history`/`calendar_event_links` present in main's restore order, absent from the canonical schema). This is unchanged from before the merge and is not a new problem -- it is the documented, intentional exception (Staging has migration 0048, Production does not), which this generic drift tool has no way to distinguish from a real gap. It does not affect the actual monthly restore-verification workflow's correctness (`planD1Restore` silently skips any listed table with no matching rows in the actual backup being restored).
+
+### Fresh backup + re-verification: blocked on the same GitHub Actions access gap
+
+Per this round's instruction, the next step is: dispatch the real Production nightly-backup workflow to produce a fresh encrypted backup that reflects the now-correct schema baseline, then dispatch the restore-verification workflow again against it, expecting a full pass (restore + quick_check + foreign_key_check + schema comparison this time, since `main` now has the matching manifest).
+
+This session still has no `gh`/`hub` CLI and no `GITHUB_TOKEN` (checked again this round) -- the exact same gap as before, not re-investigated beyond confirming it's still true. Per the standing instruction not to extract or repurpose any stored credential for this, these two runs need to be started manually:
+
+1. **Fresh backup**: `https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/workflows/d1-backup-nightly-production.yml` -> "Run workflow" -> branch `main` -> "Run workflow" (green button). This is the real nightly Production backup pipeline (export, encrypt, upload to R2) -- running it now, after the merge above, produces a backup whose schema matches the just-merged baseline.
+2. **Re-run verification**, only after step 1 finishes: `https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/workflows/d1-restore-verify-monthly-production.yml` -> "Run workflow" -> branch `main` -> "Run workflow". This should now restore the fresh backup from step 1 and pass all four checks (quick_check, foreign_key_check, schema comparison, per-table row counts), with no known reason left to fail.
+
+Once both finish, share the run URLs (or just confirm completion) and this will be reflected here: the restored schema/FK/count results against the fresh backup's own snapshot, and confirmation of scratch-database cleanup, exactly as run `39782341193` already demonstrated for quick_check/foreign_key_check/cleanup.
+
+### Verdict, updated
+
+- Real encrypted backup restore: **proven** (run `39782341193` -- quick_check pass, foreign_key_check pass, cleanup pass). This is the first real-backup confirmation in this investigation, superseding the diagnostic-export-only verification from the prior round.
+- Schema-tracking gap that caused that run's one failure: **fixed and merged** to `main` (`f8e1581`), re-verified against `main`'s own test suite and the drift-check tool, with the one remaining divergence being the intentional, documented Staging-only exception.
+- Fully clean, post-fix, real-backup run: **pending** -- needs a fresh Production backup (post-merge schema) and one more verification run, both requiring a manual dispatch per the two links above; this session has no other way to start them.
+- No Production application code, schema, or donor data was changed at any point this round. No scope beyond this backup-verification task was touched.
