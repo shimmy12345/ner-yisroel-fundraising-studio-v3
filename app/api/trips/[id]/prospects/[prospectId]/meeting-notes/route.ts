@@ -128,7 +128,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const followUpInputs = followUps.map((followUp) => ({ id: `meeting-note-${idempotencyKey}-${followUp.index}`, donorId, index: followUp.index, description: followUp.description, dueAtEpoch: followUp.dueAtEpoch }));
 
   try {
-    const outcome = await saveConcurrentSummaryAndFollowUps(env.DB, interactionId, donorId, userId, summary, casBaseline, now, followUpInputs);
+    const outcome = await saveConcurrentSummaryAndFollowUps(env.DB, interactionId, donorId, userId, summary, casBaseline, now, followUpInputs, idempotencyKey);
     if (outcome.status === "applied") {
       logger.info("trip_meeting_notes_saved", { donorId, userId, tripId, prospectId, followUpsCreated: outcome.followUpsCreated });
       return Response.json({ interactionId, saved: true, followUpsCreated: outcome.followUpsCreated }, { status: 200 });
