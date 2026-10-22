@@ -511,7 +511,7 @@ CREATE TABLE `interactions` (
   `summary` text NOT NULL,
   `source` text DEFAULT 'manual' NOT NULL,
   `created_at` integer NOT NULL,
-  `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, `shared_activity_id` text REFERENCES `shared_activities`(`id`), `role` text CHECK (`role` IN ('participant','recipient')),
+  `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, `shared_activity_id` text REFERENCES `shared_activities`(`id`), `role` text CHECK (`role` IN ('participant','recipient')), `write_token` text,
   FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
@@ -573,6 +573,15 @@ CREATE TABLE `legacy_test_cleanup_audits` (
   `archived_reminders` integer NOT NULL,
   `created_at` integer NOT NULL,
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
+CREATE TABLE `meeting_note_save_identities` (
+  `save_id` text PRIMARY KEY NOT NULL,
+  `interaction_id` text NOT NULL,
+  `payload_signature` text NOT NULL,
+  `created_at` integer NOT NULL,
+  `updated_at` integer NOT NULL,
+  FOREIGN KEY (`interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action
 );
 
 CREATE TABLE `onboarding_preferences` (
@@ -961,6 +970,8 @@ CREATE INDEX `jl_payment_assignment_audits_user_date_idx` ON `jl_payment_assignm
 
 CREATE INDEX `jl_payment_assignments_pledge_idx` ON `jl_payment_assignments` (`pledge_activity_id`);
 
+CREATE INDEX `meeting_note_save_identities_interaction_idx` ON `meeting_note_save_identities` (`interaction_id`);
+
 CREATE UNIQUE INDEX `pledge_balance_corrections_active_uidx` ON `pledge_balance_corrections` (`pledge_activity_id`) WHERE `reversed_at` IS NULL;
 
 CREATE INDEX `pledge_balance_corrections_pledge_idx` ON `pledge_balance_corrections` (`pledge_activity_id`,`created_at`);
@@ -1016,5 +1027,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','05b00e6b657bb59be7f1a4b6ee56deca3ca50d2ec01259f000d29cd9777ec94e',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','756347c4b555d36c34a71d0ec0caaf5e3c4bfcd3241ef6fe27dd4673114516fc',1785944072);
 PRAGMA optimize;

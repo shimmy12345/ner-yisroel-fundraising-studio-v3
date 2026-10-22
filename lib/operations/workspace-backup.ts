@@ -112,6 +112,15 @@ export const WORKSPACE_BACKUP_EXCLUDED_TABLES = [
   // recovery scenario loses only which trip a record was attributed to,
   // never the underlying financial record itself.
   "trip_financial_attributions",
+  // AI Meeting Notes save-identity ledger (migration 0053, docs/
+  // AI-HANDOFF.md) -- same deliberate deferral as trips/trip_prospects
+  // above: a new table added after this route was written, holding only
+  // a save-retry identity record (a signature derived from an
+  // interaction's own summary/follow-ups), never a donor, giving, or
+  // pledge record itself. Covered today only by the nightly whole-
+  // database R2 backup, and by the restore-order coverage already
+  // enforced in lib/operations/staging-reset.ts.
+  "meeting_note_save_identities",
   // Donor Research (Stage A) findings -- same reason as above.
   "donor_research_runs",
   "donor_research_pending_evidence",

@@ -447,26 +447,53 @@ test("baseline picks up the schema-adding 0051 reconciliation concurrency guard 
   // docs/AI-HANDOFF.md "Trip-Confirmation Production Release Candidate").
   // 0051_trip_reconciliation_concurrency_guard.sql adds one new partial
   // UNIQUE index to the EXISTING trip_financial_attributions table --
-  // trip_financial_attributions_active_reconciled_pending_uidx -- the
-  // current LATEST migration in this isolated release, so the schema
-  // hash must change again.
-  //
-  // This is the authoritative, exact-count check for this release's own
-  // manifest: 0000-0047 (48, the exact set already live in Production)
-  // plus 0050 and 0051 (2 more) = 50. Deliberately excludes 0048
-  // (automatic Google Calendar sync) and 0049 (drizzle/pending-review/
-  // 0049_fix_calendar_schema_text_staging_repair.sql, a separate,
-  // not-yet-reviewed draft) -- neither is ever picked up by this
-  // manifest at all.
-  //
-  // NOT applied to Production under this instruction -- applied to
-  // fundraising-os-staging-db only (2026-10-21, see docs/AI-HANDOFF.md).
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0051_trip_reconciliation_concurrency_guard.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 50, "exactly 50 migrations in this isolated release: 0000-0047 (48, already in Production) + 0050 + 0051 -- 0048/0049 deliberately excluded");
-  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
-  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  // trip_financial_attributions_active_reconciled_pending_uidx. No
+  // longer the latest migration (0053 is, see the test below) -- the
+  // exact final migration count is asserted once, in 0053's own test,
+  // rather than duplicated (and risking drift) here.
+  assert.ok(manifest.sourceMigrations.includes("0051_trip_reconciliation_concurrency_guard.sql"));
   const guardIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "trip_financial_attributions_active_reconciled_pending_uidx");
   assert.ok(guardIndex, "the reconciliation-concurrency-guard index must be captured in the baseline");
   assert.match(guardIndex.sql, /UNIQUE/i);
   assert.match(guardIndex.sql, /removed_at.*IS NULL/is);
+});
+
+test("baseline picks up the schema-adding 0052 interaction write-proof-token migration", () => {
+  // Release candidate (2026-10-22, see docs/AI-HANDOFF.md). 0052 adds one
+  // new, nullable column to the EXISTING interactions table -- write_token
+  // -- used by the one-batch D1 transaction fix in
+  // lib/meeting-notes/concurrent-save.ts. No longer the latest migration
+  // (0053 is, see the test below).
+  assert.ok(manifest.sourceMigrations.includes("0052_interaction_write_proof_token.sql"));
+  const interactionsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "interactions");
+  assert.ok(interactionsTable, "interactions must still be a real table in the baseline topology");
+  assert.match(interactionsTable.sql, /write_token/);
+});
+
+test("baseline picks up the schema-adding 0053 meeting note save identity migration", () => {
+  // Release candidate (2026-10-22, see docs/AI-HANDOFF.md). 0053 adds a
+  // new table -- meeting_note_save_identities -- the save-key ledger
+  // closing the two previously reported save-key validation gaps. The
+  // current LATEST migration in this release, so the schema hash must
+  // change again.
+  //
+  // This is the authoritative, exact-count check for this release's own
+  // manifest: 0000-0047 (48, the exact set already live in Production)
+  // plus 0050, 0051, 0052, and 0053 (4 more) = 52. Deliberately excludes
+  // 0048 (automatic Google Calendar sync) and 0049 (drizzle/pending-review/
+  // 0049_fix_calendar_schema_text_staging_repair.sql, a separate,
+  // not-yet-reviewed draft) -- neither is ever picked up by this
+  // manifest at all.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0053_meeting_note_save_identity.sql");
+  assert.ok(!manifest.sourceMigrations.includes("0048_google_calendar_sync.sql"), "this release excludes automatic Calendar sync entirely");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 52, "exactly 52 migrations in this release: 0000-0047 (48, already in Production) + 0050 + 0051 + 0052 + 0053 -- 0048/0049 deliberately excluded");
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  const saveIdentitiesTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "meeting_note_save_identities");
+  assert.ok(saveIdentitiesTable, "meeting_note_save_identities must be captured in the baseline topology");
+  assert.match(saveIdentitiesTable.sql, /payload_signature/);
+  const saveIdentitiesIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "meeting_note_save_identities_interaction_idx");
+  assert.ok(saveIdentitiesIndex, "the save-identity interaction index must be captured in the baseline");
+  const calendarTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "calendar_event_links");
+  assert.equal(calendarTable, undefined, "calendar_event_links must not appear in this isolated release's baseline topology");
 });

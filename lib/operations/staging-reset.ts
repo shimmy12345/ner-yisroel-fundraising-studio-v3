@@ -64,6 +64,11 @@ export const STAGING_RESET_TABLE_ORDER = [
   "gift_acknowledgments",
   "gifts",
   "recommendations",
+  // AI Meeting Notes save-identity ledger (migration 0053, docs/
+  // AI-HANDOFF.md) -- references interactions.id directly, so it is
+  // deleted before interactions itself, further down. No dependents of
+  // its own.
+  "meeting_note_save_identities",
   "relationship_queue_dismissals",
   // Trip-Based Meeting Planning (2026-10-15, docs/AI-HANDOFF.md).
   // trip_prospects references trip_id (trips.id) and donor_id (donors.id)
