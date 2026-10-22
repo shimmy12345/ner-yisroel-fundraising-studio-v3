@@ -52,7 +52,12 @@ assert.match(verifyScript, /d1", "create"/);
 assert.doesNotMatch(verifyScript, /fundraising-os-staging-db/, "the scratch database must never reuse the real database's name");
 assert.match(verifyScript, /\bfinally\b/, "cleanup (deleting the scratch database) must run even when a check throws");
 assert.match(verifyScript, /d1", "delete".*scratchDatabaseName/s);
-assert.match(verifyScript, /PRAGMA integrity_check/);
+// D1's remote query API rejects PRAGMA integrity_check outright with
+// "not authorized: SQLITE_AUTH" -- confirmed 2026-10-22 (docs/AI-HANDOFF.md,
+// "Backup Restore Verification Root-Cause and Fix") and already proven on
+// main; PRAGMA quick_check is SQLite's documented near-equivalent and is
+// the one that actually runs via this API.
+assert.match(verifyScript, /PRAGMA quick_check/);
 assert.match(verifyScript, /PRAGMA foreign_key_check/);
 assert.match(verifyScript, /compareSchemaObjects/, "restore verification must validate schema, not just that SQL executed without error");
 assert.match(verifyScript, /FUNDRAISING_DATA_TABLES/, "restore verification must check every fundraising table is present and queryable, not a hand-picked subset");
@@ -155,7 +160,7 @@ assert.match(nightly, /--metadata "dated-backup-key=\$\{DATED_KEY\}"/, "the nigh
 assert.match(nightly, /cron: "0 8 \* \* \*"/, "the nightly backup schedule must be unchanged");
 assert.match(monthly, /cron: "0 9 1 \* \*"/, "the monthly restore-verification schedule must be unchanged");
 assert.match(monthly, /gpg --batch --yes --decrypt/, "decryption itself is unchanged");
-assert.match(monthly, /PRAGMA integrity_check/);
+assert.match(monthly, /PRAGMA quick_check/);
 assert.match(monthly, /PRAGMA foreign_key_check/);
 assert.doesNotMatch(monthly, /R2_BACKUP_WRITE_ACCESS_KEY_ID/, "the identity-lookup addition must not grant the monthly job any new write access to the backup bucket");
 // The real download/decrypt/restore/verify steps still fail the job on any

@@ -64,8 +64,11 @@
 #   2. Decrypts and decompresses it.
 #   3. Restores it into a brand-new, throwaway remote D1 database (never
 #      the real fundraising-os-staging-db).
-#   4. Runs PRAGMA integrity_check, PRAGMA foreign_key_check, a full schema
-#      comparison against the verified production baseline, and a
+#   4. Runs PRAGMA quick_check and PRAGMA foreign_key_check (D1's remote
+#      query API rejects integrity_check outright with "not authorized:
+#      SQLITE_AUTH"; quick_check is SQLite's documented near-equivalent
+#      and is not blocked -- see scripts/verify-remote-restore.mjs), a full
+#      schema comparison against the verified production baseline, and a
 #      per-table row-count sanity check across every fundraising table.
 #   5. Deletes the scratch database, always -- including when a check
 #      fails, via scripts/verify-remote-restore.mjs's try/finally.
