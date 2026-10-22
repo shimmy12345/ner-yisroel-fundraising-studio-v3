@@ -49,20 +49,40 @@ import { type FollowUpContent } from "./idempotency.ts";
 // per client-generated `saveId` (the same idempotencyKey every follow-up
 // id this save produces is already namespaced under, so it is globally
 // unique by construction), recording a deterministic serialization of
-// the complete follow-up payload this identity was first used with. The
-// CAS'd primary write and this ledger row commit in the SAME batch as
-// the follow-up writes: `INSERT ... ON CONFLICT(save_id) DO UPDATE`
-// whose UPDATE branch sets `payload_signature` to itself when the newly
+// the complete payload this identity was first used with. The CAS'd
+// primary write and this ledger row commit in the SAME batch as the
+// follow-up writes: `INSERT ... ON CONFLICT(save_id) DO UPDATE` whose
+// UPDATE branch sets `payload_signature` to itself when the newly
 // computed signature matches what's on record (a true no-op) or to NULL
 // when it does not. Because that column is NOT NULL, a mismatch is a
 // genuine constraint violation -- which rolls the WHOLE batch back,
 // including the primary summary UPDATE, exactly like a genuine PRIMARY
-// KEY collision already does for other cases. A follow-up added,
-// removed, reordered, or recolored under the same save identity changes
-// the signature and is rejected in full. The same ledger row -- read
-// directly, not re-derived from the submitted request -- is also what
-// the CAS-missed replay/conflict disambiguation below compares against,
-// closing the exact gap `followUpsAlreadyMatch` left open.
+// KEY collision already does for other cases. The same ledger row --
+// read directly, not re-derived from the submitted request -- is also
+// what the CAS-missed replay/conflict disambiguation below compares
+// against, closing the exact gap `followUpsAlreadyMatch` left open.
+//
+// INDEPENDENT REVIEW (2026-10-22) found two gaps in the above and this
+// round closes both:
+// 1. The signature previously covered only `followUps` -- a reused save
+// identity submitted with a DIFFERENT `newSummary` (the notes
+// themselves) or a different `interactionId`/`donorId` (the save's own
+// target) but the SAME follow-ups would pass the ledger check
+// undetected, since nothing about the notes or the target was ever part
+// of what was being compared. The signature now also covers
+// `interactionId`, `donorId`, and `newSummary` -- a save key reused with
+// different notes or a different target is rejected exactly like a
+// reused key with different follow-ups always was.
+// 2. The CAS-missed disambiguation branch special-cased `followUps.
+// length === 0` to return a bare "replayed" WITHOUT ever consulting the
+// ledger -- so retrying a save identity with every one of its original
+// follow-ups now REMOVED (an empty list) bypassed the payload comparison
+// entirely: as long as the summary coincidentally matched, it was
+// reported as a safe replay regardless of what the identity's own
+// recorded payload actually was. The ledger comparison now runs
+// unconditionally, with no follow-up-count carve-out; a genuinely new
+// save identity (nothing in the ledger yet) is `undefined === signature`,
+// correctly a conflict rather than an assumed replay.
 export type ConcurrentFollowUpInput = FollowUpContent & { id: string; donorId: string };
 
 export type ConcurrentSaveOutcome =
@@ -77,11 +97,12 @@ export type ConcurrentSaveOutcome =
   // `summary_stale`: the row's summary no longer matches `casBaseline`
   // and does not already hold the requested new value either.
   // `followup_mismatch`: the summary side resolved (applied or a
-  // coincidental match), but this save identity's complete follow-up
-  // payload does not match what is already on record for it (any
-  // addition, removal, reorder, or content change) -- the donor-profile
-  // route's own established "changed-payload retry is rejected outright"
-  // rule, applied here too.
+  // coincidental match), but this save identity's complete payload --
+  // target, notes, AND follow-ups -- does not match what is already on
+  // record for it (any addition, removal, reorder, or content change to
+  // any of the three, including removing every follow-up down to none,
+  // or no record at all) -- the donor-profile route's own established
+  // "changed-payload retry is rejected outright" rule, applied here too.
   | { status: "conflict"; reason: "summary_stale" | "followup_mismatch" };
 
 const MISMATCH_VIOLATION_PATTERN = /UNIQUE constraint failed|NOT NULL constraint failed/i;
@@ -93,17 +114,25 @@ function isMismatchViolation(error: unknown): boolean {
   return false;
 }
 
-// Deterministic, order-sensitive serialization of the COMPLETE follow-up
-// payload a save identity is being asked to apply -- the same shape
-// every call for this identity must reproduce exactly for the ledger
-// comparison (drizzle/0053) to treat it as a replay. Order-sensitive by
-// design, matching idempotency.ts's own followUpListsMatch convention: a
-// follow-up's index is part of its identity (embedded in its own
-// recommendation row id), so the same two follow-ups submitted in a
-// different order is correctly a different payload, not a cosmetic
-// reordering.
-function payloadSignature(followUps: ConcurrentFollowUpInput[]): string {
-  return JSON.stringify(followUps.map((item) => ({ id: item.id, description: item.description, dueAtEpoch: item.dueAtEpoch })));
+// Deterministic serialization of the COMPLETE payload a save identity is
+// being asked to apply -- notes, target, AND follow-ups -- the same
+// shape every call for this identity must reproduce exactly for the
+// ledger comparison (drizzle/0053) to treat it as a replay. Follow-up
+// order is significant, matching idempotency.ts's own followUpListsMatch
+// convention: a follow-up's index is part of its identity (embedded in
+// its own recommendation row id), so the same two follow-ups submitted
+// in a different order is correctly a different payload, not a cosmetic
+// reordering. `interactionId`/`donorId` are included so a save key
+// reused against a different target is rejected exactly like one reused
+// with different notes or follow-ups -- never inferred from matching
+// follow-up content alone.
+function payloadSignature(interactionId: string, donorId: string, newSummary: string, followUps: ConcurrentFollowUpInput[]): string {
+  return JSON.stringify({
+    interactionId,
+    donorId,
+    summary: newSummary,
+    followUps: followUps.map((item) => ({ id: item.id, description: item.description, dueAtEpoch: item.dueAtEpoch })),
+  });
 }
 
 export async function saveConcurrentSummaryAndFollowUps(
@@ -118,7 +147,7 @@ export async function saveConcurrentSummaryAndFollowUps(
   saveId: string,
 ): Promise<ConcurrentSaveOutcome> {
   const writeToken = crypto.randomUUID();
-  const signature = payloadSignature(followUps);
+  const signature = payloadSignature(interactionId, donorId, newSummary, followUps);
 
   const statements: D1PreparedStatement[] = [
     db.prepare("UPDATE interactions SET summary = ?, write_token = ?, updated_at = ? WHERE id = ? AND donor_id = ? AND user_id = ? AND summary = ?")
@@ -194,10 +223,16 @@ export async function saveConcurrentSummaryAndFollowUps(
   // network-level retry) from a genuine conflict, by reading back the
   // ACTUAL summary and the save-identity ledger's own recorded payload
   // -- never by inferring from text equality alone, and never by
-  // querying only the ids THIS retry happens to mention.
+  // querying only the ids THIS retry happens to mention. The ledger
+  // check always runs, with no empty-follow-up-list carve-out: a save
+  // identity that originally had follow-ups, retried with all of them
+  // now removed, must still be compared against its own recorded
+  // payload, not waved through just because this request has nothing
+  // left to list. A save identity the ledger has no record of at all
+  // (never successfully applied) is `undefined === signature` below --
+  // correctly a conflict, never an assumed replay.
   const current = await db.prepare("SELECT summary FROM interactions WHERE id = ? AND donor_id = ? AND user_id = ?").bind(interactionId, donorId, userId).first<{ summary: string }>();
   if (current?.summary !== newSummary) return { status: "conflict", reason: "summary_stale" };
-  if (followUps.length === 0) return { status: "replayed" };
   const ledgerEntry = await db.prepare("SELECT payload_signature FROM meeting_note_save_identities WHERE save_id = ?").bind(saveId).first<{ payload_signature: string }>();
   return ledgerEntry?.payload_signature === signature ? { status: "replayed" } : { status: "conflict", reason: "followup_mismatch" };
 }

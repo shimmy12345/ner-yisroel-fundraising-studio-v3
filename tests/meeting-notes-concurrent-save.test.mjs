@@ -94,14 +94,18 @@ async function run() {
   }
 
   // --- 2b. The same stale-with-coincidental-match shape, but with NO
-  // follow-ups requested at all -- this is unambiguous (nothing to
-  // verify beyond the text itself) and may be treated as a safe no-op
-  // replay. ---
+  // follow-ups requested at all, and a save identity that has never
+  // gone through this function before. The ledger has no record of
+  // this identity ever having actually applied, so a text match here
+  // is still only a coincidence, never proof -- correctly a conflict,
+  // not an assumed replay (INDEPENDENT REVIEW, 2026-10-22: the previous
+  // version special-cased an empty follow-up list to skip the ledger
+  // check entirely and return "replayed" here). ---
   {
     const db = freshDb("Text that happens to match.");
     const staleBaseline = "A different, stale baseline.";
     const outcome = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "Text that happens to match.", staleBaseline, NOW, [], "save-2b");
-    assert.deepEqual(outcome, { status: "replayed" });
+    assert.deepEqual(outcome, { status: "conflict", reason: "followup_mismatch" }, "a coincidental match under a save identity with no ledger record at all must never be treated as a replay, even with zero follow-ups requested");
     assert.equal(summary(db), "Text that happens to match.");
     assert.deepEqual(recommendationRows(db), []);
   }
@@ -267,6 +271,86 @@ async function run() {
       { id: "fu-9-0", action: "Send site visit invite", due_at: null },
       { id: "fu-9-1", action: "Follow up on pledge", due_at: null },
     ], "both original follow-ups must still survive untouched");
+  }
+
+  // --- 10. INDEPENDENT REVIEW GAP 1, reproduced precisely: save two
+  // follow-ups under one save identity, then retry the SAME identity
+  // with the follow-up list now EMPTY -- every one of the original
+  // follow-ups removed, not just one of several. Must conflict and
+  // change nothing, exactly like dropping only one of several (test 9)
+  // -- an empty list is not a special case that bypasses the payload
+  // comparison. Exercised through both the trivially-re-matching-CAS
+  // path and the CAS-missed disambiguation path. A follow-up completed
+  // through some other path (as in test 8) must also survive, since
+  // this retry never legitimately applies. ---
+  {
+    const db = freshDb("Before.");
+    const first = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "After.", "Before.", NOW, [
+      followUp("fu-10-0", 0, "Send site visit invite"),
+      followUp("fu-10-1", 1, "Follow up on pledge"),
+    ], "save-10");
+    assert.deepEqual(first, { status: "applied", followUpsCreated: 2 });
+    db.raw().prepare("UPDATE recommendations SET status = 'completed', updated_at = ? WHERE id = 'fu-10-0'").run(NOW + 1);
+    const beforeRetry = recommendationRows(db);
+    const beforeStatus = db.raw().prepare("SELECT status FROM recommendations WHERE id = 'fu-10-0'").get().status;
+
+    const allRemoved = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "After.", "After.", NOW + 5, [], "save-10");
+    assert.deepEqual(allRemoved, { status: "conflict", reason: "followup_mismatch" }, "retrying a save identity with every one of its original follow-ups now removed must conflict, never bypass the payload comparison just because the list is empty");
+    assert.deepEqual(recommendationRows(db), beforeRetry, "both original follow-ups must survive the rejected retry completely untouched");
+    assert.equal(db.raw().prepare("SELECT status FROM recommendations WHERE id = 'fu-10-0'").get().status, beforeStatus, "a follow-up already completed through some other path must stay completed");
+
+    const staleAllRemoved = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "After.", "Before.", NOW + 10, [], "save-10");
+    assert.deepEqual(staleAllRemoved, { status: "conflict", reason: "followup_mismatch" }, "the same all-removed payload mismatch must be caught via the CAS-missed disambiguation path too");
+    assert.deepEqual(recommendationRows(db), beforeRetry, "both original follow-ups must still survive untouched");
+  }
+
+  // --- 11. INDEPENDENT REVIEW GAP 2a, reproduced precisely: reuse a
+  // save identity with the SAME follow-up but DIFFERENT notes
+  // (`newSummary`). The previous signature covered only the follow-up
+  // list, so an identical follow-up set let a changed-notes reuse pass
+  // the ledger check completely undetected. Exercised through the
+  // trivially-re-matching-CAS path (the summary change is itself what
+  // the CAS is matching against, so this reaches the ledger upsert
+  // inside the successful batch, not the disambiguation branch). ---
+  {
+    const db = freshDb("Before.");
+    const first = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "Original notes.", "Before.", NOW, [followUp("fu-11-0", 0, "Task")], "save-11");
+    assert.deepEqual(first, { status: "applied", followUpsCreated: 1 });
+
+    // Same save identity, same follow-up, but DIFFERENT notes -- and a
+    // correct, current baseline, so the primary CAS itself would
+    // genuinely succeed were it not for the ledger catching the reuse.
+    const differentNotes = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "Completely different notes reusing the same key.", "Original notes.", NOW + 5, [followUp("fu-11-0", 0, "Task")], "save-11");
+    assert.deepEqual(differentNotes, { status: "conflict", reason: "followup_mismatch" }, "reusing a save identity with different notes must be rejected even when the follow-ups are unchanged");
+    assert.equal(summary(db), "Original notes.", "the summary must remain exactly what the first, legitimate save under this identity wrote");
+    assert.deepEqual(recommendationRows(db), [{ id: "fu-11-0", action: "Task", due_at: null }], "the follow-up must survive the rejected reuse untouched");
+  }
+
+  // --- 12. INDEPENDENT REVIEW GAP 2b, reproduced precisely: reuse a
+  // save identity against a DIFFERENT target interaction/donor, with
+  // the SAME notes and follow-up. The previous signature covered only
+  // the follow-up list, so an identical follow-up set let a reused key
+  // aimed at an entirely different meeting pass the ledger check
+  // undetected. ---
+  {
+    const db = freshDb("Before.");
+    const otherDonorId = "d2";
+    const otherInteractionId = "interaction-2";
+    db.prepare("INSERT INTO donors (id, owner_user_id, data_source, display_name, created_at, updated_at) VALUES (?, ?, 'live', 'Other Donor', ?, ?)").bind(otherDonorId, USER_ID, NOW, NOW).run();
+    db.prepare("INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, summary, source, created_at, updated_at) VALUES (?, ?, ?, 'meeting', ?, ?, 'trip:scheduled', ?, ?)")
+      .bind(otherInteractionId, otherDonorId, USER_ID, NOW, "Before.", NOW, NOW).run();
+
+    const first = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "Shared notes text.", "Before.", NOW, [followUp("fu-12-0", 0, "Task")], "save-12");
+    assert.deepEqual(first, { status: "applied", followUpsCreated: 1 });
+
+    // Same save identity, same notes text, same follow-up -- but aimed
+    // at a COMPLETELY DIFFERENT interaction/donor.
+    const differentTarget = await saveConcurrentSummaryAndFollowUps(db, otherInteractionId, otherDonorId, USER_ID, "Shared notes text.", "Before.", NOW + 5, [followUp("fu-12-0", 0, "Task")], "save-12");
+    assert.deepEqual(differentTarget, { status: "conflict", reason: "followup_mismatch" }, "reusing a save identity against a different target must be rejected even when the notes and follow-ups are identical");
+    assert.equal(summary(db), "Shared notes text.", "the first target's own interaction must be untouched by the rejected reuse");
+    const otherRow = db.raw().prepare("SELECT summary FROM interactions WHERE id = ?").get(otherInteractionId);
+    assert.equal(otherRow.summary, "Before.", "the second, rejected target's own interaction must never have been changed");
+    assert.deepEqual(recommendationRows(db), [{ id: "fu-12-0", action: "Task", due_at: null }], "no duplicate or second follow-up row was created for the rejected target");
   }
 
   console.log("meeting-notes-concurrent-save.test.mjs: all assertions passed");
