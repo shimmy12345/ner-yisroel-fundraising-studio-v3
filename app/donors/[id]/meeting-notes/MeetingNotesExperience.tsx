@@ -50,6 +50,20 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo, tripConte
   const [interactionType, setInteractionType] = useState<InteractionKind>("meeting");
 
   const [summaryText, setSummaryText] = useState(initialSummaryText ?? "");
+  // True only once the fundraiser has actually organized a transcript or
+  // directly edited the summary field themselves -- never true just
+  // because `initialSummaryText` pre-seeded this field on mount (trip
+  // context always pre-loads the meeting's existing saved summary, or
+  // its scheduling placeholder if nothing real has been saved yet; see
+  // this component's own header comment). Confirmed live on Staging
+  // (2026-10-22): without this flag, typing fresh notes directly into
+  // "Meeting notes" and saving WITHOUT organizing or touching the
+  // summary field silently re-saved the stale pre-loaded text instead
+  // of what was just typed -- `handleSave`'s own
+  // `summaryText.trim().length > 0` check was always true before the
+  // fundraiser did anything at all, since the pre-loaded text is itself
+  // non-empty.
+  const [summaryTouched, setSummaryTouched] = useState(false);
   const [donorInterestsText, setDonorInterestsText] = useState("");
   const [fundraisingOpportunitiesText, setFundraisingOpportunitiesText] = useState("");
   const [confirmedCommitmentsText, setConfirmedCommitmentsText] = useState("");
@@ -113,6 +127,7 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo, tripConte
       }
 
       const data = payload.data;
+      setSummaryTouched(true);
       setSummaryText(data.summary);
       setDonorInterestsText(data.donorInterests.join("\n"));
       setFundraisingOpportunitiesText(data.fundraisingOpportunities.join("\n"));
@@ -167,7 +182,16 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo, tripConte
     setUnresolvedFollowUpIds([]);
     setSaveStatus("saving");
     setSaveError("");
-    const finalSummary = summaryText.trim().length > 0
+    // Prefer a freshly typed/dictated transcript over a summary field
+    // the fundraiser never actually touched -- `summaryText` starts
+    // pre-loaded with the meeting's existing saved summary (or its
+    // scheduling placeholder) whenever `initialSummaryText` is set, so
+    // its own non-empty check alone can't tell "the fundraiser wrote or
+    // organized this" apart from "this is just what was already there
+    // before they typed anything." Only `summaryTouched` (set by
+    // Organize Notes or by editing this field directly) proves the
+    // former.
+    const finalSummary = summaryTouched && summaryText.trim().length > 0
       ? buildMeetingNotesSummaryText({
         summary: summaryText,
         donorInterests: donorInterestsText,
@@ -176,7 +200,9 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo, tripConte
         possibleCommitments: possibleCommitmentsText,
         relationshipContext: relationshipContextText,
       })
-      : transcript.trim();
+      : transcript.trim().length > 0
+        ? transcript.trim()
+        : summaryText.trim();
 
     // Trip-scoped notes save to their own route (under /api/trips/**,
     // never /api/meeting-notes) -- see that route's own doc comment for
@@ -255,7 +281,7 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo, tripConte
       <p className="meeting-notes-hint">Everything below is yours to edit. Nothing is saved to {donorName}&apos;s history until you click Save.</p>
 
       <label className="capture-field-label" htmlFor="meeting-notes-summary">Meeting summary</label>
-      <textarea id="meeting-notes-summary" value={summaryText} onChange={(event) => setSummaryText(event.target.value)} rows={4} placeholder="A concise account of the conversation" />
+      <textarea id="meeting-notes-summary" value={summaryText} onChange={(event) => { setSummaryTouched(true); setSummaryText(event.target.value); }} rows={4} placeholder="A concise account of the conversation" />
 
       <label className="capture-field-label" htmlFor="meeting-notes-interests">Donor interests</label>
       <textarea id="meeting-notes-interests" value={donorInterestsText} onChange={(event) => setDonorInterestsText(event.target.value)} rows={3} placeholder="Programs, initiatives, or giving interests mentioned (one per line)" />
