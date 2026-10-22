@@ -130,6 +130,12 @@ export const interactions = sqliteTable("interactions", {
   // meaningless without sharedActivityId and is never set alone.
   sharedActivityId: text("shared_activity_id").references(() => sharedActivities.id),
   role: text("role", { enum: ["participant", "recipient"] }),
+  // Set only as part of a CAS'd write to this row (drizzle/0052) -- a
+  // fresh, request-unique value a dependent write in the SAME D1 batch
+  // checks via EXISTS to prove THIS request's own write applied, never
+  // inferred from matching content. See drizzle/0052's own header and
+  // lib/meeting-notes/concurrent-save.ts.
+  writeToken: text("write_token"),
   ...timestamps,
 }, (table) => [
   index("interactions_donor_date_idx").on(table.donorId, table.occurredAt),

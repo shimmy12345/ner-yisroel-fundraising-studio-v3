@@ -209,7 +209,7 @@ async function run() {
   assert.match(editRoute, /applyInteractionEdit\(/, "the route must call the shared, concurrency-safe edit function rather than inlining archival/acceptance");
   assert.match(
     interactionEditModule,
-    /if \(input\.donorId !== input\.existingDonorId\) \{\s*const archival = await planFactArchival\(\{ donorId: input\.existingDonorId, userId: input\.userId, sourceInteractionId: input\.interactionId, now: input\.now \}\);/,
+    /if \(input\.donorId !== input\.existingDonorId\) \{\s*const archival = await planFactArchival\(\{ donorId: input\.existingDonorId, userId: input\.userId, sourceInteractionId: input\.interactionId, now: input\.now \}, gate\);/,
     "applyInteractionEdit must archive the OLD donor's fact(s) on reassignment, scoped to existingDonorId (the donor being left), never the new donorId",
   );
   assert.match(

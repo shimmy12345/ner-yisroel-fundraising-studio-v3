@@ -169,6 +169,32 @@ async function run() {
     assert.deepEqual(recommendationRows(db), [{ id: "fu-6-0", action: "Original task", due_at: null }], "the original follow-up content must survive the rejected collision untouched");
   }
 
+  // --- 7. THE EXACT 62dec37 FAILURE, reproduced precisely: the CAS
+  // genuinely succeeds (a real, non-coincidental text change from a
+  // correct, current baseline), but one of the requested follow-up ids
+  // already holds DIFFERENT content. The whole request must roll back --
+  // not just the follow-up: the summary UPDATE that legitimately matched
+  // its own CAS must be undone too, and `updated_at` must revert with it.
+  // Checking only the returned status is not enough; this asserts actual
+  // row state before vs. after. ---
+  {
+    const db = freshDb("Before the real edit.");
+    db.raw().prepare(`INSERT INTO recommendations (id, donor_id, user_id, action, reason, score, status, due_at, created_at, updated_at)
+        VALUES ('fu-7-0', ?, ?, 'Pre-existing, different task', 'seed', 90, 'open', NULL, ?, ?)`).run(DONOR_ID, USER_ID, NOW - 100, NOW - 100);
+    const beforeRow = db.raw().prepare("SELECT summary, updated_at FROM interactions WHERE id = ?").get(INTERACTION_ID);
+    const beforeFollowUp = db.raw().prepare("SELECT action FROM recommendations WHERE id = 'fu-7-0'").get();
+
+    const outcome = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "A genuinely new, real rewrite of the notes.", "Before the real edit.", NOW + 500, [
+      followUp("fu-7-0", 0, "A conflicting rewrite of the pre-existing task"),
+    ]);
+    assert.deepEqual(outcome, { status: "conflict", reason: "followup_mismatch" }, "a genuine CAS success must still be rejected in full when a companion follow-up collides");
+
+    const afterRow = db.raw().prepare("SELECT summary, updated_at FROM interactions WHERE id = ?").get(INTERACTION_ID);
+    assert.deepEqual(afterRow, beforeRow, "the summary UPDATE -- even though its own CAS matched -- must be rolled back along with the rejected follow-up, including updated_at");
+    const afterFollowUp = db.raw().prepare("SELECT action FROM recommendations WHERE id = 'fu-7-0'").get();
+    assert.deepEqual(afterFollowUp, beforeFollowUp, "the pre-existing follow-up's content must survive completely untouched");
+  }
+
   console.log("meeting-notes-concurrent-save.test.mjs: all assertions passed");
 }
 
