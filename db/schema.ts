@@ -511,6 +511,21 @@ export const recommendations = sqliteTable("recommendations", {
   ...timestamps,
 }, (table) => [index("recommendations_user_status_idx").on(table.userId, table.status)]);
 
+// AI Meeting Notes save-identity/payload comparison (drizzle/0053, fifth
+// follow-up review). `saveId` is the client's own idempotencyKey --
+// already globally unique by construction (every follow-up id a save
+// produces is namespaced under it). `payloadSignature` is a
+// deterministic serialization of the complete, exact follow-up payload
+// this save identity was first used with; a later call under the same
+// identity whose own payload serializes differently is rejected in full
+// -- see lib/meeting-notes/concurrent-save.ts's own header comment.
+export const meetingNoteSaveIdentities = sqliteTable("meeting_note_save_identities", {
+  saveId: text("save_id").primaryKey(),
+  interactionId: text("interaction_id").notNull().references(() => interactions.id),
+  payloadSignature: text("payload_signature").notNull(),
+  ...timestamps,
+}, (table) => [index("meeting_note_save_identities_interaction_idx").on(table.interactionId)]);
+
 // Historical context imported from Monday.com (or any future source) that
 // is genuinely uncertain -- a fundraiser could not confirm it as a real
 // contact, but the raw text is still worth keeping visible. Deliberately

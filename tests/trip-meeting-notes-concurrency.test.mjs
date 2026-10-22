@@ -163,7 +163,7 @@ async function run() {
 
     // The stale editor now submits its own save, still believing
     // `staleBaseline` is current.
-    const outcome = await saveConcurrentSummaryAndFollowUps(db, interactionId, DONOR_ID, USER_ID, "AI-organized: stale rewrite, ignorant of the completion note.", staleBaseline, NOW, []);
+    const outcome = await saveConcurrentSummaryAndFollowUps(db, interactionId, DONOR_ID, USER_ID, "AI-organized: stale rewrite, ignorant of the completion note.", staleBaseline, NOW, [], "stale-save-2");
     assert.deepEqual(outcome, { status: "conflict", reason: "summary_stale" }, "a stale save (its baseline no longer matches the current row, and the row does not already hold the requested new value either) must be rejected");
     const afterStaleSave = interactionSummary(db, interactionId);
     assert.equal(afterStaleSave, afterCompletion, "the completion note must survive completely untouched by the rejected stale save");
