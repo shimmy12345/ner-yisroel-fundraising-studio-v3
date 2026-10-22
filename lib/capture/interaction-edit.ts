@@ -1,38 +1,46 @@
-import { planFactAcceptance, planFactArchival } from "../relationships/fact-accept.ts";
+import { planFactAcceptance, planFactArchival, type WriteGate } from "../relationships/fact-accept.ts";
 import type { InteractionKind } from "./interaction.ts";
 
-// Generic interaction edit concurrency safety (2026-10-21, third
-// follow-up review -- "app/api/interactions/[id]/route.ts checks
-// expectedSummary before writing, but its UPDATE remains unconditional").
-// The PREVIOUS version of that route compared `expectedSummary` against
-// the row it had just read, then -- if they matched -- went on to build
-// and run an UNCONDITIONAL `UPDATE interactions SET ...` together with
-// the reminder and relationship-fact statements in one batch. A
-// concurrent trip completion or notes save landing in the gap between
-// that read/check and this write would be silently overwritten; the
-// check only ever protected against a STALE client, never a write that
-// raced this exact request.
+// Generic interaction edit concurrency safety (2026-10-21, fourth
+// follow-up review -- closing a real atomicity bug the third follow-up
+// review's own fix introduced).
 //
-// This module makes the interactions UPDATE itself the compare-and-swap
-// (`WHERE ... AND summary = ?`, bound to the exact baseline the check
-// above already validated) and makes every companion write
+// The interactions UPDATE is the compare-and-swap (`WHERE ... AND
+// summary = ?`, bound to the exact baseline the caller already
+// validated). CONFIRMED FAILURE IN 62dec37 this fixes: the previous
+// version ran that UPDATE alone via `.run()`, read back its own
+// rowcount, and -- only once proven -- ran every companion write
 // (reminders, donor-reassignment fact archival, relationship-fact
-// acceptance) STRICTLY CONDITIONAL on that UPDATE's own authoritative
-// rowcount, read back after it runs -- never inferred from matching
-// end-state content (the SAME class of bug this round also closed in
-// lib/meeting-notes/concurrent-save.ts). A rejected edit (CAS miss)
-// never builds or runs a single companion statement: nothing about
-// reminders, relationship facts, or donor assignment changes.
+// acceptance) as a SEPARATE `db.batch()` call. Two separate commits are
+// not one transaction: in the (rare, but real) case a companion
+// statement itself failed, the edit's own primary UPDATE had already
+// committed -- exactly the same shape of bug confirmed in
+// lib/meeting-notes/concurrent-save.ts's saveConcurrentSummaryAndFollowUps.
 //
-// This necessarily splits what was one D1 batch into two sequential
-// writes (the CAS'd UPDATE, then -- only once it is PROVEN to have
-// applied -- the companion batch). The trade-off is deliberate and
-// narrow: the companion writes are no longer crash-atomic with the main
-// edit in the success path (an exceedingly rare, no-realistic-trigger
-// edge case -- none of reminders/archival/acceptance's own statements
-// have ever been observed to throw under normal operation), in exchange
-// for a real, concrete, previously-reproducible guarantee: a rejected
-// edit is now provably, unconditionally a no-op.
+// The fix (drizzle/0052) keeps the primary UPDATE and every companion
+// write in ONE `db.batch()` call -- one real transaction. Because D1
+// batch statements still run unconditionally in sequence, each companion
+// is gated on `write_token` -- a fresh, request-unique value
+// (crypto.randomUUID(), generated once per call) the primary UPDATE
+// stamps as part of its own CAS'd SET clause. Every companion statement
+// proves the primary applied by checking
+// `EXISTS (... interactions WHERE id = ? AND write_token = ?)` bound to
+// that exact value -- never by matching end-state content (two
+// unrelated writes can coincidentally produce the same text) and never
+// by chaining the SQL `changes()` function past an intervening
+// statement. Because the token is fresh and random per call, no
+// concurrent request can ever make that EXISTS check read true except
+// as a direct consequence of THIS call's own CAS having matched, in the
+// same transaction. A rejected edit (CAS miss) leaves every companion
+// gate false: nothing about reminders, relationship facts, or donor
+// assignment changes, and the row that failed its CAS is itself
+// completely untouched (its own SET clause never applied).
+//
+// lib/relationships/fact-accept.ts's planFactArchival/planFactAcceptance
+// take this same gate as an optional parameter and AND it into every
+// statement they build (donor_relationship_facts INSERT/UPDATE, their
+// audit rows, and the donors relationship-snapshot CAS) -- every other
+// caller of those functions passes no gate and is unaffected.
 export type InteractionEditInput = {
   interactionId: string;
   userId: string;
@@ -64,30 +72,25 @@ export type InteractionEditOutcome =
   | { status: "conflict"; currentSummary: string | null };
 
 export async function applyInteractionEdit(db: D1Database, input: InteractionEditInput): Promise<InteractionEditOutcome> {
-  const updateResult = await db.prepare("UPDATE interactions SET donor_id = ?, type = ?, occurred_at = ?, summary = ?, source = ?, updated_at = ? WHERE id = ? AND user_id = ? AND summary = ?")
-    .bind(input.donorId, input.type, input.occurredAtEpoch, input.summary, input.source, input.now, input.interactionId, input.userId, input.casBaseline)
-    .run() as unknown as { meta?: { changes?: number } };
+  const writeToken = crypto.randomUUID();
+  const gate: WriteGate = { sql: "EXISTS (SELECT 1 FROM interactions WHERE id = ? AND write_token = ?)", params: [input.interactionId, writeToken] };
 
-  if ((updateResult.meta?.changes ?? 0) === 0) {
-    const current = await db.prepare("SELECT summary FROM interactions WHERE id = ? AND user_id = ?").bind(input.interactionId, input.userId).first<{ summary: string }>();
-    return { status: "conflict", currentSummary: current?.summary ?? null };
-  }
+  const statements: D1PreparedStatement[] = [
+    db.prepare("UPDATE interactions SET donor_id = ?, type = ?, occurred_at = ?, summary = ?, source = ?, write_token = ?, updated_at = ? WHERE id = ? AND user_id = ? AND summary = ?")
+      .bind(input.donorId, input.type, input.occurredAtEpoch, input.summary, input.source, writeToken, input.now, input.interactionId, input.userId, input.casBaseline),
+  ];
 
-  // The edit itself is now proven to have applied -- every companion
-  // write below is safe to attempt unconditionally; there is nothing
-  // left to guard against.
-  const statements: D1PreparedStatement[] = [];
   if (input.reminderDueAtEpoch !== null) {
     statements.push(db.prepare(`INSERT INTO recommendations (id, donor_id, user_id, action, reason, score, status, due_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 94, 'open', ?, ?, ?)
+      SELECT ?, ?, ?, ?, ?, 94, 'open', ?, ?, ? WHERE ${gate.sql}
       ON CONFLICT(id) DO UPDATE SET donor_id = excluded.donor_id, action = excluded.action, reason = excluded.reason, status = 'open', due_at = excluded.due_at, updated_at = excluded.updated_at`)
-      .bind(input.reminderId, input.donorId, input.userId, input.reminderNextAction, "Reminder requested for this activity.", input.reminderDueAtEpoch, input.now, input.now));
+      .bind(input.reminderId, input.donorId, input.userId, input.reminderNextAction, "Reminder requested for this activity.", input.reminderDueAtEpoch, input.now, input.now, ...gate.params));
   } else {
-    statements.push(db.prepare("DELETE FROM recommendations WHERE id = ? AND user_id = ?").bind(input.reminderId, input.userId));
+    statements.push(db.prepare(`DELETE FROM recommendations WHERE id = ? AND user_id = ? AND ${gate.sql}`).bind(input.reminderId, input.userId, ...gate.params));
   }
 
   if (input.donorId !== input.existingDonorId) {
-    const archival = await planFactArchival({ donorId: input.existingDonorId, userId: input.userId, sourceInteractionId: input.interactionId, now: input.now });
+    const archival = await planFactArchival({ donorId: input.existingDonorId, userId: input.userId, sourceInteractionId: input.interactionId, now: input.now }, gate);
     statements.push(...archival.statements);
   }
 
@@ -96,15 +99,20 @@ export async function applyInteractionEdit(db: D1Database, input: InteractionEdi
     const plan = await planFactAcceptance({
       donorId: input.donorId, userId: input.userId, sourceInteractionId: input.interactionId, sourceInteractionOccurredAt: input.occurredAtEpoch,
       noteText: input.note, kind: input.type, subject: input.subject, now: input.now,
-    });
+    }, gate);
     if (plan.relationshipStatementIndex >= 0) relationshipStatementIndex = statements.length + plan.relationshipStatementIndex;
     statements.push(...plan.statements);
   }
 
-  let relationshipUpdated = false;
-  if (statements.length > 0) {
-    const results = await db.batch(statements) as unknown as Array<{ meta?: { changes?: number } }>;
-    if (relationshipStatementIndex >= 0) relationshipUpdated = (results[relationshipStatementIndex]?.meta?.changes ?? 0) > 0;
+  const results = await db.batch(statements) as unknown as Array<{ meta?: { changes?: number } }>;
+
+  if ((results[0]?.meta?.changes ?? 0) === 0) {
+    // The CAS missed -- every companion statement's gate also read
+    // false in this SAME transaction, so nothing else changed either.
+    const current = await db.prepare("SELECT summary FROM interactions WHERE id = ? AND user_id = ?").bind(input.interactionId, input.userId).first<{ summary: string }>();
+    return { status: "conflict", currentSummary: current?.summary ?? null };
   }
+
+  const relationshipUpdated = relationshipStatementIndex >= 0 && (results[relationshipStatementIndex]?.meta?.changes ?? 0) > 0;
   return { status: "applied", relationshipUpdated };
 }

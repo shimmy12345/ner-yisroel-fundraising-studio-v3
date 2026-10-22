@@ -22,6 +22,27 @@ import {
 // has no opinion on that gate, matching every existing route's own
 // established convention of deciding acceptance before ever reaching the
 // write.
+//
+// Optional `WriteGate` (2026-10-21, fourth follow-up review): a caller
+// that must keep its OWN primary write and these companion statements in
+// ONE D1 batch (lib/capture/interaction-edit.ts -- a concurrent/stale
+// edit must leave every fact/audit/donor-snapshot row below completely
+// untouched, not just skip appending these statements at the JS level
+// after a SEPARATE, already-committed primary write) passes a `gate`: a
+// SQL boolean expression plus its own bound params, ANDed into every
+// statement below's WHERE clause (and, for the two plain VALUES INSERTs,
+// turning them into an equivalent SELECT-based INSERT so a WHERE clause
+// has something to attach to). Every existing caller that does not pass
+// one (Capture, Outcome Option A, Monday import confirm_contact) is
+// completely unaffected -- the gate clause is appended only when present,
+// so their own SQL text and behavior are byte-for-byte unchanged.
+export type WriteGate = { sql: string; params: readonly unknown[] };
+function gateClause(gate: WriteGate | undefined): string {
+  return gate ? ` AND ${gate.sql}` : "";
+}
+function gateParams(gate: WriteGate | undefined): readonly unknown[] {
+  return gate ? gate.params : [];
+}
 
 type CurrentFactRow = {
   id: string;
@@ -101,7 +122,7 @@ export async function loadFactAcceptanceDonorState(donorId: string, userId: stri
 // and the donors CAS UPDATE, in that fixed order (matching every
 // existing test's own literal-shape assertions). Never executes
 // anything itself.
-export function materializeFactAcceptanceIntent(intent: FactAcceptanceIntent | null, donorId: string, userId: string, now: number): FactAcceptancePlan {
+export function materializeFactAcceptanceIntent(intent: FactAcceptanceIntent | null, donorId: string, userId: string, now: number, gate?: WriteGate): FactAcceptancePlan {
   if (!intent) return EMPTY_PLAN;
   const { newFact, supersedeFactId } = intent;
 
@@ -109,13 +130,13 @@ export function materializeFactAcceptanceIntent(intent: FactAcceptanceIntent | n
   statements.push(
     env.DB.prepare(`INSERT INTO donor_relationship_facts
       (id, donor_id, user_id, category, lifecycle, fact_text, source_interaction_id, source_interaction_occurred_at, status, supersedes_fact_id, fingerprint, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'current', ?, ?, ?, ?)`)
-      .bind(newFact.id, donorId, userId, newFact.category, newFact.lifecycle, newFact.factText, newFact.sourceInteractionId, newFact.sourceInteractionOccurredAt, supersedeFactId, newFact.fingerprint, now, now),
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'current', ?, ?, ?, ? ${gate ? `WHERE ${gate.sql}` : ""}`)
+      .bind(newFact.id, donorId, userId, newFact.category, newFact.lifecycle, newFact.factText, newFact.sourceInteractionId, newFact.sourceInteractionOccurredAt, supersedeFactId, newFact.fingerprint, now, now, ...gateParams(gate)),
   );
   statements.push(
     env.DB.prepare(`INSERT INTO donor_relationship_fact_changes (id, fact_id, user_id, donor_id, action, changed_fields, before_json, after_json, created_at)
-      VALUES (?, ?, ?, ?, 'created', '[]', NULL, ?, ?)`)
-      .bind(crypto.randomUUID(), newFact.id, userId, donorId, JSON.stringify({ factText: newFact.factText, category: newFact.category, lifecycle: newFact.lifecycle, sourceInteractionId: newFact.sourceInteractionId }), now),
+      SELECT ?, ?, ?, ?, 'created', '[]', NULL, ?, ? ${gate ? `WHERE ${gate.sql}` : ""}`)
+      .bind(crypto.randomUUID(), newFact.id, userId, donorId, JSON.stringify({ factText: newFact.factText, category: newFact.category, lifecycle: newFact.lifecycle, sourceInteractionId: newFact.sourceInteractionId }), now, ...gateParams(gate)),
   );
 
   if (supersedeFactId) {
@@ -126,21 +147,21 @@ export function materializeFactAcceptanceIntent(intent: FactAcceptanceIntent | n
     // row CAS is still the request's real concurrency guard, matching
     // every existing route's established pattern.
     statements.push(
-      env.DB.prepare("UPDATE donor_relationship_facts SET status = 'superseded', updated_at = ? WHERE id = ? AND status = 'current'")
-        .bind(now, supersedeFactId),
+      env.DB.prepare(`UPDATE donor_relationship_facts SET status = 'superseded', updated_at = ? WHERE id = ? AND status = 'current'${gateClause(gate)}`)
+        .bind(now, supersedeFactId, ...gateParams(gate)),
     );
     statements.push(
       env.DB.prepare(`INSERT INTO donor_relationship_fact_changes (id, fact_id, user_id, donor_id, action, changed_fields, before_json, after_json, created_at)
-        VALUES (?, ?, ?, ?, 'superseded', ?, ?, ?, ?)`)
-        .bind(crypto.randomUUID(), supersedeFactId, userId, donorId, JSON.stringify(["status"]), JSON.stringify({ status: "current" }), JSON.stringify({ status: "superseded", supersededByFactId: newFact.id }), now),
+        SELECT ?, ?, ?, ?, 'superseded', ?, ?, ?, ? ${gate ? `WHERE ${gate.sql}` : ""}`)
+        .bind(crypto.randomUUID(), supersedeFactId, userId, donorId, JSON.stringify(["status"]), JSON.stringify({ status: "current" }), JSON.stringify({ status: "superseded", supersededByFactId: newFact.id }), now, ...gateParams(gate)),
     );
   }
 
   const relationshipStatementIndex = statements.length;
   statements.push(
     env.DB.prepare(`UPDATE donors SET relationship_summary = ?, institutional_memory = ?, relationship_health = 86, updated_at = ?
-      WHERE id = ? AND owner_user_id = ? AND data_source = 'live' AND relationship_summary IS ? AND institutional_memory IS ?`)
-      .bind(intent.relationshipSummary, intent.institutionalMemory, now, donorId, userId, intent.casRelationshipSummary, intent.casInstitutionalMemory),
+      WHERE id = ? AND owner_user_id = ? AND data_source = 'live' AND relationship_summary IS ? AND institutional_memory IS ?${gateClause(gate)}`)
+      .bind(intent.relationshipSummary, intent.institutionalMemory, now, donorId, userId, intent.casRelationshipSummary, intent.casInstitutionalMemory, ...gateParams(gate)),
   );
 
   return { statements, relationshipStatementIndex };
@@ -153,10 +174,10 @@ export function materializeFactAcceptanceIntent(intent: FactAcceptanceIntent | n
 // materializes the result. Equivalent in shape and behavior to Phase
 // 2's original all-in-one implementation -- unchanged for every existing
 // caller.
-export async function planFactAcceptance(input: FactAcceptanceInput): Promise<FactAcceptancePlan> {
+export async function planFactAcceptance(input: FactAcceptanceInput, gate?: WriteGate): Promise<FactAcceptancePlan> {
   const { workingState, pinnedFresh } = await loadFactAcceptanceDonorState(input.donorId, input.userId);
   const { intent } = planFactAcceptanceStep(workingState, { ...input, pinnedFresh });
-  return materializeFactAcceptanceIntent(intent, input.donorId, input.userId, input.now);
+  return materializeFactAcceptanceIntent(intent, input.donorId, input.userId, input.now, gate);
 }
 
 // Transitions every CURRENT fact sourced from a given interaction to
@@ -168,7 +189,7 @@ export async function planFactAcceptance(input: FactAcceptanceInput): Promise<Fa
 // planFactAcceptance so callers can append/offset identically; -1 when
 // this interaction sourced no current facts for this donor (nothing to
 // do).
-export async function planFactArchival(input: { donorId: string; userId: string; sourceInteractionId: string; now: number }): Promise<FactAcceptancePlan> {
+export async function planFactArchival(input: { donorId: string; userId: string; sourceInteractionId: string; now: number }, gate?: WriteGate): Promise<FactAcceptancePlan> {
   const [affectedResult, allCurrentResult, donorRow, pendingAskRows] = await Promise.all([
     env.DB.prepare("SELECT id FROM donor_relationship_facts WHERE donor_id = ? AND user_id = ? AND source_interaction_id = ? AND status = 'current'")
       .bind(input.donorId, input.userId, input.sourceInteractionId).all<{ id: string }>(),
@@ -185,13 +206,13 @@ export async function planFactArchival(input: { donorId: string; userId: string;
   const statements: D1PreparedStatement[] = [];
   for (const fact of affected) {
     statements.push(
-      env.DB.prepare("UPDATE donor_relationship_facts SET status = 'archived_with_source', updated_at = ? WHERE id = ? AND status = 'current'")
-        .bind(input.now, fact.id),
+      env.DB.prepare(`UPDATE donor_relationship_facts SET status = 'archived_with_source', updated_at = ? WHERE id = ? AND status = 'current'${gateClause(gate)}`)
+        .bind(input.now, fact.id, ...gateParams(gate)),
     );
     statements.push(
       env.DB.prepare(`INSERT INTO donor_relationship_fact_changes (id, fact_id, user_id, donor_id, action, changed_fields, before_json, after_json, created_at)
-        VALUES (?, ?, ?, ?, 'archived_with_source', ?, ?, ?, ?)`)
-        .bind(crypto.randomUUID(), fact.id, input.userId, input.donorId, JSON.stringify(["status"]), JSON.stringify({ status: "current" }), JSON.stringify({ status: "archived_with_source" }), input.now),
+        SELECT ?, ?, ?, ?, 'archived_with_source', ?, ?, ?, ? ${gate ? `WHERE ${gate.sql}` : ""}`)
+        .bind(crypto.randomUUID(), fact.id, input.userId, input.donorId, JSON.stringify(["status"]), JSON.stringify({ status: "current" }), JSON.stringify({ status: "archived_with_source" }), input.now, ...gateParams(gate)),
     );
   }
 
@@ -211,8 +232,8 @@ export async function planFactArchival(input: { donorId: string; userId: string;
   const relationshipStatementIndex = statements.length;
   statements.push(
     env.DB.prepare(`UPDATE donors SET relationship_summary = ?, institutional_memory = ?, updated_at = ?
-      WHERE id = ? AND owner_user_id = ? AND data_source = 'live' AND relationship_summary IS ? AND institutional_memory IS ?`)
-      .bind(synthesis.relationshipSummary, synthesis.institutionalMemory, input.now, input.donorId, input.userId, donorRow?.relationship_summary ?? null, donorRow?.institutional_memory ?? null),
+      WHERE id = ? AND owner_user_id = ? AND data_source = 'live' AND relationship_summary IS ? AND institutional_memory IS ?${gateClause(gate)}`)
+      .bind(synthesis.relationshipSummary, synthesis.institutionalMemory, input.now, input.donorId, input.userId, donorRow?.relationship_summary ?? null, donorRow?.institutional_memory ?? null, ...gateParams(gate)),
   );
 
   return { statements, relationshipStatementIndex };

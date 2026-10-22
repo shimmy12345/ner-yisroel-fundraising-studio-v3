@@ -1,8 +1,8 @@
 import { followUpListsMatch, type FollowUpContent } from "./idempotency.ts";
 
 // Concurrency safety for an existing interaction's `summary` (2026-10-21,
-// third follow-up review -- closing a gap the second follow-up review's
-// own fix left open). Shared by
+// fourth follow-up review -- closing a real atomicity bug the third
+// follow-up review's own fix introduced). Shared by
 // app/api/trips/[id]/prospects/[prospectId]/meeting-notes/route.ts (the
 // only route that UPDATEs an existing interaction's summary rather than
 // always inserting a fresh one) so the actual write/decision logic this
@@ -14,32 +14,53 @@ import { followUpListsMatch, type FollowUpContent } from "./idempotency.ts";
 // the last moment, since the real risk is a browser tab left open across
 // someone else's change, not a sub-second race within one request.
 //
-// The PREVIOUS version of this module built the follow-up INSERTs as
-// part of the SAME batch as the summary UPDATE, conditioned on a SQL
-// `WHERE EXISTS (... summary = ?)` bound to the NEW summary -- intending
-// to prove "the preceding UPDATE actually applied." It does not: that
-// EXISTS check only proves the ROW'S CURRENT CONTENT matches the new
-// value, which can be true for reasons that have nothing to do with
-// THIS request's own write -- most concretely, when the row's summary
-// already happened to equal the requested new value (a stale
-// `expectedSummary` racing a completion that coincidentally produced
-// the exact same text, or simply a retry) WHILE this request's own CAS,
-// keyed on the OLDER `casBaseline`, correctly affected zero rows. In
-// that exact shape, the summary UPDATE legitimately reports failure
-// while the follow-up INSERTs' own EXISTS check still reads true and
-// creates brand-new tasks anyway -- a rejected save that silently
-// creates follow-ups regardless. Matching END-STATE TEXT is never proof
-// that THIS request's write produced it.
+// CONFIRMED FAILURE IN 62dec37 this fixes: the previous version ran the
+// summary UPDATE on its own via `.run()`, read back its own rowcount,
+// and -- only once proven -- ran the follow-up INSERTs as a SEPARATE
+// `db.batch()` call. Two separate commits are not one transaction: when
+// a follow-up id collided with different content, the function
+// correctly rejected the request, but the summary UPDATE from the FIRST
+// call had already committed. A rejected save was leaving its new
+// summary permanently written.
 //
-// The fix below never infers success from content matching. It runs the
-// summary UPDATE on its own first and reads back ITS OWN authoritative
-// rowcount. Follow-ups are only ever attempted once that rowcount has
-// already proven this exact request's CAS applied; a CAS miss never
-// attempts to create a single follow-up, full stop -- the one exception
-// being a genuine, already-completed replay of THIS SAME request
-// (verified by reading back the SPECIFIC follow-up rows this exact
-// idempotencyKey would have created and confirming they already match,
-// never merely by the summary text happening to match).
+// The fix (drizzle/0052) keeps the summary UPDATE and every follow-up
+// write in ONE `db.batch()` call -- one real transaction, confirmed via
+// this repo's own D1SqliteAdapter (`BEGIN IMMEDIATE` ... `COMMIT`,
+// rollback-and-rethrow on any statement that throws). Because D1 batch
+// statements still run unconditionally in sequence (there is no SQL
+// "skip the rest if the previous statement affected zero rows"), each
+// follow-up write is gated on `write_token` -- a fresh, request-unique
+// value (crypto.randomUUID(), generated once per call, never reused or
+// shared) the summary UPDATE stamps as part of its OWN CAS'd SET clause.
+// A dependent statement proves the summary UPDATE applied by checking
+// `EXISTS (... interactions WHERE id = ? AND write_token = ?)` bound to
+// that exact value -- never by matching the new summary TEXT (two
+// unrelated writes can coincidentally produce the same text) and never
+// by chaining the SQL `changes()` function past an intervening statement
+// (it only ever describes the IMMEDIATELY PRECEDING statement, so a
+// second or later follow-up checking it would see the FIRST follow-up's
+// own rowcount, not the summary UPDATE's). Because the token is fresh
+// and random per call, no concurrent request -- even one racing from the
+// exact same `casBaseline` -- can ever make that EXISTS check read true
+// except as a direct consequence of THIS call's own CAS having matched,
+// in the same transaction, moments earlier.
+//
+// A follow-up id already holding DIFFERENT content must abort the WHOLE
+// request, including the already-applied summary UPDATE -- not just
+// skip that one follow-up. This is done with a genuine SQL throw, never
+// a try/catch content comparison performed AFTER a write already landed:
+// each follow-up is a DELETE (removing the row only if its id AND
+// content already exactly match what is being requested -- a no-op
+// when nothing with that id exists yet) immediately followed by a
+// write_token-gated INSERT of that exact id. If the row did not exist,
+// or existed with matching content and was just removed, the INSERT
+// succeeds (fresh create, or an identical-content replay). If the row
+// existed with DIFFERENT content, the DELETE's content match fails, the
+// row is left in place, and the INSERT then collides with it on the
+// PRIMARY KEY -- a real UNIQUE constraint violation, which D1 rolls the
+// entire batch back for, undoing the summary UPDATE too. No compensating
+// write is ever needed, because nothing partial is ever actually
+// committed.
 export type ConcurrentFollowUpInput = FollowUpContent & { id: string; donorId: string };
 
 export type ConcurrentSaveOutcome =
@@ -94,34 +115,46 @@ export async function saveConcurrentSummaryAndFollowUps(
   now: number,
   followUps: ConcurrentFollowUpInput[],
 ): Promise<ConcurrentSaveOutcome> {
-  const updateResult = await db.prepare("UPDATE interactions SET summary = ?, updated_at = ? WHERE id = ? AND donor_id = ? AND user_id = ? AND summary = ?")
-    .bind(newSummary, now, interactionId, donorId, userId, casBaseline).run() as unknown as { meta?: { changes?: number } };
-
-  if ((updateResult.meta?.changes ?? 0) > 0) {
-    // This request's own CAS just applied, proven by its own rowcount --
-    // safe to create follow-ups now, unconditionally (no SQL guard
-    // needed; nothing left to prove). A PRIMARY KEY conflict here can
-    // only mean THIS exact idempotencyKey's follow-up ids were already
-    // used -- a genuine network-level retry of this exact request after
-    // its own earlier attempt's response was lost, disambiguated the
-    // same way a stale CAS is below.
-    if (followUps.length === 0) return { status: "applied", followUpsCreated: 0 };
-    try {
-      await db.batch(followUps.map((followUp) =>
-        db.prepare(`INSERT INTO recommendations (id, donor_id, user_id, action, reason, score, status, due_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`)
-          .bind(followUp.id, followUp.donorId, userId, followUp.description, "Follow-up proposed from meeting notes.", 90, followUp.dueAtEpoch, now, now)));
-      return { status: "applied", followUpsCreated: followUps.length };
-    } catch (error) {
-      if (!isUniqueConstraintViolation(error)) throw error;
-      return (await followUpsAlreadyMatch(db, userId, followUps)) ? { status: "replayed" } : { status: "conflict", reason: "followup_mismatch" };
-    }
+  const writeToken = crypto.randomUUID();
+  const statements: D1PreparedStatement[] = [
+    db.prepare("UPDATE interactions SET summary = ?, write_token = ?, updated_at = ? WHERE id = ? AND donor_id = ? AND user_id = ? AND summary = ?")
+      .bind(newSummary, writeToken, now, interactionId, donorId, userId, casBaseline),
+  ];
+  for (const followUp of followUps) {
+    statements.push(
+      db.prepare(`DELETE FROM recommendations WHERE id = ? AND donor_id = ? AND user_id = ? AND action = ? AND due_at IS ?
+          AND EXISTS (SELECT 1 FROM interactions WHERE id = ? AND write_token = ?)`)
+        .bind(followUp.id, followUp.donorId, userId, followUp.description, followUp.dueAtEpoch, interactionId, writeToken),
+      db.prepare(`INSERT INTO recommendations (id, donor_id, user_id, action, reason, score, status, due_at, created_at, updated_at)
+          SELECT ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM interactions WHERE id = ? AND write_token = ?)`)
+        .bind(followUp.id, followUp.donorId, userId, followUp.description, "Follow-up proposed from meeting notes.", 90, followUp.dueAtEpoch, now, now, interactionId, writeToken),
+    );
   }
 
-  // The CAS missed. Disambiguate a safe replay (this exact save --
-  // summary AND every requested follow-up -- already fully applied,
-  // e.g. a network-level retry) from a genuine conflict, by reading
-  // back the ACTUAL rows, never by inferring from text equality alone.
+  let results: Array<{ meta?: { changes?: number } }>;
+  try {
+    results = await db.batch(statements) as unknown as Array<{ meta?: { changes?: number } }>;
+  } catch (error) {
+    if (!isUniqueConstraintViolation(error)) throw error;
+    // The batch rolled back in full -- the summary UPDATE (even though
+    // its own CAS matched) is undone along with every follow-up.
+    return { status: "conflict", reason: "followup_mismatch" };
+  }
+
+  if ((results[0]?.meta?.changes ?? 0) > 0) {
+    // This request's own CAS applied, proven by its own statement's
+    // rowcount, and every follow-up committed in the SAME transaction
+    // (a genuine mismatch would have thrown above, undoing this too).
+    return { status: "applied", followUpsCreated: followUps.length };
+  }
+
+  // The CAS missed and nothing in this batch applied (every dependent
+  // statement's write_token gate read false). Disambiguate a safe
+  // replay (this exact save -- summary AND every requested follow-up --
+  // already fully applied, e.g. a network-level retry) from a genuine
+  // conflict, by reading back the ACTUAL rows, never by inferring from
+  // text equality alone.
   const current = await db.prepare("SELECT summary FROM interactions WHERE id = ? AND donor_id = ? AND user_id = ?").bind(interactionId, donorId, userId).first<{ summary: string }>();
   if (current?.summary !== newSummary) return { status: "conflict", reason: "summary_stale" };
   return (await followUpsAlreadyMatch(db, userId, followUps)) ? { status: "replayed" } : { status: "conflict", reason: "followup_mismatch" };

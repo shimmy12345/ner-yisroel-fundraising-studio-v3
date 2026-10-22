@@ -218,6 +218,70 @@ async function run() {
     assert.equal(afterRetry.split(notes).length - 1, 1, "the notes text must appear exactly once, never duplicated by the retry");
   }
 
+  // --- 5. Two genuinely concurrent FIRST-TIME completions (impromptu
+  // meetings -- `scheduleProspectMeeting` was never called, so there is
+  // no `linked_interaction_id` yet and both calls take the "no existing
+  // interaction" INSERT branch). Fourth follow-up review fix: the loser
+  // of the INSERT race must re-read by the stable deterministic
+  // interaction id on its very next attempt -- not by its own stale,
+  // still-null pre-loop snapshot -- so it correctly switches to the
+  // append branch instead of repeating the same failing INSERT until it
+  // runs out of attempts and silently drops its own notes. Both
+  // completions must succeed, and both distinct notes must survive. ---
+  {
+    const db = freshDb();
+    const tripId = "trip-5";
+    const prospectId = "prospect-5";
+    seedTripProspect(db, { tripId, prospectId });
+    const interactionId = tripMeetingInteractionId(prospectId);
+    env.DB = db;
+
+    const [resultA, resultB] = await Promise.all([
+      completeProspectMeeting(USER_ID, tripId, prospectId, PAST_MEETING_AT, "Impromptu completion note A.", true, "America/Chicago", NOW),
+      completeProspectMeeting(USER_ID, tripId, prospectId, PAST_MEETING_AT, "Impromptu completion note B.", true, "America/Chicago", NOW),
+    ]);
+    assert.ok(resultA.ok, `first-time completion A must succeed (got ${JSON.stringify(resultA)})`);
+    assert.ok(resultB.ok, `first-time completion B must succeed (got ${JSON.stringify(resultB)})`);
+    const summary = interactionSummary(db, interactionId);
+    assert.ok(summary.includes("Impromptu completion note A."), "A's note must survive -- never lost to a retry that kept re-checking a stale null linkedInteractionId");
+    assert.ok(summary.includes("Impromptu completion note B."), "B's note must survive alongside A's, never silently discarded");
+    const prospect = db.raw().prepare("SELECT status, linked_interaction_id FROM trip_prospects WHERE id = ?").get(prospectId);
+    assert.equal(prospect.status, "meeting_completed");
+    assert.equal(prospect.linked_interaction_id, interactionId);
+  }
+
+  // --- 6. THE EXACT 62dec37-SHAPE FAILURE for completion: force the
+  // trip_prospects companion write to be impossible to apply (the
+  // prospect row itself deleted out from under the attempt) after the
+  // interactions CAS would otherwise succeed. The notes UPDATE must roll
+  // back in full -- never leave the interaction's new summary committed
+  // while the prospect's own status silently fails to advance. Checking
+  // only the returned status is not enough; this asserts actual
+  // interaction row state before vs. after. ---
+  {
+    const db = freshDb();
+    const tripId = "trip-6";
+    const prospectId = "prospect-6";
+    seedTripProspect(db, { tripId, prospectId });
+    const interactionId = tripMeetingInteractionId(prospectId);
+    env.DB = db;
+    await scheduleProspectMeeting(USER_ID, tripId, prospectId, FUTURE_MEETING_AT, null, 30, true, "America/Chicago", NOW);
+    const beforeRow = db.raw().prepare("SELECT summary, updated_at FROM interactions WHERE id = ?").get(interactionId);
+
+    // The prospect row itself is gone by the time the batch runs (e.g. a
+    // concurrent trip-prospect removal) -- the trip_prospects UPDATE's
+    // own `WHERE id = ?` can now never match, regardless of the gate.
+    env.DB = interceptFirstWrite(db, async () => {
+      db.raw().prepare("DELETE FROM trip_prospects WHERE id = ?").run(prospectId);
+    });
+    const result = await completeProspectMeeting(USER_ID, tripId, prospectId, PAST_MEETING_AT, "Note that must not partially save.", true, "America/Chicago", NOW + 10);
+    env.DB = db;
+
+    assert.equal(result.ok, false, "completion must report failure when its companion prospect-status write cannot apply");
+    const afterRow = db.raw().prepare("SELECT summary, updated_at FROM interactions WHERE id = ?").get(interactionId);
+    assert.deepEqual(afterRow, beforeRow, "the interactions UPDATE -- even though its own CAS would have matched -- must never be left committed when the companion trip_prospects write cannot apply");
+  }
+
   console.log("trip-meeting-notes-concurrency.test.mjs: all assertions passed");
 }
 

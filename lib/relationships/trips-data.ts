@@ -784,10 +784,21 @@ export async function completeProspectMeeting(userId: string, tripId: string, pr
   // relies on) -- so the meeting is never recorded/reported as completed
   // unless the notes write itself actually committed.
   for (let attempt = 1; attempt <= MAX_MEETING_NOTES_WRITE_ATTEMPTS; attempt++) {
-    const existingInteraction = existing.linkedInteractionId
-      ? await env.DB.prepare("SELECT summary FROM interactions WHERE id = ? AND user_id = ? AND donor_id = ?")
-          .bind(existing.linkedInteractionId, userId, existing.donorId).first<{ summary: string | null }>()
-      : null;
+    // Re-read by `interactionId` (the stable id this whole function
+    // writes under -- either the real linked id, or, when there was
+    // none, the SAME deterministic fallback the INSERT below uses),
+    // fresh on EVERY attempt -- never by `existing.linkedInteractionId`,
+    // which is a snapshot taken once before this loop even started.
+    // Fourth follow-up review fix: a first-time completion (no prior
+    // "Meeting Scheduled" step, so `existing.linkedInteractionId` is
+    // null) that loses the INSERT race below to a concurrent first-time
+    // completion must see that THAT interaction now exists on its very
+    // next attempt and switch to the append branch -- re-checking the
+    // stale pre-loop `null` forever would repeat the same failing
+    // INSERT until this loop's attempts ran out, silently losing this
+    // attempt's own notes.
+    const existingInteraction = await env.DB.prepare("SELECT summary FROM interactions WHERE id = ? AND user_id = ? AND donor_id = ?")
+      .bind(interactionId, userId, existing.donorId).first<{ summary: string | null }>();
 
     if (!existingInteraction) {
       // Nothing exists for this interaction id yet -- a plain INSERT,
@@ -849,48 +860,60 @@ export async function completeProspectMeeting(userId: string, tripId: string, pr
       return { ok: true };
     }
 
-    // Concurrency safety (2026-10-21, third follow-up review -- "do not
-    // treat matching final text as proof that a particular request
-    // succeeded"): the interactions UPDATE runs ALONE first, and only
-    // its own authoritative rowcount (read back immediately after)
-    // decides whether to mark the prospect completed. The previous
-    // version of this function ran both statements in one batch and
-    // guarded the trip_prospects write with `WHERE EXISTS (... summary
-    // = ?)` bound to the NEW summary -- intending to prove "the
-    // preceding UPDATE actually applied." It does not: that EXISTS
-    // check only proves the row's CURRENT CONTENT matches the computed
-    // value, which could in principle become true for a reason that has
-    // nothing to do with THIS attempt's own CAS (summary text
-    // coincidentally matching, including a byte-for-byte collision with
-    // another process's own unrelated write) while this attempt's own
-    // CAS, keyed on `priorSummary`, correctly affected zero rows --
-    // exactly the same class of bug this round closed in
-    // lib/meeting-notes/concurrent-save.ts's follow-up guard. Splitting
-    // into two sequential writes removes the ambiguity entirely: the
-    // trip_prospects update only ever runs once the interactions
-    // update's own rowcount has already proven success.
-    const updateResult = await env.DB.prepare(`UPDATE interactions SET summary = ?, occurred_at = ?, source = ?, updated_at = ?
-        WHERE id = ? AND user_id = ? AND donor_id = ? AND summary = ?`)
-      .bind(summary, meetingAt, completedSource, now, interactionId, userId, existing.donorId, priorSummary)
-      .run() as unknown as { meta: { changes?: number } };
+    // Concurrency safety (2026-10-21, fourth follow-up review -- closing
+    // a real atomicity bug the third follow-up review's own fix
+    // introduced). That fix ran the interactions UPDATE ALONE via
+    // `.run()`, then -- only once its own rowcount proved the CAS
+    // applied -- ran the trip_prospects UPDATE as a SEPARATE `.run()`
+    // call, reasoning that a bare EXISTS-on-end-state guard could not be
+    // trusted (correct) but missing that two separate commits are not
+    // one transaction either: had the trip_prospects write somehow
+    // failed, the notes UPDATE would already have committed with
+    // nothing to undo it. The two writes now run in ONE `env.DB.batch()`
+    // call -- one real transaction -- with the trip_prospects write
+    // gated on `write_token`, the SAME fresh-per-attempt-random-value
+    // mechanism lib/meeting-notes/concurrent-save.ts and
+    // lib/capture/interaction-edit.ts use (see drizzle/0052): the
+    // interactions UPDATE stamps it as part of its own CAS'd SET clause,
+    // and the trip_prospects UPDATE proves that EXACT statement applied,
+    // in this SAME transaction, via
+    // `EXISTS (... interactions WHERE id = ? AND write_token = ?)` --
+    // never by matching the computed summary TEXT (two unrelated writes
+    // can coincidentally produce the same text) and never by chaining
+    // the SQL `changes()` function past an intervening statement.
+    // The primary statement's own CAS also requires the target
+    // trip_prospects row to still exist -- so that if it vanished (e.g.
+    // a concurrent "Remove from trip") between this attempt's read and
+    // this write, the interactions UPDATE itself does not apply either.
+    // Without this, the companion write below could fail to match for a
+    // reason that has nothing to do with the write_token gate (the
+    // row's own `WHERE id = ?` finding nothing), leaving the notes
+    // UPDATE committed alone with no prospect to mark completed.
+    const writeToken = crypto.randomUUID();
+    const results = await env.DB.batch([
+      env.DB.prepare(`UPDATE interactions SET summary = ?, occurred_at = ?, source = ?, write_token = ?, updated_at = ?
+          WHERE id = ? AND user_id = ? AND donor_id = ? AND summary = ? AND EXISTS (SELECT 1 FROM trip_prospects WHERE id = ?)`)
+        .bind(summary, meetingAt, completedSource, writeToken, now, interactionId, userId, existing.donorId, priorSummary, prospectId),
+      env.DB.prepare(`UPDATE trip_prospects SET status = 'meeting_completed', meeting_at = ?, linked_interaction_id = ?, updated_at = ?
+          WHERE id = ? AND EXISTS (SELECT 1 FROM interactions WHERE id = ? AND write_token = ?)`)
+        .bind(meetingAt, interactionId, now, prospectId, interactionId, writeToken),
+    ]) as unknown as Array<{ meta: { changes?: number } }>;
 
-    if ((updateResult.meta.changes ?? 0) > 0) {
-      // Proven to have applied -- safe to mark the prospect completed
-      // unconditionally now; nothing left to guard against.
-      await env.DB.prepare("UPDATE trip_prospects SET status = 'meeting_completed', meeting_at = ?, linked_interaction_id = ?, updated_at = ? WHERE id = ?")
-        .bind(meetingAt, interactionId, now, prospectId).run();
-      // "Completion retains calendar history" -- deliberately no
-      // calendar call here at all (the core's own recordComplete() is an
-      // intentional no-op; see calendar-sync-reconciler.ts's own doc
-      // comment). The meeting's existing calendar link/history, if any,
-      // is left completely untouched by marking it completed.
+    if ((results[0]?.meta.changes ?? 0) > 0) {
+      // Proven to have applied, together with the prospect's status in
+      // the SAME transaction. "Completion retains calendar history" --
+      // deliberately no calendar call here at all (the core's own
+      // recordComplete() is an intentional no-op; see
+      // calendar-sync-reconciler.ts's own doc comment). The meeting's
+      // existing calendar link/history, if any, is left completely
+      // untouched by marking it completed.
       return { ok: true };
     }
     // The summary changed between our read and this write (a competing
     // completion, or a donor-profile/trip-notes edit) -- nothing
-    // committed (the trip_prospects write shares the identical
-    // precondition, so it never reports a completion the notes write
-    // itself did not actually land). Loop and retry against the
+    // committed (the trip_prospects write's own gate read false too, in
+    // this SAME transaction, so it never reports a completion the notes
+    // write itself did not actually land). Loop and retry against the
     // now-current value.
   }
   return { ok: false, reason: "notes_conflict" };

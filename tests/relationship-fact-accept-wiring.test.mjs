@@ -90,7 +90,7 @@ async function run() {
   );
   assert.match(
     factAccept,
-    /VALUES \(\?, \?, \?, \?, \?, \?, \?, \?, 'current', \?, \?, \?, \?\)`\)\s*\.bind\(newFact\.id, donorId, userId, newFact\.category, newFact\.lifecycle, newFact\.factText, newFact\.sourceInteractionId, newFact\.sourceInteractionOccurredAt, supersedeFactId, newFact\.fingerprint, now, now\)/,
+    /SELECT \?, \?, \?, \?, \?, \?, \?, \?, 'current', \?, \?, \?, \?.*`\)\s*\.bind\(newFact\.id, donorId, userId, newFact\.category, newFact\.lifecycle, newFact\.factText, newFact\.sourceInteractionId, newFact\.sourceInteractionOccurredAt, supersedeFactId, newFact\.fingerprint, now, now, \.\.\.gateParams\(gate\)\)/,
     "the materialized fact_text column must bind to the planned newFact.factText and nothing else -- no ask/yahrtzeit/pledge field may ever be interpolated into it",
   );
   for (const forbidden of ["amount_cents", "amountCents", "askAmount", "yahrtzeit", "pledge_activity_id", "installment_amount_cents", "gift_source"]) {
