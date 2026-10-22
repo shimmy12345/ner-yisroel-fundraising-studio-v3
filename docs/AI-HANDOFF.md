@@ -52581,3 +52581,18 @@ Once both finish, share the run URLs (or just confirm completion) and this will 
 - Schema-tracking gap that caused that run's one failure: **fixed and merged** to `main` (`f8e1581`), re-verified against `main`'s own test suite and the drift-check tool, with the one remaining divergence being the intentional, documented Staging-only exception.
 - Fully clean, post-fix, real-backup run: **pending** -- needs a fresh Production backup (post-merge schema) and one more verification run, both requiring a manual dispatch per the two links above; this session has no other way to start them.
 - No Production application code, schema, or donor data was changed at any point this round. No scope beyond this backup-verification task was touched.
+
+## Backup Restore Verification -- CLOSED (2026-10-22)
+
+You confirmed both remaining dispatches passed: the fresh Production nightly-backup run (post-merge schema) and the subsequent restore-verification run against it. Exact run IDs were not provided and were not re-requested, per this task's own instruction not to substitute extra investigation for a direct answer.
+
+This closes the loop the prior entries left open: a backup taken *after* `main`'s tracking fix (`f8e1581`) was merged restored cleanly with no known reason left to fail, following the real-backup restore already separately proven in run `39782341193` (quick_check/foreign_key_check/cleanup, that run's schema-comparison failure being exactly the gap this fix closed).
+
+### Final state
+
+- **Root cause**: identified precisely, not assumed -- a foreign-key-forward-reference-at-INSERT-time bug and an independent `SQLITE_TOOBIG` statement-size ceiling in D1's remote Import pipeline (remote path), plus a real third-party `wrangler` apostrophe-escaping bug (local path).
+- **Fix**: `scripts/verify-remote-restore.mjs` on the release branch now matches `main`'s own proven implementation (retries, `PRAGMA quick_check`) -- commit `bb88fb6`.
+- **Real backup restore**: proven end-to-end against the actual encrypted nightly R2 backup via the real secrets-enabled GitHub Actions workflow -- not a diagnostic substitute.
+- **main's restore/schema tracking**: corrected and merged (`f8e1581`) -- migrations 0052/0053 added; the stale migration-0048 assumption (Staging-only, never applied to Production) corrected in the Production baseline while its two tables remain in `STAGING_RESET_TABLE_ORDER` for Staging's own cleanup, reconciled with a named exception in `main`'s own test suite rather than a strict-equality rewrite.
+- **Post-fix, full-cycle confirmation**: a Production backup taken after the merge, restored and verified clean, per your confirmation just now.
+- **Production**: untouched throughout this entire investigation, re-confirmed just above (donor/giving-activity counts and live Worker version unchanged from every earlier checkpoint). No application code, schema, or donor data was changed; no scope beyond backup recovery was touched.
