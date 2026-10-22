@@ -52343,3 +52343,84 @@ None for this release's own scope. The 3 pre-existing baseline check failures no
 Both previously reported save-key validation gaps are closed and covered by focused tests with direct row-state evidence. The JL reconciliation behavior is now verified through the real upload-and-review HTTP flow end to end, not direct database reconciliation, with no double-counting. The AI Meeting Notes button's open/organize/save path is confirmed working. The write guard is restored and proven live. **Next step per the requester's own framing: Production deployment, with a fresh backup and rollback target -- not part of this round.**
 
 Stop here; do not deploy to Production without independent review.
+
+## Authorized Production Deployment -- AI Meeting Notes Access from Trip Planning + JL Pending-Reconciliation Confirmation (2026-10-22) -- SUCCESSFUL
+
+Owner explicitly authorized deploying the reviewed release to Production: `release/trip-ai-notes-and-pledge-reconciliation` at `2becd3854c6bb4aeb0165b921db4dc23ac7ebb0d`.
+
+### Deviation from the named commit -- disclosed up front
+
+**The commit actually deployed is `f048e9b978db64224e173b72f9a001737e974ef2`, not the literal `2becd38` the owner named.** Step 6 of the owner's own instruction ("verify the Production build manifest and schema baseline accurately reflect this release") surfaced a real, in-scope gap: migration 0053's new `meeting_note_save_identities` table was registered nowhere in this repo's own schema-tracking safety nets (`STAGING_RESET_TABLE_ORDER`, `WORKSPACE_BACKUP_EXCLUDED_TABLES`, `production-baseline/schema-manifest.json`), and running the full suite against the real schema change (as instructed) failed 3 test files as a direct, mechanical consequence (`workspace-backup-restore-corrections.test.mjs`, `production-backup-readiness.test.mjs`, `production-baseline.test.mjs` -- a stale hardcoded migration-count assertion). This is the same category of gap as the historical "D1 Restore/Schema Sync Check Failure" incident earlier in this project, caught here before it could repeat. Fixed with one additional commit (`f048e9b`, pushed and independently re-verified via fresh `git fetch` before anything was deployed):
+- `lib/operations/staging-reset.ts`: registered `meeting_note_save_identities` in `STAGING_RESET_TABLE_ORDER`.
+- `lib/operations/workspace-backup.ts`: classified it in `WORKSPACE_BACKUP_EXCLUDED_TABLES` (covered by the nightly whole-database R2 backup only, same as every other table added after that route was written).
+- `lib/data-health/production-baseline.ts`: bumped the expected migration count from 50 to 52.
+- `production-baseline/schema-manifest.json` (+ its generated `drizzle/` companion): regenerated via `scripts/generate-production-baseline.mjs`.
+- `tests/production-baseline.test.mjs`: added dedicated 0052/0053 baseline tests; moved the "latest migration" exact-count assertion from 0051's test to 0053's.
+
+No application behavior from the reviewed release (`2becd38`) was changed by this fix -- it only corrects this release's own schema-tracking metadata. Full diff is in commit `f048e9b` on the release branch. **If this deviation itself needs independent review, the fix is minimal, mechanical, and fully reversible without touching Production: review the one commit, and if rejected, Production can be rolled back per the procedure below while the fix is reviewed separately.**
+
+### 0. Preflight
+
+1. **Release checkout confirmed at the exact commit before and after the fix**: `git fetch origin release/trip-ai-notes-and-pledge-reconciliation` + `git rev-parse` matched `2becd3854c6bb4aeb0165b921db4dc23ac7ebb0d` exactly before the fix, clean working tree; after the fix, the same fresh-fetch pattern confirmed `f048e9b978db64224e173b72f9a001737e974ef2` on the remote.
+2. **Production backup, created fresh and verified**:
+   - **Cloudflare D1 Time Travel bookmark** (native point-in-time recovery, captured immediately before touching Production, before the migrations): `000001dc-00000000-0000510c-7bef53e74f0028398d5edad2a1ae9b1e`. This is the primary, relied-upon rollback mechanism for data -- `wrangler d1 time-travel restore fundraising-os-production-db --bookmark=000001dc-00000000-0000510c-7bef53e74f0028398d5edad2a1ae9b1e --config wrangler.production.jsonc` restores Production to exactly this instant.
+   - **Automated nightly backup, independently confirmed current**: `/api/health`'s `automated-backup` check, read live: "Completed successfully 2026-10-21T14:58:44Z (object: daily/fundraising-os-production-db-20261021T145837Z.sql.gz.gpg)" -- same day, R2-encrypted, the existing authoritative pipeline.
+   - **Independent manual export, created and structurally verified, restore-verification inconclusive (disclosed, not fixed)**: ran `wrangler d1 export fundraising-os-production-db --remote` directly this round -- 15,550 lines, 8,947,558 bytes, correct `PRAGMA defer_foreign_keys=TRUE;` header, correct internal table-before-insert ordering (confirmed `donors`' own `CREATE TABLE` at line 831 precedes its 297 `INSERT` statements, matching the live baseline's donor count exactly). Restoring this export into a brand-new scratch D1 database via `wrangler d1 execute <scratch> --remote --file <export>` (the same command the project's own `scripts/verify-remote-restore.mjs` uses) reproducibly failed with `no such table: main.donors: SQLITE_ERROR` on two separate fresh scratch databases, both cleaned up afterward (confirmed via `wrangler d1 list` showing only Production and Staging remaining). A second attempt via the LOCAL D1 simulator (`wrangler d1 execute DB --local --persist-to <tmp> --file <export>`, the code path `scripts/rehearse-production-restore.mjs` uses) hung indefinitely (~1h, never created even its first table) and was abandoned. Both are disclosed as a real tooling limitation hit this round -- not root-caused or fixed, per this round's own instruction not to expand scope -- and the Time Travel bookmark above is the mechanism actually relied upon for rollback. The plaintext export (real donor PII/financial data) was securely deleted from local disk after this verification attempt; nothing was uploaded anywhere.
+3. **Rollback target recorded before any change**: Production's live Worker version was **`2ba9e1b4-5309-479b-9639-f8c934c7a516`** (100% traffic, deployed 2026-10-21T15:04:18Z) -- via `wrangler deployments list --config wrangler.production.jsonc`.
+4. **Production bindings/secrets/cron confirmed unchanged before deploying**: `wrangler deploy --config wrangler.production.jsonc --dry-run` showed `env.DB` (`fundraising-os-production-db`), `env.STATUS_WORKER` (`fundraising-os-production-backup-status`), `env.AI`, `env.ASSETS`, and every `vars` entry exactly matching `wrangler.production.jsonc`'s committed config -- no secret or binding drift. `wrangler secret list` confirmed the 3 Gmail OAuth secrets present (names only). `wrangler.production.jsonc`'s own `triggers.crons: ["0 * * * *"]` unchanged.
+5. **Donor/financial baselines, recorded before any change** (direct, read-only `wrangler d1 execute --remote`):
+
+   | Metric | Value |
+   |---|---|
+   | Donors (`data_source='live'`, not archived) | 297 |
+   | Giving activities (`record_origin='live'`) | 5,954 |
+   | Open pledges (active) | 37 |
+   | Partially-paid pledges (active) | 56 |
+   | Legacy `gifts` rows | 0 |
+   | Active payment plans | 46 |
+   | Active pledge-balance corrections | 2 |
+   | Interactions | 211 |
+   | Trips | 1 (Teaneck-10/20/26, now `completed`) |
+   | Trip prospects | 47 |
+   | Active trip financial attributions | 3 |
+   | Committed (open + partially-paid, active) | $411,639.00 |
+   | Paid (all active giving activities) | $4,034,483.93 |
+   | Outstanding balance (open + partially-paid, active) | $314,515.82 |
+
+6. **Migrations 0052/0053 confirmed NOT already applied, 0050/0051 confirmed already applied** (direct `PRAGMA table_info`/`sqlite_master` reads): no `write_token` column on `interactions`; no `meeting_note_save_identities` table; `trip_financial_attributions` already had `donor_confirmed_at`/`commitment_kind`/`reported_cash_collected_cents`/`reconciled_pending_attribution_id` (0050) and the `trip_financial_attributions_active_reconciled_pending_uidx` unique index (0051) from an earlier, already-deployed release. Only 0052 and 0053 were applied this round, per the owner's explicit instruction not to touch unrelated migrations.
+7. **Tests/typecheck/lint/build, on the final `f048e9b` candidate**: full suite **222/222 passing** except the pre-existing, unrelated `scripts/check-main-restore-sync.mjs` (disclosed below, not fixed). `tsc --noEmit` clean. `eslint . --ignore-pattern dist --ignore-pattern .next` → **94 errors / 43 warnings**, byte-identical to the established baseline. `pnpm run build:production-independent` succeeded; `node scripts/verify-build-manifest.mjs production-independent` → PASS; confirmed the built bundle actually contains the reviewed code: `grep -c write_token dist/server/index.js` → 10, `grep -c meeting_note_save_identities` → 11, `grep -c followup_mismatch` → 2, `grep -c f048e9b` → 1 (the correct release-stamp SHA, re-built and re-verified after the final commit landed, so the deployed build's own self-reported SHA is accurate rather than stale).
+
+### 1. Disclosed, unrelated, pre-existing check failure (not fixed, per this round's own instruction)
+
+`scripts/check-main-restore-sync.mjs` fails comparing this release branch against `origin/main`: `main` has an unmerged `0048_google_calendar_sync.sql` migration this release branch never had (a separate, unrelated feature branch), and this release branch's `0052`/`0053` have not yet been merged back into `main`. This is branch-divergence noise between two different lines of work, not a defect in this release or in Production -- confirmed directly that Production itself has neither the calendar tables nor any trace of migration 0048 (checked live: `calendar_event_links`/`calendar_event_link_history` do not exist in Production). Reconciling `main`'s own tracking files is a separate repository-hygiene task, out of scope here.
+
+### 2. Migrations applied to Production, then deployed
+
+**`drizzle/0052_interaction_write_proof_token.sql`** applied via `wrangler d1 execute --remote --file` (project convention -- no `d1_migrations` tracking table). Verified immediately: `write_token` column present on `interactions`; row/data counts unchanged (297 donors, 211 interactions, 5,954 giving activities).
+
+**`drizzle/0053_meeting_note_save_identity.sql`** applied the same way. Verified immediately: `meeting_note_save_identities` table and its `meeting_note_save_identities_interaction_idx` index both present; row/data counts still unchanged; new table starts empty (0 rows), as expected.
+
+**Deployed** via `wrangler deploy --config wrangler.production.jsonc` (built twice -- the first build predated the `f048e9b` commit landing, so its self-reported release stamp would have read the parent `2becd38`; rebuilt and redeployed a second time immediately after confirming `f048e9b` was pushed, so the live release stamp is accurate). **Final live Worker version: `8882fe86-c759-470b-add5-a19d5e73632e`** (100% traffic, 2026-10-22T03:47:21Z). Bindings, environment variables, and the hourly cron (`0 * * * *`) confirmed unchanged from the pre-deploy dry-run output.
+
+### 3. Post-deployment verification -- all against live Production, directly
+
+**`/api/health`, read live (authenticated real session)**: `release: "0.1.0 · f048e9b"` (the correct, final deployed commit); `schema-comparison: "Match"`; `production-readiness: "Ready"`; `database: "Connected"`; `active-donors: "297"` (unchanged); `automated-backup`/`restore-verification` both still `healthy` (unaffected by this deploy).
+
+**Donor/financial baselines, re-captured with the identical queries, immediately after deployment**: donors 297, giving activities 5,954, open pledges 37, partially-paid 56, legacy gifts 0, payment plans 46, corrections 2, interactions 211, trips 1, trip prospects 47, active attributions 3, committed $411,639.00, paid $4,034,483.93, outstanding $314,515.82 -- **every single figure byte-identical to the pre-deployment baseline**. `meeting_note_save_identities` still 0 rows (no synthetic data created on Production).
+
+**Existing Production pages, fetched live and authenticated, all status 200**: `/` (Today), `/donors`, `/settings`, `/travel-planning`, `/pledge-review`, `/travel-planning/6535f09f-512f-403a-ba8e-875c735d0f41` (the real Teaneck trip).
+
+**AI Meeting Notes button, opened from Trip Planning on a real trip prospect** (`/travel-planning/6535f09f-.../prospects/40ee39e3-.../meeting-notes`, Mr. & Mrs. Alan Tabacznik): the shared Organize-with-AI screen opened correctly with every structured field (Meeting Summary, Donor Interests, Fundraising Opportunities, Confirmed Commitments, Possible Commitments, Relationship Context) and the Follow-up Actions section; direct DOM inspection confirmed the `meeting-notes-summary` field correctly pre-loaded the existing saved value, **"Trip meeting scheduled with Mr. & Mrs. Alan Tabacznik."** -- matching the real row in `interactions` exactly. Nothing was saved, organized, or edited -- a pure read-only open-and-display check, per this round's explicit instruction not to alter real notes.
+
+**New application errors**: none. Browser console showed zero errors/warnings on this page. Network requests showed 200 on every real `fundraising-os-production.sgoldstein.workers.dev` request; the only non-200 entries were unrelated local browser-extension (`file://` font) noise, not application traffic.
+
+**No real donor records, pledges, payments, or the Bashevkin/Cohen reconciliation status were created, altered, or touched anywhere this round** -- every check above was either a read-only database query or a plain authenticated page view; the only writes performed anywhere were the two additive migrations themselves (new column, new empty table) and the Worker deployment.
+
+### Rollback procedure, if ever needed
+
+1. **Code**: `wrangler rollback --config wrangler.production.jsonc --message "..."` to Worker version `2ba9e1b4-5309-479b-9639-f8c934c7a516`, or redeploy from commit `2ba9e1b4`'s own source tree.
+2. **Data** (only if a genuine regression requires it -- the migrations are purely additive and don't need reverting on their own): `wrangler d1 time-travel restore fundraising-os-production-db --config wrangler.production.jsonc --bookmark=000001dc-00000000-0000510c-7bef53e74f0028398d5edad2a1ae9b1e` restores Production's data to its exact pre-deployment state. Per this round's own instruction, the additive schema changes (0052/0053) and all data should be retained unless a material regression specifically requires rolling the data back too.
+
+### Verdict: DEPLOYED AND VERIFIED
+
+Production is live on commit `f048e9b` (Worker version `8882fe86-c759-470b-add5-a19d5e73632e`), serving the reviewed AI Meeting Notes access from Trip Planning and JL pending-reconciliation confirmation behavior. All donor/financial data is confirmed unchanged. All existing pages and the AI Meeting Notes button are confirmed working against real Production data, read-only. The one disclosed deviation (the `f048e9b` schema-tracking fix on top of the named `2becd38`) and the one disclosed tooling limitation (remote/local scratch-DB restore-rehearsal did not complete) are both documented above for independent review; neither blocks or weakens the rollback position, since the Time Travel bookmark and the recorded Worker version are both independent of that limitation.
