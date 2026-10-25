@@ -57324,3 +57324,68 @@ Following this repository's own documented migration procedure (`docs/DEPLOYMENT
 ### Verdict: READY
 
 All five requested checks pass. No unrelated changes, backups and restore path confirmed current and working, both migrations confirmed structurally incapable of touching donor/giving/pledge/payment-plan data and schema-compatible with Production's exact current state, environments confirmed isolated, current Production Worker version recorded for rollback, and all tests/builds green for both Staging and Production targets. **Awaiting the owner's explicit authorization before applying either migration or deploying the Worker to Production.**
+
+## Production Deployment -- EXECUTED (2026-10-26)
+
+Explicit owner authorization received for release commit `58a9c60e5fbbccdfef619c01df0ce29bc30f9e53` (branch `trip-planner-multi-region-manual-prospects`). Deployed exactly as authorized -- no additional features, unrelated fixes, or database changes.
+
+### Pre-deployment safety checks (all passed, re-confirmed at deploy time)
+
+- Checkout verified to match the approved commit exactly (`git rev-parse HEAD` = `58a9c60e5fbbccdfef619c01df0ce29bc30f9e53`), working tree clean.
+- Latest Production backup: completed `2026-10-25T13:09:50Z` (workflow run `40196321978`) -- current.
+- Latest restore verification: `2026-10-22T13:07:22Z`, `attemptStatus: "success"` (workflow run `39783495159`) -- current, available.
+- Production/Staging D1 isolation re-confirmed: Production `a51c6571-ae16-4614-aa9a-08f8e6be3ecd`, Staging `6c18396c-0a8f-4f2c-ba83-ea809ec10289`.
+- **Previous (pre-deployment) Production Worker version -- rollback target: `8882fe86-c759-470b-add5-a19d5e73632e`** (live since `2026-10-22T03:47:21.463Z`).
+- Pre-migration counts (real Production, read-only): `donors`: 297, `giving_activities`: 5954, `pledge_payment_plans`: 46, `trips`: 1, `trip_prospects`: 47, `trip_financial_attributions`: 5.
+- Pre-migration integrity: `PRAGMA quick_check`: `ok`; `PRAGMA foreign_key_check`: zero violations.
+- Full suite (242/242), `tsc --noEmit` (clean), and `pnpm run build:production-independent` + `scripts/verify-build-manifest.mjs production-independent` (clean) all re-confirmed at this exact commit immediately before migrating.
+
+No check failed; no workaround was needed; proceeded exactly as authorized.
+
+### Migrations applied
+
+1. `drizzle/0054_trip_manual_prospects.sql` -- `wrangler d1 execute fundraising-os-production-db --remote --config wrangler.production.jsonc --file=drizzle/0054_trip_manual_prospects.sql`. Result: 12 statements, 48 rows changed (the `trip_prospects` rebuild copying all 47 existing rows plus index/table creation), success.
+   - **Verified immediately after**: `donors` 297, `giving_activities` 5954, `pledge_payment_plans` 46, `trips` 1, `trip_prospects` **47 (unchanged)**, `trip_financial_attributions` 5, new `trip_prospect_commitments` table present with 0 rows. `PRAGMA quick_check`: `ok`. `PRAGMA foreign_key_check`: zero violations.
+2. `drizzle/0055_trip_multi_region.sql` -- same command, that file. Result: 4 statements, 2 rows changed (new table + one backfilled region row), success.
+   - **Verified immediately after**: all counts above still unchanged; new `trip_destination_regions` table has exactly 1 row, correctly backfilled from the real Production trip's own existing single region (`region_id: "north-central-nj-teaneck-bergenfield"`, matching that trip's pre-migration `destination_region_id`). `PRAGMA quick_check`: `ok`. `PRAGMA foreign_key_check`: zero violations.
+
+Neither migration's own statements reference `donors`, `giving_activities`, `pledge_payment_plans`, `trip_financial_attributions`, or `interactions` (re-confirmed by the counts above staying exactly unchanged through both steps) -- no donor financial data was modified or corrected, as instructed.
+
+### Worker deployment
+
+`pnpm run build:production-independent` (already rebuilt for this exact commit during the pre-deployment checks) → `wrangler deploy --config wrangler.production.jsonc`. Deploy output confirmed `env.DB (fundraising-os-production-db)` as the bound database (Production's own, never Staging's).
+
+- **New live Production Worker version: `e288bd0a-8602-4da9-99ae-1ed46e92a98d`** (created `2026-10-25T17:38:14.164Z`), confirmed as the current (100%) deployment via `wrangler deployments list --config wrangler.production.jsonc`.
+- `https://shimmydonors.org/` (read-only `GET`, no credentials entered): `HTTP 301` → followed to `HTTP 200` at Cloudflare Access's own login page for this exact Worker's hostname -- the expected, healthy response for an unauthenticated request to an Access-protected app (not an error page), confirming the domain correctly routes to this deployment and the Worker is live and responding.
+- Confirmed the new code is actually in the deployed bundle: `dist/server/index.js` (the file just uploaded) contains `destinationRegionIds`/`manual_name` and the prospect `link`/`convert` route handlers -- not merely built locally, genuinely shipped.
+
+### Post-deployment verification (all read-only; no test financial transactions created in Production)
+
+1. **Donor/giving/payment-plan records unchanged**: final read-only counts -- `donors` 297, `giving_activities` 5954, `pledge_payment_plans` 46 -- byte-for-byte identical to the pre-deployment baseline above.
+2. **Existing trips/prospects intact**: `trips` 1, `trip_prospects` 47, `trip_financial_attributions` 5 -- all unchanged.
+3. **Multi-region trip creation/editing available**: `trip_destination_regions` exists, correctly backfilled (confirmed above); the deployed bundle contains the multi-region checkbox UI and `destinationRegionIds` API handling (confirmed above). Not exercised with live data, per instruction to use read-only checks only.
+4. **Manual-prospect functionality available**: `trip_prospect_commitments` exists (0 rows, as expected -- nothing has used it yet); the deployed bundle contains the `link`/`convert` route handlers (confirmed above). Not exercised with live data, same reason.
+5. **Pledge/donation attribution intact**: `trip_financial_attributions` count (5) and `giving_activities` count (5954) both unchanged -- no attribution was altered, created, or removed by this deployment.
+6. **Application loads successfully**: confirmed via the `https://shimmydonors.org/` check above.
+7. **Production uses its own database, never Staging**: confirmed via the deploy output's own binding table (`env.DB (fundraising-os-production-db)`) and via the separate, previously-confirmed database ids -- no command this round ever targeted `wrangler.staging.jsonc`.
+8. **No unrelated functionality affected**: the deployed release is exactly the reviewed, approved commit (30 files, all within this feature's own scope -- see the "Code review" section of the readiness entry above); nothing else changed.
+
+### Remaining issues
+
+None found. The release matches what was reviewed and authorized; every check specified in the authorization passed; no workaround, partial deployment, or improvisation was needed at any step.
+
+### Report
+
+- **Status: DEPLOYED**
+- **Release commit**: `58a9c60e5fbbccdfef619c01df0ce29bc30f9e53`
+- **Previous Production Worker version**: `8882fe86-c759-470b-add5-a19d5e73632e`
+- **New Production Worker version**: `e288bd0a-8602-4da9-99ae-1ed46e92a98d`
+- **Migration results**: `0054_trip_manual_prospects.sql` and `0055_trip_multi_region.sql` both applied successfully, each verified (counts + integrity) immediately after
+- **Before/after counts**: `donors` 297→297, `giving_activities` 5954→5954, `pledge_payment_plans` 46→46, `trips` 1→1, `trip_prospects` 47→47, `trip_financial_attributions` 5→5 (all unchanged throughout); new tables: `trip_prospect_commitments` 0 rows, `trip_destination_regions` 1 row (correct backfill)
+- **Production integrity**: `PRAGMA quick_check: ok` and `PRAGMA foreign_key_check: []` (zero violations), confirmed before migrating, after each migration, and after deployment
+- **Production/Staging isolation**: confirmed throughout -- distinct D1 database ids, every command explicitly scoped to the correct config file
+- **Remaining issues**: none
+
+### Rollback target (unchanged from the readiness review, now the live rollback reference)
+
+If a rollback is ever separately authorized: redeploy Worker version `8882fe86-c759-470b-add5-a19d5e73632e` (`wrangler rollback --config wrangler.production.jsonc` or `wrangler deploy` of that prior build). The new schema is inert to that old code -- safe to roll back the Worker alone, leaving the migrations in place. No destructive database rollback or restore was performed, needed, or attempted this round.
