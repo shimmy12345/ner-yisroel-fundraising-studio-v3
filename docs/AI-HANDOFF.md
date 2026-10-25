@@ -57258,3 +57258,69 @@ A real Staging UI click-through (by the owner, following the prior round's own r
 ### Verdict: PASS
 
 The reported gap (single-region dropdown on Create Trip) is fixed; multi-region selection now works identically on create and edit, persists correctly, remains correct on reopen, is backward-compatible with existing single-region trips, and does not disturb "Find prospects" or previously added prospects. No unrelated changes. Not deployed to Production. The unrelated stash remains untouched.
+
+## Production Release Readiness Review: trip-planner-multi-region-manual-prospects (2026-10-26)
+
+Pre-deployment readiness review only -- **no Production migration or deployment performed this round.** Every Production check below is read-only. Waiting for explicit owner authorization before applying either migration or deploying the Worker.
+
+### 1. Code review -- no unrelated modifications
+
+`git diff origin/feature/independent-cloudflare-sandbox..origin/trip-planner-multi-region-manual-prospects`: 30 files changed, 4 commits (`6f76ce6`, `c513eb0`, `5310718`, `d09e81f`). Every file is one of: a trip-planner API route, a trip-planner UI component, `trips-data.ts`/`trip-model.ts`/`donor-geo-filter.ts`/`travel-regions.ts`/`trip-financial-attribution.ts` (this feature's own logic), the two new migrations, the restore-order/staging-reset/workspace-backup/production-baseline tracking files the two new tables require, or a test file for this feature. No donor import, pledge/payment-plan, giving-management, calendar-sync, or any other unrelated file is touched. Full diff scanned for secrets/credentials -- none found. Confirmed clean.
+
+### 2. Production backup status and restore readiness
+
+Read via the existing, non-secret status publication (`wrangler r2 object get` against `fundraising-os-production-backup-status`, the same sanctioned technique this doc's own "Backup Restore Verification" entries already established):
+
+- **Latest nightly backup**: completed `2026-10-25T13:09:50Z` (`daily/fundraising-os-production-db-20261025T130945Z.sql.gz.gpg`, workflow run `40196321978`) -- within the normal nightly cadence, no gap.
+- **Latest restore verification**: `2026-10-22T13:07:22Z`, `attemptStatus: "success"` (workflow run `39783495159`) -- the same run this doc's own "Backup Restore Verification -- CLOSED" entry already recorded. No restore attempt since then, and none failed since then either. Monthly cadence means this is the most recent evidence available and is current.
+
+### 3. Migration safety for existing Production data
+
+Confirmed directly against real, live `fundraising-os-production-db` (read-only queries only):
+
+- Every actual DDL/DML statement in both `drizzle/0054_trip_manual_prospects.sql` and `drizzle/0055_trip_multi_region.sql` touches only `trip_prospects` (rebuilt) and two brand-new tables (`trip_prospect_commitments`, `trip_destination_regions`). **Neither migration contains any statement referencing `donors`, `giving_activities`, `pledge_payment_plans`, `trip_financial_attributions`, `trips`, or `interactions`** -- confirmed by grepping both files for every DDL/DML keyword. Existing trips, donor records, pledges, donations, and payment plans cannot be touched by these migrations, structurally, not just by intent.
+- Production's current `trip_prospects` column set (`id, trip_id, donor_id, added_method, status, suggested_reason, suggested_score, suggested_generated_at, manual_rank, meeting_at, meeting_location, next_action, trip_notes, linked_interaction_id, created_at, updated_at, selected_at`) is an **exact, column-for-column match** to what 0054's rebuild `INSERT ... SELECT` expects -- confirmed via `PRAGMA table_info` against the real table, not assumed. This is the same rebuild already proven three times over: a local schema-replay test with seeded pre-existing data, a real application against Staging's own live `trip_prospects` (45 rows, zero loss), and now this exact column-match confirmation against Production's own real schema.
+- Production's `trip_prospects.donor_id` is currently `NOT NULL` for every row (confirmed), so 0054's new CHECK constraint (`donor_id IS NOT NULL OR manual_name is set`) cannot reject any existing row -- every current row already satisfies the first half unconditionally.
+- Current Production row counts (read-only, for the record): `trip_prospects`: 47, `trips`: 1, `trip_financial_attributions`: 5, `donors`: 297, `giving_activities`: 5954, `pledge_payment_plans`: 46.
+- Current Production integrity baseline (before any change): `PRAGMA quick_check`: `ok`; `PRAGMA foreign_key_check`: zero violations.
+- Neither `trip_prospect_commitments` nor `trip_destination_regions` exists yet in Production, so their `CREATE TABLE` statements cannot conflict with anything.
+
+### 4. Environment isolation and rollback reference point
+
+- Production D1: `fundraising-os-production-db` (`a51c6571-ae16-4614-aa9a-08f8e6be3ecd`). Staging D1: `fundraising-os-staging-db` (`6c18396c-0a8f-4f2c-ba83-ea809ec10289`). Confirmed distinct in `wrangler.production.jsonc`/`wrangler.staging.jsonc`; every command this entire feature's work ran used one or the other explicitly (`--config wrangler.staging.jsonc` for every Staging action, never applied to Production until this review's own read-only checks).
+- **Current live Production Worker version: `8882fe86-c759-470b-add5-a19d5e73632e`** (created `2026-10-22T03:47:21.463Z`) -- confirmed via `wrangler deployments list --config wrangler.production.jsonc`, unchanged since the backup-restore-verification round earlier in this session. This is the rollback target if a Production deployment of this release needs to be undone.
+
+### 5. Tests and build checks
+
+- `node scripts/run-tests.mjs`: 242/242 test files pass (the only reported failure is the pre-existing, already-documented `main`-branch restore-tracking sync gap, unrelated to this release and not a blocker for Production -- see "Remaining limitations" below).
+- `npx tsc --noEmit`: clean, repo-wide.
+- `eslint`: zero errors or warnings on every file this release touches; a repo-wide lint run shows pre-existing warnings/errors elsewhere in the codebase, none in any file this branch changed (confirmed by cross-referencing).
+- **Both** `pnpm run build:staging-independent` and `pnpm run build:production-independent` succeed, each confirmed by `scripts/verify-build-manifest.mjs` -- the Production build target had not been exercised by this feature's work before this review.
+
+### Exact deployment procedure (for when authorization is given)
+
+Following this repository's own documented migration procedure (`docs/DEPLOYMENT.md`), in order:
+
+1. Re-run the pre-migration row-count/integrity checks above immediately before applying (counts may have moved since this review; re-confirm `PRAGMA quick_check`/`foreign_key_check` are still clean).
+2. `wrangler d1 execute fundraising-os-production-db --remote --config wrangler.production.jsonc --file=drizzle/0054_trip_manual_prospects.sql`
+3. `wrangler d1 execute fundraising-os-production-db --remote --config wrangler.production.jsonc --file=drizzle/0055_trip_multi_region.sql`
+4. Re-run the same row-count/integrity checks; confirm `trip_prospects` count unchanged, `trip_destination_regions` has exactly one row per trip that previously had a `destination_region_id`, `PRAGMA quick_check`/`foreign_key_check` both still clean.
+5. `pnpm run build:production-independent && node scripts/verify-build-manifest.mjs production-independent`
+6. `wrangler deploy --config wrangler.production.jsonc`
+7. Record the new live Version ID (via `wrangler deployments list --config wrangler.production.jsonc`) in this doc.
+8. Smoke-check: confirm `donors`/`giving_activities`/`pledge_payment_plans` counts are byte-for-byte unchanged from step 1, and that the Travel Planning screen loads for the owner's own account.
+
+### Rollback procedure
+
+- **Worker-only rollback (expected to be sufficient for almost any issue)**: redeploy the prior live version -- `wrangler rollback --config wrangler.production.jsonc` (or `wrangler deploy` of the prior build) to Version `8882fe86-c759-470b-add5-a19d5e73632e`. The new schema (nullable `donor_id`, the six new `manual_*` columns, and the two new tables) is inert to the OLD code -- it never reads or writes any of them -- so rolling back the Worker alone, leaving the new schema in place, is safe and non-breaking. This is the expected rollback path.
+- **Full schema rollback (only if the new tables/columns themselves are judged to be the problem, not just the Worker code)**: a reverse migration rebuilding `trip_prospects` back to its pre-0054 shape (`donor_id NOT NULL`, no `manual_*` columns, no CHECK constraint) and dropping `trip_prospect_commitments`/`trip_destination_regions` -- safe only if no row has been inserted with `donor_id IS NULL` since the migration (true immediately after deployment, before any fundraiser uses "Add a prospect manually"; re-verify row counts for both new tables are still zero before attempting this). Not expected to be needed; prepared here only for completeness, matching this repo's own "exact, written-out rollback procedure" convention.
+- **Disaster fallback**: the existing, already-verified full-database restore procedure (`docs/DEPLOYMENT.md`'s restore section; last proven end-to-end on `2026-10-22`, see Section 2 above) remains available regardless of which of the above is used.
+
+### Remaining limitations (unchanged from prior rounds, restated for this review)
+
+- Full browser-driven UI click-through was never performed by me on any round of this feature (no authenticated session available) -- the owner's own manual Staging UI test is the only such verification, already confirmed passing by the owner.
+- `main`'s own restore/schema tracking remains behind (0048, 0054, 0055 all missing there) -- a separate, already-documented sync round, not a blocker for this release.
+
+### Verdict: READY
+
+All five requested checks pass. No unrelated changes, backups and restore path confirmed current and working, both migrations confirmed structurally incapable of touching donor/giving/pledge/payment-plan data and schema-compatible with Production's exact current state, environments confirmed isolated, current Production Worker version recorded for rollback, and all tests/builds green for both Staging and Production targets. **Awaiting the owner's explicit authorization before applying either migration or deploying the Worker to Production.**
