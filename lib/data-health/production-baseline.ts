@@ -29,7 +29,12 @@ export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map(
 // round; this manifest describes the intended baseline a newly
 // provisioned or synced environment should have, reconciled against
 // real Production only once a deployment round actually ships there.
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 54;
+//
+// 55 as of 0055_trip_multi_region.sql (Multi-Region Trip Destination,
+// 2026-10-26, see docs/AI-HANDOFF.md) -- one new table
+// (trip_destination_regions), same STAGING ONLY carve-out as 0054 and
+// every other migration in this trip-planning feature so far.
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 55;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is

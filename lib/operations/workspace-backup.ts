@@ -143,6 +143,15 @@ export const WORKSPACE_BACKUP_EXCLUDED_TABLES = [
   // reset coverage already enforced in lib/operations/staging-reset.ts
   // and tests/staging-reset.test.mjs/d1-restore-order.test.mjs.
   "trip_prospect_commitments",
+  // Multi-Region Trip Destination (2026-10-26, docs/AI-HANDOFF.md) --
+  // same deliberate-deferral reasoning as trips/trip_prospects above.
+  // trip_destination_regions holds only which regions a trip is
+  // tagged with -- never donor, giving, pledge, or financial data.
+  // Covered today only by the nightly whole-database R2 backup, and by
+  // the restore-order/staging-reset coverage already enforced in
+  // lib/operations/staging-reset.ts and tests/staging-reset.test.mjs/
+  // d1-restore-order.test.mjs.
+  "trip_destination_regions",
   // AI Meeting Notes save-identity ledger (migration 0053) -- holds only
   // a save-idempotency fingerprint, never relationship or financial
   // data itself. Classified here (rather than left unclassified) as

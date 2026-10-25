@@ -90,6 +90,11 @@ export const STAGING_RESET_TABLE_ORDER = [
   // before all of them, hence immediately before trip_prospects here.
   "trip_financial_attributions",
   "trip_prospects",
+  // Multi-Region Trip Destination (2026-10-26, docs/AI-HANDOFF.md).
+  // trip_destination_regions references trip_id (trips.id) only --
+  // deleted immediately before trips itself, the same locality
+  // convention as every other parent/child pair in this list.
+  "trip_destination_regions",
   "trips",
   // Google Calendar sync core (2026-10-18, docs/GOOGLE-CALENDAR-
   // INTEGRATION-DESIGN.md and docs/AI-HANDOFF.md) -- NOT wired into any

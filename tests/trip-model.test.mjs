@@ -6,7 +6,7 @@ import {
   tripScheduledInteractionSource, tripCompletedInteractionSource, tripCancelledInteractionSource, tripMeetingInteractionId,
   validateTripName, validateTripDates, validateFundraisingGoalCents, validateNotes, validateMeetingLocation, validateNextAction,
   validateMeetingCompletion, validateMeetingScheduling,
-  matchExistingGivingActivityForCommitment,
+  matchExistingGivingActivityForCommitment, validateDestinationRegionIds,
 } from "../lib/relationships/trip-model.ts";
 import { activityStatus, completedPlannedAt, originalActivitySource, isScheduledActivity, isCancelledActivity } from "../lib/workspace/scheduled-activity.ts";
 import { zonedTimeToUtc } from "../lib/workspace/local-time.ts";
@@ -247,6 +247,22 @@ async function run() {
       { id: "ga-9", category: "open_pledge", committedCents: 500000, activityDate: NOW },
       { id: "ga-10", category: "partially_paid_pledge", committedCents: 500000, activityDate: NOW + 86400 },
     ]), null, "multiple plausible matches must never be auto-resolved");
+  }
+
+  // --- validateDestinationRegionIds (2026-10-26, see docs/AI-HANDOFF.md's
+  // "Multi-Region Trip Destination" entry). ---
+  {
+    const isValidTestRegion = (candidate) => ["a", "b", "c"].includes(candidate);
+    assert.deepEqual(validateDestinationRegionIds(undefined, isValidTestRegion), { ok: true, regionIds: [] }, "omitted means no region, same as before this round");
+    assert.deepEqual(validateDestinationRegionIds(null, isValidTestRegion), { ok: true, regionIds: [] });
+    assert.deepEqual(validateDestinationRegionIds([], isValidTestRegion), { ok: true, regionIds: [] }, "an explicit empty array is a legitimate 'no region' choice");
+    assert.deepEqual(validateDestinationRegionIds(["a"], isValidTestRegion), { ok: true, regionIds: ["a"] });
+    assert.deepEqual(validateDestinationRegionIds(["a", "b", "c"], isValidTestRegion), { ok: true, regionIds: ["a", "b", "c"] }, "any combination of regions is accepted");
+    assert.equal(validateDestinationRegionIds(["a", "z"], isValidTestRegion).ok, false, "an unapproved region id must be rejected");
+    assert.equal(validateDestinationRegionIds(["a", "a"], isValidTestRegion).ok, false, "a repeated region id must be rejected");
+    assert.equal(validateDestinationRegionIds("a", isValidTestRegion).ok, false, "a bare string (not an array) must be rejected");
+    assert.equal(validateDestinationRegionIds([1], isValidTestRegion).ok, false, "a non-string entry must be rejected");
+    assert.equal(validateDestinationRegionIds(["a", "b", "c", "a"], isValidTestRegion).ok, false);
   }
 
   console.log("trip-model: ok");

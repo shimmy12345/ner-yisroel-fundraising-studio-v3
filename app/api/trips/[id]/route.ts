@@ -1,7 +1,8 @@
 import { getChatGPTUser } from "../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { getTrip, listTripProspects, listDonorsForTripSearch, updateTrip } from "../../../../lib/relationships/trips-data";
-import { validateTripName, validateTripDates, validateFundraisingGoalCents, validateNotes, isValidTripStatus } from "../../../../lib/relationships/trip-model";
+import { validateTripName, validateTripDates, validateFundraisingGoalCents, validateNotes, isValidTripStatus, validateDestinationRegionIds } from "../../../../lib/relationships/trip-model";
+import { isValidTravelRegionId } from "../../../../lib/relationships/travel-regions";
 import { logger } from "../../../../lib/logger";
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -27,6 +28,7 @@ type UpdateTripBody = {
   notes?: string | null;
   startDate?: number;
   endDate?: number;
+  destinationRegionIds?: string[];
 };
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -68,6 +70,15 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     if (!datesResult.ok) return Response.json({ error: "Choose a valid start and end date -- the end date must not be before the start date" }, { status: 422 });
     update.startDate = datesResult.startDate;
     update.endDate = datesResult.endDate;
+  }
+  // Multi-Region Trip Destination (2026-10-26, see docs/AI-HANDOFF.md) --
+  // "support selecting multiple regions when creating OR editing a
+  // trip." An omitted field leaves the trip's regions unchanged; an
+  // explicit array (including an empty one) REPLACES the full set.
+  if (body.destinationRegionIds !== undefined) {
+    const regionsResult = validateDestinationRegionIds(body.destinationRegionIds, isValidTravelRegionId);
+    if (!regionsResult.ok) return Response.json({ error: "Choose valid travel regions" }, { status: 422 });
+    update.destinationRegionIds = regionsResult.regionIds;
   }
 
   const now = Math.floor(Date.now() / 1000);

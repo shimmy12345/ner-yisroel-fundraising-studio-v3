@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "d05979d2e068371230568836e96d57b16cedc514e2497e425ace3f278f85d4ed",
+  "schemaHash": "41bef0849e2bd5e9e4b260c885e4f0cf17a253e2b474838c7ae91182e37ceac7",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -55,7 +55,8 @@
     "0051_trip_reconciliation_concurrency_guard.sql",
     "0052_interaction_write_proof_token.sql",
     "0053_meeting_note_save_identity.sql",
-    "0054_trip_manual_prospects.sql"
+    "0054_trip_manual_prospects.sql",
+    "0055_trip_multi_region.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -6605,6 +6606,82 @@
         ]
       },
       {
+        "name": "trip_destination_regions",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "trip_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "region_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "trip_id",
+            "toTable": "trips",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "trip_destination_regions_trip_idx",
+            "columns": [
+              "trip_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `trip_destination_regions_trip_idx` ON `trip_destination_regions` (`trip_id`)"
+          },
+          {
+            "name": "trip_destination_regions_trip_region_idx",
+            "columns": [
+              "trip_id",
+              "region_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `trip_destination_regions_trip_region_idx` ON `trip_destination_regions` (`trip_id`,`region_id`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
         "name": "trip_financial_attributions",
         "columns": [
           {
@@ -8077,6 +8154,11 @@
     },
     {
       "type": "table",
+      "name": "trip_destination_regions",
+      "sql": "CREATE TABLE `trip_destination_regions` ( `id` text PRIMARY KEY NOT NULL, `trip_id` text NOT NULL, `region_id` text NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
       "name": "trip_financial_attributions",
       "sql": "CREATE TABLE `trip_financial_attributions` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `giving_activity_id` text NOT NULL, `note` text, `created_at` integer NOT NULL, `removed_at` integer, `removed_reason` text, `donor_confirmed_at` integer, `commitment_kind` text NOT NULL DEFAULT 'new_commitment' CHECK (`commitment_kind` IN ('new_commitment','preexisting_pledge_collection')), `reported_cash_collected_cents` integer, `reconciled_pending_attribution_id` text, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`giving_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action )"
     },
@@ -8519,6 +8601,16 @@
       "type": "index",
       "name": "shared_activity_recipient_audits_activity_date_idx",
       "sql": "CREATE INDEX `shared_activity_recipient_audits_activity_date_idx` ON `shared_activity_recipient_audits` (`shared_activity_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "trip_destination_regions_trip_idx",
+      "sql": "CREATE INDEX `trip_destination_regions_trip_idx` ON `trip_destination_regions` (`trip_id`)"
+    },
+    {
+      "type": "index",
+      "name": "trip_destination_regions_trip_region_idx",
+      "sql": "CREATE UNIQUE INDEX `trip_destination_regions_trip_region_idx` ON `trip_destination_regions` (`trip_id`,`region_id`)"
     },
     {
       "type": "index",

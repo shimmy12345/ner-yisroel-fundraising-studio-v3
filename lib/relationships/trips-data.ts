@@ -213,48 +213,79 @@ function toDonorSearchRecord(row: DonorSearchRow): DonorSearchRecord & { city: s
   };
 }
 
-export type TripListItem = { id: string; name: string; destinationRegionLabel: string | null; startDate: number; endDate: number; status: TripStatus; prospectCount: number };
+export type TripListItem = { id: string; name: string; destinationRegionLabels: string[]; startDate: number; endDate: number; status: TripStatus; prospectCount: number };
+
+// Multi-Region Trip Destination (2026-10-26, see docs/AI-HANDOFF.md) --
+// every destination region id this owner's trips are tagged with, in
+// one query, grouped by trip in JS -- same "one extra query, merged in
+// memory" convention this file already uses for crossTripConflicts/
+// calendar sync above, never a per-trip query in a loop.
+async function destinationRegionIdsByTrip(tripIds: readonly string[]): Promise<Map<string, TravelRegionId[]>> {
+  const byTrip = new Map<string, TravelRegionId[]>();
+  if (tripIds.length === 0) return byTrip;
+  const result = await env.DB.prepare(`SELECT trip_id, region_id FROM trip_destination_regions WHERE trip_id IN (${tripIds.map(() => "?").join(",")}) ORDER BY region_id`)
+    .bind(...tripIds).all<{ trip_id: string; region_id: string }>();
+  for (const row of result.results) {
+    const list = byTrip.get(row.trip_id) ?? [];
+    list.push(row.region_id as TravelRegionId);
+    byTrip.set(row.trip_id, list);
+  }
+  return byTrip;
+}
+function regionLabelsFor(regionIds: readonly TravelRegionId[]): string[] {
+  return regionIds.map((id) => travelRegionById(id)?.label ?? id);
+}
 
 export async function listTrips(userId: string): Promise<TripListItem[]> {
   // `prospectCount` counts only SELECTED prospects (Deliberate Prospect
   // Selection, 2026-10-18) -- a regional candidate the owner hasn't
   // acted on yet was never a real outreach target, so it must never
   // inflate this trip card's own count.
-  const result = await env.DB.prepare(`SELECT t.id, t.name, t.destination_region_label, t.start_date, t.end_date, t.status,
+  const result = await env.DB.prepare(`SELECT t.id, t.name, t.start_date, t.end_date, t.status,
       (SELECT COUNT(*) FROM trip_prospects WHERE trip_id = t.id AND selected_at IS NOT NULL) AS prospect_count
-    FROM trips t WHERE t.owner_user_id = ? ORDER BY t.start_date DESC`).bind(userId).all<{ id: string; name: string; destination_region_label: string | null; start_date: number; end_date: number; status: TripStatus; prospect_count: number }>();
-  return result.results.map((row) => ({ id: row.id, name: row.name, destinationRegionLabel: row.destination_region_label, startDate: row.start_date, endDate: row.end_date, status: row.status, prospectCount: row.prospect_count }));
+    FROM trips t WHERE t.owner_user_id = ? ORDER BY t.start_date DESC`).bind(userId).all<{ id: string; name: string; start_date: number; end_date: number; status: TripStatus; prospect_count: number }>();
+  const regionsByTrip = await destinationRegionIdsByTrip(result.results.map((row) => row.id));
+  return result.results.map((row) => ({ id: row.id, name: row.name, destinationRegionLabels: regionLabelsFor(regionsByTrip.get(row.id) ?? []), startDate: row.start_date, endDate: row.end_date, status: row.status, prospectCount: row.prospect_count }));
 }
 
-export type CreateTripInput = { name: string; destinationRegionId: TravelRegionId | null; startDate: number; endDate: number; goalCents: number | null; notes: string | null };
+export type CreateTripInput = { name: string; destinationRegionIds: readonly TravelRegionId[]; startDate: number; endDate: number; goalCents: number | null; notes: string | null };
 
-// Creates the trip row only. Deliberate Prospect Selection (2026-10-18,
-// see docs/AI-HANDOFF.md) -- a destination region is still stored on the
-// trip and still drives "Find prospects"' default region, but no
-// trip_prospects row is ever inserted here, even when a region is
-// chosen. Conflating "lives in the destination region" with "a deliberate
-// outreach target the owner actually picked" was exactly the problem
-// this round fixes -- regional donors are surfaced live, read-only, via
-// listDonorsForTripSearch() below, and a row is only ever created (with
-// selected_at set immediately) through the explicit "Add to trip" action
-// (selectTripProspect()).
+// Creates the trip row, plus one trip_destination_regions row per
+// chosen region (2026-10-26: any combination, not just one -- see
+// docs/AI-HANDOFF.md's "Multi-Region Trip Destination" entry).
+// Deliberate Prospect Selection (2026-10-18, see docs/AI-HANDOFF.md) --
+// a destination region still drives "Find prospects"' default region,
+// but no trip_prospects row is ever inserted here, even when a region
+// is chosen. Conflating "lives in the destination region" with "a
+// deliberate outreach target the owner actually picked" was exactly the
+// problem this round fixes -- regional donors are surfaced live,
+// read-only, via listDonorsForTripSearch() below, and a row is only
+// ever created (with selected_at set immediately) through the explicit
+// "Add to trip" action (selectTripProspect()).
 export async function createTrip(userId: string, input: CreateTripInput, now: number): Promise<{ tripId: string }> {
   const tripId = crypto.randomUUID();
-  const region = input.destinationRegionId ? travelRegionById(input.destinationRegionId) : null;
-  await env.DB.prepare(`INSERT INTO trips (id, owner_user_id, name, destination_region_id, destination_region_label, start_date, end_date, fundraising_goal_cents, notes, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planning', ?, ?)`)
-    .bind(tripId, userId, input.name, region?.id ?? null, region?.label ?? null, input.startDate, input.endDate, input.goalCents, input.notes, now, now).run();
+  const statements: D1PreparedStatement[] = [
+    env.DB.prepare(`INSERT INTO trips (id, owner_user_id, name, start_date, end_date, fundraising_goal_cents, notes, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'planning', ?, ?)`)
+      .bind(tripId, userId, input.name, input.startDate, input.endDate, input.goalCents, input.notes, now, now),
+  ];
+  for (const regionId of input.destinationRegionIds) {
+    statements.push(env.DB.prepare("INSERT INTO trip_destination_regions (id, trip_id, region_id, created_at) VALUES (?, ?, ?, ?)").bind(crypto.randomUUID(), tripId, regionId, now));
+  }
+  await env.DB.batch(statements);
   return { tripId };
 }
 
-export type TripRecord = { id: string; name: string; destinationRegionId: TravelRegionId | null; destinationRegionLabel: string | null; startDate: number; endDate: number; goalCents: number | null; notes: string | null; status: TripStatus; createdAt: number; updatedAt: number };
+export type TripRecord = { id: string; name: string; destinationRegionIds: TravelRegionId[]; destinationRegionLabels: string[]; startDate: number; endDate: number; goalCents: number | null; notes: string | null; status: TripStatus; createdAt: number; updatedAt: number };
 
 export async function getTrip(userId: string, tripId: string): Promise<TripRecord | null> {
-  const row = await env.DB.prepare(`SELECT id, name, destination_region_id, destination_region_label, start_date, end_date, fundraising_goal_cents, notes, status, created_at, updated_at
+  const row = await env.DB.prepare(`SELECT id, name, start_date, end_date, fundraising_goal_cents, notes, status, created_at, updated_at
       FROM trips WHERE id = ? AND owner_user_id = ?`).bind(tripId, userId)
-    .first<{ id: string; name: string; destination_region_id: string | null; destination_region_label: string | null; start_date: number; end_date: number; fundraising_goal_cents: number | null; notes: string | null; status: TripStatus; created_at: number; updated_at: number }>();
+    .first<{ id: string; name: string; start_date: number; end_date: number; fundraising_goal_cents: number | null; notes: string | null; status: TripStatus; created_at: number; updated_at: number }>();
   if (!row) return null;
-  return { id: row.id, name: row.name, destinationRegionId: row.destination_region_id as TravelRegionId | null, destinationRegionLabel: row.destination_region_label, startDate: row.start_date, endDate: row.end_date, goalCents: row.fundraising_goal_cents, notes: row.notes, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at };
+  const regionsByTrip = await destinationRegionIdsByTrip([row.id]);
+  const destinationRegionIds = regionsByTrip.get(row.id) ?? [];
+  return { id: row.id, name: row.name, destinationRegionIds, destinationRegionLabels: regionLabelsFor(destinationRegionIds), startDate: row.start_date, endDate: row.end_date, goalCents: row.fundraising_goal_cents, notes: row.notes, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at };
 }
 
 // Collapsed, display-only summary of the full SyncStatus union (Minimal
@@ -430,7 +461,13 @@ export async function selectTripProspect(userId: string, tripId: string, donorId
     return { ok: true, prospectId: existing.id, created: false };
   }
 
-  const addedMethod: AddedMethod = trip.destinationRegionId && regionsForCityState(donor.city, donor.state).includes(trip.destinationRegionId) ? "auto_region" : "manual";
+  // Multi-Region Trip Destination (2026-10-26, see docs/AI-HANDOFF.md):
+  // a donor matching ANY of the trip's destination regions (now a set,
+  // not a single id) counts as a regional match -- the union, never an
+  // intersection, same "any combination" semantics as the Find
+  // Prospects region filter itself.
+  const donorRegions = regionsForCityState(donor.city, donor.state);
+  const addedMethod: AddedMethod = trip.destinationRegionIds.some((regionId) => donorRegions.includes(regionId)) ? "auto_region" : "manual";
   const brief = await loadMeetingBrief(userId, donorId, timezone, now);
   const snapshot = buildSuggestionSnapshot(brief?.recommendation ?? null, now);
   const prospectId = crypto.randomUUID();
@@ -998,7 +1035,7 @@ export async function updateProspectFields(userId: string, tripId: string, prosp
   return true;
 }
 
-export async function updateTrip(userId: string, tripId: string, update: { name?: string; status?: TripStatus; goalCents?: number | null; notes?: string | null; startDate?: number; endDate?: number }, now: number): Promise<boolean> {
+export async function updateTrip(userId: string, tripId: string, update: { name?: string; status?: TripStatus; goalCents?: number | null; notes?: string | null; startDate?: number; endDate?: number; destinationRegionIds?: readonly TravelRegionId[] }, now: number): Promise<boolean> {
   const existing = await getTrip(userId, tripId);
   if (!existing) return false;
   const sets: string[] = [];
@@ -1009,10 +1046,29 @@ export async function updateTrip(userId: string, tripId: string, update: { name?
   if (update.notes !== undefined) { sets.push("notes = ?"); values.push(update.notes); }
   if (update.startDate !== undefined) { sets.push("start_date = ?"); values.push(update.startDate); }
   if (update.endDate !== undefined) { sets.push("end_date = ?"); values.push(update.endDate); }
-  if (sets.length === 0) return true;
-  sets.push("updated_at = ?");
-  values.push(now);
-  await env.DB.prepare(`UPDATE trips SET ${sets.join(", ")} WHERE id = ? AND owner_user_id = ?`).bind(...values, tripId, userId).run();
+
+  const statements: D1PreparedStatement[] = [];
+  if (sets.length > 0) {
+    sets.push("updated_at = ?");
+    values.push(now);
+    statements.push(env.DB.prepare(`UPDATE trips SET ${sets.join(", ")} WHERE id = ? AND owner_user_id = ?`).bind(...values, tripId, userId));
+  }
+  // Multi-Region Trip Destination (2026-10-26, see docs/AI-HANDOFF.md) --
+  // editing a trip's regions REPLACES the full set (delete every
+  // existing row for this trip, then insert exactly the submitted set)
+  // -- the natural meaning of a multi-select form's own submission
+  // ("here is the complete set I chose"), never an incremental add/
+  // remove. `undefined` (the field omitted entirely) leaves the
+  // existing regions untouched, same "omitted means unchanged"
+  // convention every other field on this update already follows.
+  if (update.destinationRegionIds !== undefined) {
+    statements.push(env.DB.prepare("DELETE FROM trip_destination_regions WHERE trip_id = ?").bind(tripId));
+    for (const regionId of update.destinationRegionIds) {
+      statements.push(env.DB.prepare("INSERT INTO trip_destination_regions (id, trip_id, region_id, created_at) VALUES (?, ?, ?, ?)").bind(crypto.randomUUID(), tripId, regionId, now));
+    }
+  }
+  if (statements.length === 0) return true;
+  await env.DB.batch(statements);
   return true;
 }
 

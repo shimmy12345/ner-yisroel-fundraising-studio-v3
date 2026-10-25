@@ -26,6 +26,16 @@ export function TravelPlanningExperience({ trips, regions }: { trips: TripListIt
   const counts = useMemo(() => new Map(STATUS_FILTERS.map((option) => [option.id, option.id === "all" ? trips.length : trips.filter((trip) => trip.status === option.id).length])), [trips]);
   const visible = filter === "all" ? trips : trips.filter((trip) => trip.status === filter);
 
+  // Multi-Region Trip Destination (2026-10-26, see docs/AI-HANDOFF.md) --
+  // "Destination Travel Region" accepts any combination of regions, not
+  // just one. Plain React state (not FormData) for this one field,
+  // since a group of checkboxes has no single native form value the
+  // way a <select> does.
+  const [selectedRegionIds, setSelectedRegionIds] = useState<string[]>([]);
+  function toggleRegion(regionId: string) {
+    setSelectedRegionIds((current) => current.includes(regionId) ? current.filter((id) => id !== regionId) : [...current, regionId]);
+  }
+
   async function createTrip(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
@@ -33,7 +43,6 @@ export function TravelPlanningExperience({ trips, regions }: { trips: TripListIt
     const name = String(form.get("name") ?? "").trim();
     const startDateValue = String(form.get("startDate") ?? "");
     const endDateValue = String(form.get("endDate") ?? "");
-    const destinationRegionId = String(form.get("destinationRegionId") ?? "") || null;
     const goalDollars = String(form.get("goalDollars") ?? "").trim();
     const notes = String(form.get("notes") ?? "").trim();
     if (!name || !startDateValue || !endDateValue) { setError("Trip name, start date, and end date are required."); return; }
@@ -45,7 +54,7 @@ export function TravelPlanningExperience({ trips, regions }: { trips: TripListIt
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           name,
-          destinationRegionId,
+          destinationRegionIds: selectedRegionIds,
           startDate: toEpoch(startDateValue),
           endDate: toEpoch(endDateValue),
           goalCents: goalDollars ? Math.round(Number(goalDollars) * 100) : null,
@@ -72,10 +81,13 @@ export function TravelPlanningExperience({ trips, regions }: { trips: TripListIt
 
     {showForm && <form className="travel-planning-new-trip-form" onSubmit={createTrip}>
       <label>Trip name<input name="name" placeholder="Chicago -- November 2026" required maxLength={200} /></label>
-      <label>Destination Travel Region<select name="destinationRegionId" defaultValue="">
-        <option value="">No region (manual prospects only)</option>
-        {regions.map((region) => <option key={region.id} value={region.id}>{region.label}</option>)}
-      </select></label>
+      <fieldset className="travel-planning-new-trip-regions">
+        <legend>Destination Travel Region(s)</legend>
+        {regions.map((region) => <label key={region.id} className="travel-planning-region-checkbox">
+          <input type="checkbox" checked={selectedRegionIds.includes(region.id)} onChange={() => toggleRegion(region.id)} /> {region.label}
+        </label>)}
+        {selectedRegionIds.length === 0 && <p className="travel-planning-form-hint">No region selected -- manual prospects only, until you add one.</p>}
+      </fieldset>
       <label>Start date<input name="startDate" type="date" required /></label>
       <label>End date<input name="endDate" type="date" required /></label>
       <label>Fundraising goal (optional)<input name="goalDollars" type="number" min="1" step="1" placeholder="25000" /></label>
@@ -93,7 +105,7 @@ export function TravelPlanningExperience({ trips, regions }: { trips: TripListIt
           <strong>{trip.name}</strong>
           <span className={`travel-planning-status-badge status-${trip.status}`}>{trip.status}</span>
         </div>
-        <p className="travel-planning-trip-card-meta">{trip.destinationRegionLabel ?? "No region selected"} &middot; {dateLabel(trip.startDate)} &ndash; {dateLabel(trip.endDate)}</p>
+        <p className="travel-planning-trip-card-meta">{trip.destinationRegionLabels.length > 0 ? trip.destinationRegionLabels.join(", ") : "No region selected"} &middot; {dateLabel(trip.startDate)} &ndash; {dateLabel(trip.endDate)}</p>
         <p className="travel-planning-trip-card-count">{trip.prospectCount} prospect{trip.prospectCount === 1 ? "" : "s"}</p>
       </a>)}
     </section> : <div className="travel-planning-empty"><strong>No trips {filter === "all" ? "yet" : `in ${filter}`}.</strong><p>Create a trip to start identifying donors worth meeting in a city you&rsquo;re planning to visit.</p></div>}

@@ -505,16 +505,12 @@ test("baseline picks up the schema-adding 0054 trip manual prospects migration",
   // 0054_trip_manual_prospects.sql (Multi-Region Prospect Selection +
   // Manually Added Prospects, 2026-10-25, see docs/AI-HANDOFF.md)
   // rebuilds trip_prospects with donor_id now nullable plus six new
-  // manual_* columns, and adds one new table, trip_prospect_commitments
-  // -- the current LATEST migration as of this round, so the schema
-  // hash must change again.
+  // manual_* columns, and adds one new table, trip_prospect_commitments.
+  // No longer the latest migration (0055 is, see the test below).
   //
   // STAGING ONLY as of this round -- NOT applied to Production (same
   // carve-out as 0046/0047/0050/0051).
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0054_trip_manual_prospects.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 54, "exactly 54 real, applied-order migrations -- the 0049 draft in drizzle/pending-review/ is never counted");
-  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
-  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  assert.ok(manifest.sourceMigrations.includes("0054_trip_manual_prospects.sql"));
   const tripProspectsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trip_prospects");
   assert.ok(tripProspectsTable, "trip_prospects must still be a real table in the baseline topology");
   assert.doesNotMatch(tripProspectsTable.sql, /`donor_id` text NOT NULL/, "donor_id must now be nullable");
@@ -524,4 +520,24 @@ test("baseline picks up the schema-adding 0054 trip manual prospects migration",
   const commitmentsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trip_prospect_commitments");
   assert.ok(commitmentsTable, "trip_prospect_commitments must be a real table in the baseline topology");
   assert.match(commitmentsTable.sql, /committed_cents/);
+});
+
+test("baseline picks up the schema-adding 0055 trip multi-region migration", () => {
+  // 0055_trip_multi_region.sql (Multi-Region Trip Destination,
+  // 2026-10-26, see docs/AI-HANDOFF.md) adds one new table,
+  // trip_destination_regions -- the current LATEST migration as of
+  // this round, so the schema hash must change again.
+  //
+  // STAGING ONLY as of this round -- NOT applied to Production (same
+  // carve-out as 0046/0047/0050/0051/0054).
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0055_trip_multi_region.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 55, "exactly 55 real, applied-order migrations -- the 0049 draft in drizzle/pending-review/ is never counted");
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  const destinationRegionsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trip_destination_regions");
+  assert.ok(destinationRegionsTable, "trip_destination_regions must be a real table in the baseline topology");
+  assert.match(destinationRegionsTable.sql, /region_id/);
+  const uniqueIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "trip_destination_regions_trip_region_idx");
+  assert.ok(uniqueIndex, "the trip+region uniqueness guard must be captured in the baseline");
+  assert.match(uniqueIndex.sql, /UNIQUE/i);
 });

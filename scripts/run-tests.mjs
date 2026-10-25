@@ -109,6 +109,7 @@ const TEST_FILES = [
   "tests/pending-reconciliation-transaction.test.mjs",
   "tests/trip-prospect-selection-schema.test.mjs",
   "tests/trip-manual-prospects-schema.test.mjs",
+  "tests/trip-multi-region-schema.test.mjs",
   "tests/data-health.test.mjs",
   "tests/data-health-timestamp-formatting.test.mjs",
   "tests/data-health-repair.test.mjs",

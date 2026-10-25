@@ -171,8 +171,8 @@ export function TripDashboardExperience({
   // region's donors (never an intersection) -- see donor-geo-filter.ts's
   // own matchesAnyRegionFilter doc comment.
   const effectiveRegionSet: RegionSetFilterValue = useMemo(
-    () => (selectedRegionIds === ALL_REGIONS ? ALL_REGIONS : selectedRegionIds ?? (trip.destinationRegionId ? new Set([trip.destinationRegionId]) : ALL_REGIONS)),
-    [selectedRegionIds, trip.destinationRegionId],
+    () => (selectedRegionIds === ALL_REGIONS ? ALL_REGIONS : selectedRegionIds ?? (trip.destinationRegionIds.length > 0 ? new Set(trip.destinationRegionIds) : ALL_REGIONS)),
+    [selectedRegionIds, trip.destinationRegionIds],
   );
   // searchDonors() (lib/relationships/donor-search.ts) is typed over the
   // plain DonorSearchRecord shape, so its result loses the extra
@@ -248,10 +248,11 @@ export function TripDashboardExperience({
   return <>
     <header className="page-header travel-planning-header">
       <div>
-        <p className="eyebrow">{trip.destinationRegionLabel ?? "No region selected"} &middot; <span className={`travel-planning-status-badge status-${trip.status}`}>{trip.status}</span></p>
+        <p className="eyebrow">{trip.destinationRegionLabels.length > 0 ? trip.destinationRegionLabels.join(", ") : "No region selected"} &middot; <span className={`travel-planning-status-badge status-${trip.status}`}>{trip.status}</span></p>
         <h1>{trip.name}</h1>
         <p className="subhead">{dateLabel(trip.startDate)} &ndash; {dateLabel(trip.endDate)}{trip.goalCents != null ? ` · Goal: ${new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(trip.goalCents / 100)}` : ""}</p>
         {trip.notes && <p className="travel-planning-trip-notes">{trip.notes}</p>}
+        <EditTripRegionsControl tripId={trip.id} destinationRegionIds={trip.destinationRegionIds} onChanged={refresh} />
       </div>
       <TripStatusControl tripId={trip.id} currentStatus={trip.status} onChanged={refresh} />
     </header>
@@ -305,6 +306,58 @@ function TripStatusControl({ tripId, currentStatus, onChanged }: { tripId: strin
     <option value="completed">Completed</option>
     <option value="cancelled">Cancelled</option>
   </select>;
+}
+
+// Multi-Region Trip Destination (2026-10-26, see docs/AI-HANDOFF.md) --
+// "support selecting multiple regions when creating OR editing a
+// trip." Editing REPLACES the trip's full region set (same semantics
+// as PATCH /api/trips/:id's own `destinationRegionIds` field) -- the
+// natural meaning of resubmitting a checkbox group, never an
+// incremental add/remove.
+function EditTripRegionsControl({ tripId, destinationRegionIds, onChanged }: { tripId: string; destinationRegionIds: readonly TravelRegionId[]; onChanged: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<string[]>([...destinationRegionIds]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function open() {
+    setDraft([...destinationRegionIds]);
+    setError(null);
+    setEditing(true);
+  }
+  function toggle(regionId: string) {
+    setDraft((current) => current.includes(regionId) ? current.filter((id) => id !== regionId) : [...current, regionId]);
+  }
+  async function save() {
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/trips/${encodeURIComponent(tripId)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ destinationRegionIds: draft }) });
+      if (!response.ok) { const payload = await response.json().catch(() => ({})) as { error?: string }; throw new Error(payload.error ?? "Could not save regions."); }
+      setEditing(false);
+      onChanged();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not save regions.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!editing) return <button type="button" className="travel-planning-edit-regions-toggle" onClick={open}>Edit destination regions</button>;
+
+  return <div className="travel-planning-confirm-panel travel-planning-edit-regions-form" aria-label="Edit destination regions">
+    {error && <p className="travel-planning-error" role="alert">{error}</p>}
+    <fieldset className="travel-planning-new-trip-regions">
+      <legend>Destination Travel Region(s)</legend>
+      {TRAVEL_REGIONS.map((region) => <label key={region.id} className="travel-planning-region-checkbox">
+        <input type="checkbox" checked={draft.includes(region.id)} onChange={() => toggle(region.id)} /> {region.label}
+      </label>)}
+    </fieldset>
+    <div className="travel-planning-confirm-actions">
+      <button type="button" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save regions"}</button>
+      <button type="button" onClick={() => setEditing(false)} disabled={saving}>Cancel</button>
+    </div>
+  </div>;
 }
 
 // "My trip prospects" (Section 3) -- only deliberately selected
@@ -408,7 +461,7 @@ function ManualProspectSection({ trip, show, onShow, onSubmit }: {
 }) {
   const [name, setName] = useState("");
   const [city, setCity] = useState("");
-  const [regionId, setRegionId] = useState(trip.destinationRegionId ?? "");
+  const [regionId, setRegionId] = useState<string>(trip.destinationRegionIds[0] ?? "");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [notes, setNotes] = useState("");
@@ -419,7 +472,7 @@ function ManualProspectSection({ trip, show, onShow, onSubmit }: {
     setBusy(true); setError(null);
     try {
       await onSubmit({ name, city, regionId, phone, email, notes });
-      setName(""); setCity(""); setRegionId(trip.destinationRegionId ?? ""); setPhone(""); setEmail(""); setNotes("");
+      setName(""); setCity(""); setRegionId(trip.destinationRegionIds[0] ?? ""); setPhone(""); setEmail(""); setNotes("");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "This prospect could not be added.");
     } finally {

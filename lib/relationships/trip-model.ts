@@ -414,3 +414,27 @@ export function matchExistingGivingActivityForCommitment(commitment: UnmigratedC
     && Math.abs(candidate.activityDate - commitment.activityDate!) <= windowSeconds);
   return matches.length === 1 ? matches[0] : null;
 }
+
+// Multi-Region Trip Destination (2026-10-26, see docs/AI-HANDOFF.md).
+// "Destination Travel Region" on Create/Edit Trip accepts any
+// combination of the 15 approved regions, not just one. Validates a
+// plain array of region id strings: every entry must be a real,
+// approved region id (never trusted as free text, same discipline
+// app/api/trips/route.ts's own single-id check already used), and no
+// id may repeat (the UNIQUE(trip_id, region_id) index this round's own
+// migration adds would reject a duplicate anyway, but surfacing it here
+// as a clear validation error is friendlier than a raw constraint
+// failure). An empty array is valid -- "no region (manual prospects
+// only)" is, and remains, a legitimate choice.
+const MAX_DESTINATION_REGIONS = 15; // exactly the number of approved regions -- a generous, not arbitrary, ceiling
+
+export function validateDestinationRegionIds<T extends string>(value: unknown, isValidRegionId: (candidate: string) => candidate is T): { ok: true; regionIds: T[] } | { ok: false } {
+  if (value === undefined || value === null) return { ok: true, regionIds: [] };
+  if (!Array.isArray(value) || value.length > MAX_DESTINATION_REGIONS) return { ok: false };
+  const regionIds: T[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !isValidRegionId(entry) || regionIds.includes(entry)) return { ok: false };
+    regionIds.push(entry);
+  }
+  return { ok: true, regionIds };
+}

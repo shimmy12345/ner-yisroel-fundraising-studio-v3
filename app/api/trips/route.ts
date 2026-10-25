@@ -1,8 +1,8 @@
 import { getChatGPTUser } from "../../chatgpt-auth";
 import { ensureUserProfile } from "../../../lib/auth/profile";
 import { listTrips, createTrip } from "../../../lib/relationships/trips-data";
-import { validateTripName, validateTripDates, validateFundraisingGoalCents, validateNotes } from "../../../lib/relationships/trip-model";
-import { travelRegionById } from "../../../lib/relationships/travel-regions";
+import { validateTripName, validateTripDates, validateFundraisingGoalCents, validateNotes, validateDestinationRegionIds } from "../../../lib/relationships/trip-model";
+import { isValidTravelRegionId } from "../../../lib/relationships/travel-regions";
 import { logger } from "../../../lib/logger";
 
 // Trip-Based Meeting Planning -- Phase 2 (2026-10-15, see docs/AI-HANDOFF.md).
@@ -20,7 +20,7 @@ export async function GET() {
 
 type CreateTripBody = {
   name?: string;
-  destinationRegionId?: string | null;
+  destinationRegionIds?: string[];
   startDate?: number;
   endDate?: number;
   goalCents?: number | null;
@@ -41,13 +41,13 @@ export async function POST(request: Request) {
   const datesResult = validateTripDates(body.startDate, body.endDate);
   if (!datesResult.ok) return Response.json({ error: "Choose a valid start and end date -- the end date must not be before the start date" }, { status: 422 });
 
-  // A region id is optional (a trip can be created with only manually-
-  // added prospects), but if one is supplied it must be one of the 15
-  // approved regions -- never trusted as free text, matching the donor
-  // directory's own `travelRegionById()` fallback-to-null convention for
-  // an unknown/stale id (lib/navigation convention, app/donors/page.tsx).
-  const region = body.destinationRegionId ? travelRegionById(body.destinationRegionId) : null;
-  if (body.destinationRegionId && !region) return Response.json({ error: "Choose a valid travel region" }, { status: 422 });
+  // Any combination of regions is optional (a trip can be created with
+  // only manually-added prospects), but every supplied id must be one
+  // of the 15 approved regions, with no duplicates -- never trusted as
+  // free text, matching the donor directory's own `travelRegionById()`
+  // validation discipline (lib/navigation convention, app/donors/page.tsx).
+  const regionsResult = validateDestinationRegionIds(body.destinationRegionIds, isValidTravelRegionId);
+  if (!regionsResult.ok) return Response.json({ error: "Choose valid travel regions" }, { status: 422 });
 
   const goalResult = validateFundraisingGoalCents(body.goalCents);
   if (!goalResult.ok) return Response.json({ error: "Fundraising goal must be a positive whole number of cents, or left blank" }, { status: 422 });
@@ -61,7 +61,7 @@ export async function POST(request: Request) {
   try {
     const { tripId } = await createTrip(
       profile.id,
-      { name: nameResult.name, destinationRegionId: region?.id ?? null, startDate: datesResult.startDate, endDate: datesResult.endDate, goalCents: goalResult.goalCents, notes: notesResult.notes },
+      { name: nameResult.name, destinationRegionIds: regionsResult.regionIds, startDate: datesResult.startDate, endDate: datesResult.endDate, goalCents: goalResult.goalCents, notes: notesResult.notes },
       now,
     );
     logger.info("trip_created", { userId: profile.id, tripId });

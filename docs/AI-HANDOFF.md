@@ -57229,3 +57229,32 @@ Every disposable row this round created (`trip_prospect_commitments` row, `trip_
 ### Verdict: PASS
 
 All six requested checks passed through the real, unmodified application functions against real Staging data. No defect found this round. Disposable data fully cleaned up and verified removed; Staging's real data and schema integrity confirmed unchanged. Nothing merged or deployed to Production. The unrelated stash remains untouched.
+
+## Multi-Region Trip Destination (2026-10-26)
+
+A real Staging UI click-through (by the owner, following the prior round's own recommendation) found a genuine gap this feature's prior rounds missed: "Find prospects" already supported filtering by any combination of regions, but the Create Trip screen's own "Destination Travel Region" field was still a single-selection `<select>` -- a trip itself could only ever be TAGGED with one region, even though prospects from any region could already be added to it. There was also no "edit trip region" capability of any kind before this round (not even single-region).
+
+### What changed (additive; nothing existing removed)
+
+- **Schema** (`drizzle/0055_trip_multi_region.sql`, STAGING ONLY, same carve-out as every other migration in this feature): one new table, `trip_destination_regions` (`trip_id`, `region_id`, `UNIQUE(trip_id, region_id)`). `trips.destination_region_id`/`destination_region_label` are left in place, untouched, simply no longer read or written going forward -- a column rebuild to remove them was rejected as unnecessary risk for zero benefit; every reader lives inside this same feature's own files, confirmed by a repo-wide search before writing the migration. The migration backfills every existing trip's single region into one real row here, so "preserve compatibility with existing trips that have only one region" is true immediately, not just for new trips.
+- **Data layer** (`lib/relationships/trips-data.ts`): `TripRecord`/`TripListItem` now carry `destinationRegionIds`/`destinationRegionLabels` (arrays, replacing the old singular fields). `createTrip` inserts one row per chosen region. `updateTrip` gained a `destinationRegionIds` option that REPLACES the full set (delete-then-reinsert, the natural meaning of resubmitting a checkbox group) -- omitting the field leaves existing regions untouched. `selectTripProspect`'s auto-region-match check now matches against ANY of the trip's regions (union, never intersection), consistent with "Find prospects"' own multi-region semantics.
+- **Validation** (`lib/relationships/trip-model.ts`): new `validateDestinationRegionIds` (pure, generic) -- an empty array is a legitimate "no region" choice; every id must be real and non-repeated.
+- **API** (`app/api/trips/route.ts` POST, `app/api/trips/[id]/route.ts` PATCH): both now accept `destinationRegionIds: string[]` instead of a single id.
+- **UI**: `TravelPlanningExperience.tsx`'s Create Trip form replaces the dropdown with a checkbox fieldset over all 15 regions. `TripDashboardExperience.tsx` adds a new "Edit destination regions" control (there was no trip-edit capability of any kind before this round) and shows every selected region's label in the header; the "Find prospects" region-filter default now falls back to the trip's full region set (not just a wrapped single id) when nothing is explicitly chosen in the URL.
+
+### Verification
+
+- `node scripts/run-tests.mjs`: 242/242 test files pass, including a new `tests/trip-multi-region-schema.test.mjs` (migration proven against a real in-order replay: an existing single-region trip's region survives as a real row, a no-region trip gains no rows, the same region can never attach twice, and editing is a clean delete-then-reinsert) and new `validateDestinationRegionIds` cases in `tests/trip-model.test.mjs`. `npx tsc --noEmit` and `eslint` both clean.
+- Applied to real `fundraising-os-staging-db`: row counts on every touched table unchanged (`trips`: 1, `trip_prospects`: 45, `donors`: 266) before/after; the one existing real trip's `chicago-suburbs` region correctly backfilled into one real row; `PRAGMA quick_check`: `ok`; `PRAGMA foreign_key_check`: zero violations.
+- Rebuilt and redeployed the independent Staging Worker (version `7e293d12-106d-4c54-991f-ea3aa925ff03`).
+- **Functional, through the real application functions** (same technique as the prior round's own disclosed one -- a temporary, never-committed, never-deployed Worker script calling `createTrip`/`getTrip`/`updateTrip` directly against real Staging D1; no authentication bypassed, simulated, or weakened): created a disposable trip with two regions (`chicago-suburbs`, `nyc-boroughs`) -- confirmed saved and read back correctly; edited it to a different three-region combination (`israel`, `lakewood-ocean-county-nj`, `nyc-boroughs`) -- confirmed the full set replaced correctly; re-read it again (simulating "reopen") -- identical to the edit, confirming real persistence, not an in-memory artifact; cleared it to zero regions -- confirmed "no region" remains a legitimate, working state. Disposable rows deleted immediately inside the same harness call; re-confirmed via direct query that Staging's real row counts (`trips`: 1, `trip_destination_regions`: 1) exactly match the pre-test baseline.
+
+### Remaining limitations
+
+- Full browser-driven UI click-through of the new checkbox form and the new "Edit destination regions" control was not performed -- same disclosed limitation as every prior round in this feature (no authenticated browser session available). The underlying data/API functions these controls call are proven end to end above.
+- `main`'s own restore/schema tracking is now further behind (0048, 0054, and 0055 all missing there) -- the same separate, deliberate sync round already noted in every prior entry, not a blocker for Staging use.
+- This migration and worker deploy are STAGING ONLY, same as every prior round in this feature.
+
+### Verdict: PASS
+
+The reported gap (single-region dropdown on Create Trip) is fixed; multi-region selection now works identically on create and edit, persists correctly, remains correct on reopen, is backward-compatible with existing single-region trips, and does not disturb "Find prospects" or previously added prospects. No unrelated changes. Not deployed to Production. The unrelated stash remains untouched.
