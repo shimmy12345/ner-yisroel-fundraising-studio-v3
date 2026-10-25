@@ -18,6 +18,7 @@ import {
   buildSuggestionSnapshot, findCrossTripConflicts, parseLocalDateTimeInput,
   statusRequiresInteraction, timezoneForState, tripCancelledInteractionSource, tripCompletedInteractionSource,
   tripMeetingInteractionId, tripScheduledInteractionSource, validateMeetingCompletion, validateMeetingScheduling,
+  matchExistingGivingActivityForCommitment,
   type AddedMethod, type CrossTripConflict, type TripProspectStatus, type TripStatus, type TripCommitmentKind,
 } from "./trip-model.ts";
 import { REAL_COMMITMENT_CATEGORIES } from "./pledge-payment-plan.ts";
@@ -1578,22 +1579,40 @@ export async function findPossibleDonorMatches(userId: string, tripId: string, p
 
 // Unlinked-Prospect Fundraising migration (shared by linkProspectToDonor
 // and convertProspectToNewDonor below): every active, not-yet-migrated
-// trip_prospect_commitments row for this prospect becomes a REAL
-// giving_activities row (via the exact same insert shape lib/giving/
-// pending-records.ts's insertPendingGift/insertPendingPledge already
-// use for a brand-new pending record -- deliberately re-implemented
-// here, not called, since those two validate and re-parse a raw string
-// amount/date, and this commitment's own committed_cents/activity_date
-// are already-validated numbers; re-serializing them to a string and
-// re-parsing would risk a cent-rounding mismatch for no benefit) and a
-// REAL trip_financial_attributions row (the exact same link shape
-// attributeGivingActivityToTrip already uses for a 'new_commitment'),
-// preserving the commitment's own category/amount/date/designation/
-// note/donor_confirmed_at exactly. The commitment row itself is marked
-// migrated, never deleted -- every future read of this trip's financial
-// totals (listActiveUnlinkedProspectCommitments above) excludes a
-// migrated commitment, so the new real attribution represents that
-// exact dollar amount exactly once -- never double-counted.
+// trip_prospect_commitments row for this prospect is attributed to the
+// now-known donor -- preferring an EXISTING real record over ever
+// creating a duplicate.
+//
+// JL-duplicate fix (2026-10-26, see docs/AI-HANDOFF.md's "Verification:
+// Manual-Prospect JL Duplicate Risk" entry): if this donor already has
+// a real, unattributed, already-JL-imported giving_activities row that
+// unambiguously matches this commitment (matchExistingGivingActivityForCommitment,
+// lib/relationships/trip-model.ts -- same category/committed_cents/
+// activity_date-window matching JL import's own pendingGiftMatches/
+// pendingPledgeMatches already use), THAT record is attributed to the
+// trip directly -- never a second, parallel "pending" row for a pledge
+// or gift that is, in reality, already real. Before this fix, every
+// commitment unconditionally created a brand-new pending_gift/
+// pending_pledge giving_activities row, which is correct ONLY when no
+// matching real record exists yet (the common case, still handled
+// below exactly as before) -- when the real record predates linking,
+// nothing in JL import's own reconciliation would ever have caught the
+// resulting duplicate, since that reconciliation only ever compares a
+// FRESH import batch against existing pending rows, never re-scans
+// already-imported history against a pending row created later.
+//
+// Falls back to creating a new pending record (the exact same insert
+// shape lib/giving/pending-records.ts's insertPendingGift/
+// insertPendingPledge already use for a brand-new pending record --
+// deliberately re-implemented here, not called, since those two
+// validate and re-parse a raw string amount/date, and this commitment's
+// own committed_cents/activity_date are already-validated numbers) when
+// no unambiguous real match exists. Either way, the commitment row
+// itself is marked migrated, never deleted -- every future read of this
+// trip's financial totals (listActiveUnlinkedProspectCommitments above)
+// excludes a migrated commitment, so the attributed record (real or
+// newly-created-pending) represents that exact dollar amount exactly
+// once -- never double-counted.
 async function migrateProspectCommitments(userId: string, tripId: string, prospectId: string, donorId: string, now: number): Promise<void> {
   const commitments = await env.DB.prepare(`SELECT id, category, committed_cents, activity_date, designation, note, donor_confirmed_at
       FROM trip_prospect_commitments WHERE prospect_id = ? AND removed_at IS NULL AND migrated_at IS NULL`)
@@ -1602,7 +1621,44 @@ async function migrateProspectCommitments(userId: string, tripId: string, prospe
   const donor = await env.DB.prepare("SELECT id, external_id, donor_code FROM donors WHERE id = ? AND owner_user_id = ?").bind(donorId, userId).first<{ id: string; external_id: string | null; donor_code: string | null }>();
   if (!donor) return; // defensive: the caller only ever reaches here immediately after confirming donorId is a real, owned donor
 
+  // Every real, currently-unattributed giving_activities row for this
+  // donor -- fetched once, then narrowed in memory as each commitment
+  // below claims at most one, so two commitments in the SAME migration
+  // can never both claim the SAME real record (the partial UNIQUE index
+  // on trip_financial_attributions.giving_activity_id is the database-
+  // level backstop if that narrowing were ever bypassed by a race).
+  const realCandidatesResult = await env.DB.prepare(`SELECT id, category, committed_cents, activity_date FROM giving_activities
+      WHERE owner_user_id = ? AND donor_id = ? AND record_origin = 'live' AND workspace_status = 'active'
+        AND category IN ('completed_gift','open_pledge','partially_paid_pledge')
+        AND NOT EXISTS (SELECT 1 FROM trip_financial_attributions tfa WHERE tfa.giving_activity_id = giving_activities.id AND tfa.removed_at IS NULL)`)
+    .bind(userId, donor.id).all<{ id: string; category: string; committed_cents: number | null; activity_date: number | null }>();
+  let availableRealCandidates = realCandidatesResult.results.map((row) => ({ id: row.id, category: row.category, committedCents: row.committed_cents, activityDate: row.activity_date }));
+
   for (const commitment of commitments.results) {
+    const matched = matchExistingGivingActivityForCommitment(
+      { category: commitment.category, committedCents: commitment.committed_cents, activityDate: commitment.activity_date },
+      availableRealCandidates,
+    );
+    if (matched) {
+      const attributionId = crypto.randomUUID();
+      try {
+        await env.DB.batch([
+          env.DB.prepare(`INSERT INTO trip_financial_attributions (id, user_id, trip_id, donor_id, giving_activity_id, note, commitment_kind, reported_cash_collected_cents, reconciled_pending_attribution_id, donor_confirmed_at, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, 'new_commitment', NULL, NULL, ?, ?)`)
+            .bind(attributionId, userId, tripId, donor.id, matched.id, commitment.note || null, commitment.donor_confirmed_at, now),
+          env.DB.prepare(`UPDATE trip_prospect_commitments SET migrated_giving_activity_id = ?, migrated_attribution_id = ?, migrated_at = ? WHERE id = ?`)
+            .bind(matched.id, attributionId, now, commitment.id),
+        ]);
+        availableRealCandidates = availableRealCandidates.filter((candidate) => candidate.id !== matched.id);
+        continue;
+      } catch {
+        // The matched record was attributed elsewhere between the read
+        // above and this write (a genuine race) -- fall through to the
+        // pending-record path below exactly as if no match had been
+        // found, never left half-migrated.
+      }
+    }
+
     const givingActivityId = crypto.randomUUID();
     const auditId = crypto.randomUUID();
     const attributionId = crypto.randomUUID();
@@ -1699,7 +1755,34 @@ export async function convertProspectToNewDonor(userId: string, tripId: string, 
   ]);
   logger.info("manual_donor_created_from_trip_prospect", { donorId, userId, tripId, prospectId });
 
-  await env.DB.prepare("UPDATE trip_prospects SET donor_id = ?, updated_at = ? WHERE id = ? AND donor_id IS NULL").bind(donorId, now, prospectId).run();
+  // Concurrency fix (2026-10-26, see docs/AI-HANDOFF.md's "Verification:
+  // Manual-Prospect JL Duplicate Risk" entry): a real defect this round
+  // fixes. Two concurrent convert requests for the SAME prospect both
+  // pass the ownedUnlinkedProspect check above (both read donor_id IS
+  // NULL), both create their OWN brand-new donor, and -- before this
+  // fix -- both unconditionally called migrateProspectCommitments with
+  // their OWN donorId, even the one that lost this race. That request's
+  // donor_id UPDATE affects zero rows (the winner already set it), but
+  // migrateProspectCommitments still ran, attributing this prospect's
+  // commitments to the LOSING request's own orphaned donor -- a donor
+  // the prospect itself is not actually linked to, while also leaving
+  // that orphaned donor permanently in the workspace for no reason.
+  // Checked and handled exactly like linkProspectToDonor's own identical
+  // guard: 0 rows changed means a concurrent request already linked (or
+  // converted) this prospect first -- delete the donor this losing
+  // request just created (nothing else can reference it yet: the write
+  // above is the only thing that ever pointed anything at it) and report
+  // the same "prospect_not_found" a concurrent plain link would.
+  const updateResult = await env.DB.prepare("UPDATE trip_prospects SET donor_id = ?, updated_at = ? WHERE id = ? AND donor_id IS NULL")
+    .bind(donorId, now, prospectId).run() as unknown as { meta: { changes?: number } };
+  if ((updateResult.meta.changes ?? 0) === 0) {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM donor_contact_audits WHERE id = ?").bind(auditId),
+      env.DB.prepare("DELETE FROM donors WHERE id = ?").bind(donorId),
+    ]);
+    logger.info("manual_donor_created_from_trip_prospect_race_discarded", { donorId, userId, tripId, prospectId });
+    return { ok: false, reason: "prospect_not_found" };
+  }
   await migrateProspectCommitments(userId, tripId, prospectId, donorId, now);
   return { ok: true, donorId };
 }

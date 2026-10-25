@@ -370,3 +370,47 @@ export function validateManualProspectEmail(value: unknown): { ok: true; email: 
 export function validateManualProspectNotes(value: unknown): { ok: true; notes: string | null } | { ok: false } {
   return validateNotes(value);
 }
+
+// Unlinked-Prospect Fundraising -- JL-duplicate verification (2026-10-26,
+// see docs/AI-HANDOFF.md's "Verification: Manual-Prospect JL Duplicate
+// Risk" entry). A real defect this round fixes: linking/converting an
+// unlinked prospect used to ALWAYS create a brand-new pending_gift/
+// pending_pledge giving_activities row for every one of its trip-
+// reported commitments, with no check for whether a real, already-JL-
+// imported record for that exact pledge/gift already exists on the now-
+// known donor. If it did (the donor's real pledge was imported from JL
+// before the prospect was ever linked), the migration created a
+// permanent, parallel "pending" duplicate that nothing ever reconciles
+// automatically -- JL import's own pendingGiftMatches/pendingPledgeMatches
+// (lib/giving/management.ts) only ever compares a FRESH import batch
+// against existing pending rows, never re-scans already-imported history
+// against a pending row created later.
+//
+// This pure function is the fix's own matching logic -- deliberately
+// separate from, but structurally identical to, pendingGiftMatches'/
+// pendingPledgeMatches' own category/committed_cents/activity_date-
+// window matching (never paid_cents/balance_cents, which drift with
+// partial payments; never completed_gift matching a pending PLEDGE or
+// vice versa -- same reasoning as pendingPledgeMatches' own PLEDGE_
+// IMPORT_CATEGORIES). Deliberately returns a match ONLY when there is
+// EXACTLY ONE candidate -- zero or multiple candidates both return null,
+// falling back to the existing (safe, already-correct) "create a new
+// pending record" path, never guessing among several plausible real
+// records -- the same "never automatically match solely by donor and
+// amount where multiple records could qualify" rule trips-data.ts's own
+// attributeGivingActivityToTrip already enforces for the analogous case.
+export type UnmigratedCommitmentForMatching = { category: "pending_gift" | "pending_pledge"; committedCents: number; activityDate: number | null };
+export type RealGivingActivityMatchCandidate = { id: string; category: string; committedCents: number | null; activityDate: number | null };
+const UNLINKED_COMMITMENT_GIFT_MATCH_CATEGORIES: ReadonlySet<string> = new Set(["completed_gift"]);
+const UNLINKED_COMMITMENT_PLEDGE_MATCH_CATEGORIES: ReadonlySet<string> = new Set(["open_pledge", "partially_paid_pledge"]);
+
+export function matchExistingGivingActivityForCommitment(commitment: UnmigratedCommitmentForMatching, candidates: readonly RealGivingActivityMatchCandidate[], windowDays = 7): RealGivingActivityMatchCandidate | null {
+  if (commitment.activityDate === null) return null;
+  const windowSeconds = windowDays * 86400;
+  const eligibleCategories = commitment.category === "pending_gift" ? UNLINKED_COMMITMENT_GIFT_MATCH_CATEGORIES : UNLINKED_COMMITMENT_PLEDGE_MATCH_CATEGORIES;
+  const matches = candidates.filter((candidate) => eligibleCategories.has(candidate.category)
+    && candidate.committedCents === commitment.committedCents
+    && candidate.activityDate !== null
+    && Math.abs(candidate.activityDate - commitment.activityDate!) <= windowSeconds);
+  return matches.length === 1 ? matches[0] : null;
+}

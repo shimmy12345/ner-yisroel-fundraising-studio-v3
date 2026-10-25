@@ -6,6 +6,7 @@ import {
   tripScheduledInteractionSource, tripCompletedInteractionSource, tripCancelledInteractionSource, tripMeetingInteractionId,
   validateTripName, validateTripDates, validateFundraisingGoalCents, validateNotes, validateMeetingLocation, validateNextAction,
   validateMeetingCompletion, validateMeetingScheduling,
+  matchExistingGivingActivityForCommitment,
 } from "../lib/relationships/trip-model.ts";
 import { activityStatus, completedPlannedAt, originalActivitySource, isScheduledActivity, isCancelledActivity } from "../lib/workspace/scheduled-activity.ts";
 import { zonedTimeToUtc } from "../lib/workspace/local-time.ts";
@@ -201,6 +202,52 @@ async function run() {
   assert.equal(validateMeetingScheduling(NOW + 86400, NOW).ok, true);
   assert.equal(validateMeetingScheduling(NOW - 1, NOW).ok, false, "a past meeting time must be rejected for scheduling -- that is what Marking Completed is for");
   assert.equal(validateMeetingScheduling(NOW, NOW).ok, false, "the exact current moment is not in the future");
+
+  // --- matchExistingGivingActivityForCommitment (2026-10-26, see
+  // docs/AI-HANDOFF.md's "Verification: Manual-Prospect JL Duplicate
+  // Risk" entry) -- the JL-duplicate fix's own matching logic. ---
+  {
+    const pledgeCommitment = { category: "pending_pledge", committedCents: 500000, activityDate: NOW };
+
+    // No candidates at all -- falls back to creating a pending record.
+    assert.equal(matchExistingGivingActivityForCommitment(pledgeCommitment, []), null);
+
+    // Exactly one unambiguous real match -- the common "already imported
+    // from JL before linking" case this fix exists for.
+    const onePledgeMatch = [{ id: "ga-1", category: "open_pledge", committedCents: 500000, activityDate: NOW }];
+    assert.deepEqual(matchExistingGivingActivityForCommitment(pledgeCommitment, onePledgeMatch), onePledgeMatch[0]);
+    // partially_paid_pledge matches too -- committed_cents is stable
+    // across partial payments, unlike paid_cents/balance_cents.
+    const onePartiallyPaidMatch = [{ id: "ga-2", category: "partially_paid_pledge", committedCents: 500000, activityDate: NOW }];
+    assert.deepEqual(matchExistingGivingActivityForCommitment(pledgeCommitment, onePartiallyPaidMatch), onePartiallyPaidMatch[0]);
+
+    // A pending_pledge must never match a completed_gift, even with the
+    // exact same amount and date -- a gift and a pledge are different
+    // kinds of commitment.
+    assert.equal(matchExistingGivingActivityForCommitment(pledgeCommitment, [{ id: "ga-3", category: "completed_gift", committedCents: 500000, activityDate: NOW }]), null);
+    const giftCommitment = { category: "pending_gift", committedCents: 500000, activityDate: NOW };
+    assert.equal(matchExistingGivingActivityForCommitment(giftCommitment, [{ id: "ga-4", category: "open_pledge", committedCents: 500000, activityDate: NOW }]), null);
+    assert.deepEqual(matchExistingGivingActivityForCommitment(giftCommitment, [{ id: "ga-5", category: "completed_gift", committedCents: 500000, activityDate: NOW }]), { id: "ga-5", category: "completed_gift", committedCents: 500000, activityDate: NOW });
+
+    // A different amount, or a date outside the window, is not a match.
+    assert.equal(matchExistingGivingActivityForCommitment(pledgeCommitment, [{ id: "ga-6", category: "open_pledge", committedCents: 400000, activityDate: NOW }]), null);
+    assert.equal(matchExistingGivingActivityForCommitment(pledgeCommitment, [{ id: "ga-7", category: "open_pledge", committedCents: 500000, activityDate: NOW + 8 * 86400 }]), null, "outside the 7-day default window");
+    assert.deepEqual(matchExistingGivingActivityForCommitment(pledgeCommitment, [{ id: "ga-8", category: "open_pledge", committedCents: 500000, activityDate: NOW + 6 * 86400 }]), { id: "ga-8", category: "open_pledge", committedCents: 500000, activityDate: NOW + 6 * 86400 }, "inside the window, on the later side");
+
+    // A commitment with no activity date (should never happen in
+    // practice -- pendingGiftInput/pendingPledgeInput already require
+    // one -- but defensively) never auto-matches.
+    assert.equal(matchExistingGivingActivityForCommitment({ category: "pending_pledge", committedCents: 500000, activityDate: null }, onePledgeMatch), null);
+
+    // Two plausible real candidates -- deliberately ambiguous, never
+    // auto-picked. Same "never automatically match solely by donor and
+    // amount where multiple records could qualify" rule
+    // attributeGivingActivityToTrip's own ambiguous-match guard enforces.
+    assert.equal(matchExistingGivingActivityForCommitment(pledgeCommitment, [
+      { id: "ga-9", category: "open_pledge", committedCents: 500000, activityDate: NOW },
+      { id: "ga-10", category: "partially_paid_pledge", committedCents: 500000, activityDate: NOW + 86400 },
+    ]), null, "multiple plausible matches must never be auto-resolved");
+  }
 
   console.log("trip-model: ok");
 }

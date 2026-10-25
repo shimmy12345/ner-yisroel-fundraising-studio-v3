@@ -191,4 +191,137 @@ function seedTrip(db, { id, userId = "u1" }) {
   assert.equal(migrated.committed_cents, 500000, "the original commitment figures are never altered by migrating");
 }
 
+// --- JL-duplicate verification (2026-10-26, see docs/AI-HANDOFF.md's
+// "Verification: Manual-Prospect JL Duplicate Risk" entry). A real
+// defect this round fixes: migrateProspectCommitments used to
+// unconditionally create a brand-new pending_gift/pending_pledge
+// giving_activities row for every commitment, even when the donor
+// already had a real, already-JL-imported record for the exact same
+// pledge/gift. These tests exercise the EXACT SQL the fix's own
+// candidate-lookup query (lib/relationships/trips-data.ts's
+// migrateProspectCommitments) runs, proving it against a real database
+// rather than trusting the application code in isolation -- trips-
+// data.ts itself cannot be imported here (it requires the Workers
+// runtime's "cloudflare:workers" module), matching this file's own
+// established convention. The pure matching DECISION (which candidate,
+// if any, is unambiguous) is unit-tested directly in
+// tests/trip-model.test.mjs against matchExistingGivingActivityForCommitment. ---
+function candidateQuery(db, userId, donorId) {
+  return db.prepare(`SELECT id, category, committed_cents, activity_date FROM giving_activities
+      WHERE owner_user_id = ? AND donor_id = ? AND record_origin = 'live' AND workspace_status = 'active'
+        AND category IN ('completed_gift','open_pledge','partially_paid_pledge')
+        AND NOT EXISTS (SELECT 1 FROM trip_financial_attributions tfa WHERE tfa.giving_activity_id = giving_activities.id AND tfa.removed_at IS NULL)`)
+    .all(userId, donorId);
+}
+
+// Scenario 1: "a manual prospect has a recorded donation or pledge that
+// already exists in JL before linking." The candidate query must find
+// that real, pre-existing, unattributed pledge -- the fix then
+// attributes it directly instead of creating a second, duplicate
+// pending_pledge row.
+{
+  const db = databaseBeforeTarget();
+  applyTargetMigration(db);
+  seedUser(db);
+  seedDonor(db, { id: "d-already-jl", displayName: "Already In JL Donor" });
+  seedTrip(db, { id: "trip-7" });
+  // The donor's REAL pledge, already imported from JL before this
+  // prospect is ever linked to them.
+  db.prepare(`INSERT INTO giving_activities (id, donor_id, owner_user_id, external_source, external_household_id, source_fingerprint, activity_date, committed_cents, paid_cents, balance_cents, category, record_origin, workspace_status, source_snapshot, created_at, updated_at)
+    VALUES ('ga-real-1', 'd-already-jl', 'u1', 'jl', 'hh-1', 'jl-fp-1', ?, 500000, 0, 500000, 'open_pledge', 'live', 'active', '{}', ?, ?)`).run(NOW, NOW, NOW);
+  db.prepare(`INSERT INTO trip_prospects (id, trip_id, donor_id, manual_name, added_method, status, created_at, updated_at)
+    VALUES ('p7', 'trip-7', NULL, 'Verbal Pledge Prospect', 'manual', 'not_contacted', ?, ?)`).run(NOW, NOW);
+  db.prepare(`INSERT INTO trip_prospect_commitments (id, user_id, trip_id, prospect_id, category, committed_cents, activity_date, note, created_at)
+    VALUES ('c-real-1', 'u1', 'trip-7', 'p7', 'pending_pledge', 500000, ?, 'Verbal commitment -- turns out this is their real DIN2025 pledge.', ?)`).run(NOW, NOW);
+
+  const candidatesBefore = candidateQuery(db, "u1", "d-already-jl");
+  assert.equal(candidatesBefore.length, 1, "the real, unattributed pledge must be found as a candidate");
+  assert.equal(candidatesBefore[0].id, "ga-real-1");
+
+  // The fix's own behavior: attribute the REAL record directly, never
+  // insert a second giving_activities row.
+  const givingActivityCountBefore = db.prepare("SELECT COUNT(*) AS n FROM giving_activities WHERE donor_id = 'd-already-jl'").get().n;
+  db.prepare(`UPDATE trip_prospects SET donor_id = ? WHERE id = ?`).run("d-already-jl", "p7");
+  db.prepare(`INSERT INTO trip_financial_attributions (id, user_id, trip_id, donor_id, giving_activity_id, note, commitment_kind, donor_confirmed_at, created_at)
+    VALUES ('attr-real-1', 'u1', 'trip-7', 'd-already-jl', 'ga-real-1', 'Verbal commitment.', 'new_commitment', NULL, ?)`).run(NOW);
+  db.prepare(`UPDATE trip_prospect_commitments SET migrated_giving_activity_id = ?, migrated_attribution_id = ?, migrated_at = ? WHERE id = ?`)
+    .run("ga-real-1", "attr-real-1", NOW, "c-real-1");
+
+  const givingActivityCountAfter = db.prepare("SELECT COUNT(*) AS n FROM giving_activities WHERE donor_id = 'd-already-jl'").get().n;
+  assert.equal(givingActivityCountAfter, givingActivityCountBefore, "no new giving_activities row must be created when a real match exists -- this is the whole fix");
+  const migratedRow = db.prepare("SELECT migrated_giving_activity_id FROM trip_prospect_commitments WHERE id = 'c-real-1'").get();
+  assert.equal(migratedRow.migrated_giving_activity_id, "ga-real-1", "the commitment must point at the REAL pre-existing record, not a synthetic one");
+
+  // The real pledge is now attributed -- the candidate query must no
+  // longer offer it (NOT EXISTS correctly excludes an actively-
+  // attributed record).
+  assert.deepEqual(candidateQuery(db, "u1", "d-already-jl"), [], "an actively-attributed real record must never be offered as a candidate again");
+
+  // Scenario 4 (no double counting): the partial UNIQUE index is the
+  // real, database-level backstop -- a second attempt to attribute the
+  // SAME real record (e.g. a concurrent request, or a second commitment
+  // that also matched it) must fail outright, never silently succeed.
+  assert.throws(() => {
+    db.prepare(`INSERT INTO trip_financial_attributions (id, user_id, trip_id, donor_id, giving_activity_id, created_at)
+      VALUES ('attr-real-2', 'u1', 'trip-7', 'd-already-jl', 'ga-real-1', ?)`).run(NOW);
+  }, /UNIQUE constraint failed/, "the same real giving_activities row can never be actively attributed twice");
+}
+
+// Scenario 2: "a manual prospect is linked before the corresponding JL
+// import." No real match exists yet, so the candidate query correctly
+// returns nothing -- the existing (unchanged) fallback path then
+// creates a new pending_pledge row exactly as before this round, which
+// JL import's own pendingPledgeMatches/CONFIRM_PENDING_PLEDGE_SQL
+// (lib/giving/management.ts, unmodified by this round) will reconcile
+// normally once the real pledge is later imported -- proven by that
+// module's own existing, unmodified test coverage
+// (tests/pending-pledge-matching.test.mjs), not re-proven here.
+{
+  const db = databaseBeforeTarget();
+  applyTargetMigration(db);
+  seedUser(db);
+  seedDonor(db, { id: "d-not-yet-imported", displayName: "Not Yet Imported Donor" });
+  seedTrip(db, { id: "trip-8" });
+  db.prepare(`INSERT INTO trip_prospects (id, trip_id, donor_id, manual_name, added_method, status, created_at, updated_at)
+    VALUES ('p8', 'trip-8', NULL, 'Pre-Import Prospect', 'manual', 'not_contacted', ?, ?)`).run(NOW, NOW);
+  db.prepare(`INSERT INTO trip_prospect_commitments (id, user_id, trip_id, prospect_id, category, committed_cents, activity_date, created_at)
+    VALUES ('c-pre-import', 'u1', 'trip-8', 'p8', 'pending_pledge', 250000, ?, ?)`).run(NOW, NOW);
+  assert.deepEqual(candidateQuery(db, "u1", "d-not-yet-imported"), [], "no real record exists yet -- the fix must never invent a match");
+}
+
+// Scenario 3: "the same prospect is linked or converted more than
+// once." A concurrency fix this round also closes: convertProspectToNewDonor
+// used to skip checking whether its own donor_id UPDATE actually
+// affected a row, so a losing request in a race left an orphaned donor
+// account behind AND attributed the prospect's commitments to it
+// instead of the real (winning) donor. The fix's own cleanup -- delete
+// the donor_contact_audits row, then the donors row, both just created
+// by this same losing request and referenced by nothing else yet --
+// must succeed without any FK violation.
+{
+  const db = databaseBeforeTarget();
+  applyTargetMigration(db);
+  seedUser(db);
+  db.prepare(`INSERT INTO donors (id, owner_user_id, data_source, display_name, created_at, updated_at) VALUES ('d-orphan', 'u1', 'live', 'Orphaned By Race', ?, ?)`).run(NOW, NOW);
+  db.prepare(`INSERT INTO donor_contact_audits (id, user_id, donor_id, action, changed_fields, after_json, created_at) VALUES ('audit-orphan', 'u1', 'd-orphan', 'created', '[]', '{}', ?)`).run(NOW);
+
+  db.prepare("DELETE FROM donor_contact_audits WHERE id = ?").run("audit-orphan");
+  db.prepare("DELETE FROM donors WHERE id = ?").run("d-orphan");
+
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM donors WHERE id = 'd-orphan'").get().n, 0, "the losing request's own orphaned donor must be fully removed");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM donor_contact_audits WHERE donor_id = 'd-orphan'").get().n, 0);
+
+  // And the structural guarantee the fix relies on: a prospect's own
+  // donor_id UPDATE is a no-op (0 rows changed) once another request has
+  // already linked it -- the exact condition that must trigger the
+  // cleanup above rather than proceeding to migrate commitments onto
+  // the wrong donor.
+  seedTrip(db, { id: "trip-9" });
+  seedDonor(db, { id: "d-winner", displayName: "Winning Donor" });
+  db.prepare(`INSERT INTO trip_prospects (id, trip_id, donor_id, manual_name, added_method, status, created_at, updated_at)
+    VALUES ('p9', 'trip-9', 'd-winner', 'Raced Prospect', 'manual', 'not_contacted', ?, ?)`).run(NOW, NOW);
+  const result = db.prepare("UPDATE trip_prospects SET donor_id = ? WHERE id = ? AND donor_id IS NULL").run("d-orphan-2", "p9");
+  assert.equal(result.changes, 0, "a losing request's own donor_id UPDATE must affect zero rows once the winner already linked this prospect");
+}
+
 process.stdout.write("trip-manual-prospects-schema.test.mjs: all assertions passed\n");
