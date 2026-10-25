@@ -35,6 +35,29 @@ export function filterByGeo<T extends GeoTaggable>(records: readonly T[], region
   return records.filter((record) => matchesRegionFilter(record, regionId) && matchesCityFilter(record, cityKey));
 }
 
+// Multi-region filtering for Trip Planning's "Find prospects" (2026-10-25,
+// see docs/AI-HANDOFF.md's "Multi-Region Prospect Selection" entry).
+// Deliberately a NEW, additive pair of functions rather than widening
+// matchesRegionFilter/filterByGeo's own signature -- those two are
+// shared, unmodified, with app/donors' own single-region filter, and
+// every existing caller of either one keeps working exactly as before.
+// A donor matches when they belong to ANY region in the chosen set
+// (never ALL of them -- "any combination of regions" means the union of
+// those regions' donors, the same way checking two boxes on a filter
+// panel is always understood to broaden a result, never narrow it to
+// an intersection).
+export type RegionSetFilterValue = ReadonlySet<TravelRegionId> | typeof ALL_REGIONS;
+
+export function matchesAnyRegionFilter(record: GeoTaggable, regionIds: RegionSetFilterValue): boolean {
+  if (regionIds === ALL_REGIONS) return true;
+  if (regionIds.size === 0) return true; // no region checked yet reads the same as "all regions" -- never a result set of zero donors by default
+  return regionsForCityState(record.city, record.state).some((region) => regionIds.has(region));
+}
+
+export function filterByGeoRegions<T extends GeoTaggable>(records: readonly T[], regionIds: RegionSetFilterValue, cityKey: CityFilterValue): T[] {
+  return records.filter((record) => matchesAnyRegionFilter(record, regionIds) && matchesCityFilter(record, cityKey));
+}
+
 export type CityOption = { key: string; city: string; state: string | null; label: string; count: number };
 
 // Every distinct city actually present in `records` (never a static

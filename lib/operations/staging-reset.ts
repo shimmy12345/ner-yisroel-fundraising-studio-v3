@@ -73,6 +73,15 @@ export const STAGING_RESET_TABLE_ORDER = [
   // following trip_prospects (its own child, deleted here immediately
   // before it, same locality convention as every other parent/child pair
   // in this list).
+  // Multi-Region Prospect Selection + Manually Added Prospects
+  // (2026-10-25, docs/AI-HANDOFF.md). trip_prospect_commitments
+  // references prospect_id (trip_prospects.id) always, and optionally
+  // migrated_giving_activity_id/migrated_attribution_id (giving_
+  // activities.id / trip_financial_attributions.id) once a prospect is
+  // linked to a donor -- all three are deleted later in this list, so
+  // this must be deleted before all of them, hence placed first in this
+  // cluster, immediately before trip_financial_attributions.
+  "trip_prospect_commitments",
   // Trip Fundraising Results Dashboard (2026-10-16, docs/AI-HANDOFF.md).
   // trip_financial_attributions references trip_id (trips.id), donor_id
   // (donors.id), and giving_activity_id (giving_activities.id) -- all
@@ -130,6 +139,14 @@ export const STAGING_RESET_TABLE_ORDER = [
   // join table, for locality rather than necessity.
   "donor_rebbeim",
   "rebbeim",
+  // AI Meeting Notes save-identity ledger (migration 0053) -- references
+  // interactions.id directly, so it is deleted before interactions
+  // itself, just below. This table predates this round; it was never
+  // added here on this branch until this round's production-baseline
+  // regeneration (needed for this round's own new trip_prospect_
+  // commitments table) exposed the gap by including it in FUNDRAISING_
+  // DATA_TABLES for the first time -- see docs/AI-HANDOFF.md.
+  "meeting_note_save_identities",
   // Parents — deleted last, once everything referencing them is gone.
   // `donors` self-references itself (merged_into_donor_id), which is safe
   // once nothing else in this list still points at any donor row.

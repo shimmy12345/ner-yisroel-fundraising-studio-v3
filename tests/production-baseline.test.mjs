@@ -439,7 +439,7 @@ test("baseline picks up the schema-adding 0050 donor-confirmation correction mig
   // table -- donor_confirmed_at, commitment_kind, reported_cash_collected_cents,
   // reconciled_pending_attribution_id (see docs/AI-HANDOFF.md's
   // donor-confirmation correction entry). No longer the latest migration
-  // (0051 is, see the test below) -- same "included, not necessarily
+  // (0054 is, see the tests below) -- same "included, not necessarily
   // last" convention as 0048's own test above.
   //
   // "0049" is deliberately skipped: drizzle/pending-review/0049_fix_
@@ -464,18 +464,64 @@ test("baseline picks up the schema-adding 0051 reconciliation concurrency guard 
   // 0051_trip_reconciliation_concurrency_guard.sql adds one new partial
   // UNIQUE index to the EXISTING trip_financial_attributions table --
   // trip_financial_attributions_active_reconciled_pending_uidx (see
-  // docs/AI-HANDOFF.md's reconciliation-concurrency-fix entry) -- the
-  // current LATEST migration as of this round, so the schema hash must
-  // change again.
+  // docs/AI-HANDOFF.md's reconciliation-concurrency-fix entry). No
+  // longer the latest migration (0054 is, see the tests below).
   //
   // NOT applied to Production as of this round -- applied to
   // fundraising-os-staging-db (2026-10-21, see docs/AI-HANDOFF.md).
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0051_trip_reconciliation_concurrency_guard.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 51, "exactly 51 real, applied-order migrations -- the 0049 draft in drizzle/pending-review/ is never counted");
-  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
-  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  assert.ok(manifest.sourceMigrations.includes("0051_trip_reconciliation_concurrency_guard.sql"));
   const guardIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "trip_financial_attributions_active_reconciled_pending_uidx");
   assert.ok(guardIndex, "the reconciliation-concurrency-guard index must be captured in the baseline");
   assert.match(guardIndex.sql, /UNIQUE/i);
   assert.match(guardIndex.sql, /removed_at.*IS NULL/is);
+});
+
+test("baseline picks up the schema-adding 0052 interaction write-proof-token migration", () => {
+  // 0052_interaction_write_proof_token.sql adds one new nullable column
+  // to the EXISTING interactions table -- write_token. Never previously
+  // covered by its own test here: this manifest was stuck at migration
+  // 0051 (never regenerated) from before this migration was added until
+  // this round's own regeneration (see docs/AI-HANDOFF.md's Multi-Region
+  // Prospect Selection + Manually Added Prospects entry) picked it up
+  // for the first time, alongside 0053 and this round's own 0054.
+  assert.ok(manifest.sourceMigrations.includes("0052_interaction_write_proof_token.sql"));
+  const interactionsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "interactions");
+  assert.ok(interactionsTable, "interactions must still be a real table in the baseline topology");
+  assert.match(interactionsTable.sql, /write_token/);
+});
+
+test("baseline picks up the schema-adding 0053 meeting-note save-identity migration", () => {
+  // 0053_meeting_note_save_identity.sql adds one new table --
+  // meeting_note_save_identities, a save-idempotency ledger referencing
+  // interactions.id. Same "never previously covered" note as 0052's own
+  // test above.
+  assert.ok(manifest.sourceMigrations.includes("0053_meeting_note_save_identity.sql"));
+  const saveIdentitiesTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "meeting_note_save_identities");
+  assert.ok(saveIdentitiesTable, "meeting_note_save_identities must be a real table in the baseline topology");
+  assert.match(saveIdentitiesTable.sql, /interaction_id/);
+});
+
+test("baseline picks up the schema-adding 0054 trip manual prospects migration", () => {
+  // 0054_trip_manual_prospects.sql (Multi-Region Prospect Selection +
+  // Manually Added Prospects, 2026-10-25, see docs/AI-HANDOFF.md)
+  // rebuilds trip_prospects with donor_id now nullable plus six new
+  // manual_* columns, and adds one new table, trip_prospect_commitments
+  // -- the current LATEST migration as of this round, so the schema
+  // hash must change again.
+  //
+  // STAGING ONLY as of this round -- NOT applied to Production (same
+  // carve-out as 0046/0047/0050/0051).
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0054_trip_manual_prospects.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 54, "exactly 54 real, applied-order migrations -- the 0049 draft in drizzle/pending-review/ is never counted");
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  const tripProspectsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trip_prospects");
+  assert.ok(tripProspectsTable, "trip_prospects must still be a real table in the baseline topology");
+  assert.doesNotMatch(tripProspectsTable.sql, /`donor_id` text NOT NULL/, "donor_id must now be nullable");
+  for (const column of ["manual_name", "manual_city", "manual_region_id", "manual_phone", "manual_email", "manual_notes"]) {
+    assert.match(tripProspectsTable.sql, new RegExp(column), `${column} must be captured in the baseline`);
+  }
+  const commitmentsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trip_prospect_commitments");
+  assert.ok(commitmentsTable, "trip_prospect_commitments must be a real table in the baseline topology");
+  assert.match(commitmentsTable.sql, /committed_cents/);
 });

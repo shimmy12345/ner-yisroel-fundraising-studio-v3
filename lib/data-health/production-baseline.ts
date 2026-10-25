@@ -9,23 +9,27 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 51 as of 0051_trip_reconciliation_concurrency_guard.sql -- one new
-// partial UNIQUE index on the EXISTING trip_financial_attributions table
-// (trip_financial_attributions_active_reconciled_pending_uidx -- see
-// docs/AI-HANDOFF.md's reconciliation-concurrency-fix entry), not a
-// rebuild of anything existing, so PRODUCTION_BASELINE_HASH changed
-// again (PRODUCTION_BASELINE_LEVEL stays "0019": that label identifies
-// the single bootstrap file's origin, not its current contents). "0049"
+// 54 as of 0054_trip_manual_prospects.sql (Multi-Region Prospect
+// Selection + Manually Added Prospects, 2026-10-25, see docs/AI-
+// HANDOFF.md). This round also regenerated the manifest's full
+// ddlTopology/sourceMigrations from the real drizzle/ directory as it
+// stands now -- it had been stuck at migration 0051 (missing
+// 0052_interaction_write_proof_token.sql and 0053_meeting_note_save_
+// identity.sql, both already live on this branch) since before this
+// round started; regenerating for 0054 picked up that pre-existing gap
+// too, as scripts/generate-production-baseline.mjs always builds from
+// every migration file currently in drizzle/, not incrementally. "0049"
 // is deliberately skipped -- drizzle/pending-review/0049_fix_calendar_
 // schema_text_staging_repair.sql already reserves that number for a
 // separate, unrelated, not-yet-reviewed draft kept outside drizzle/ for
-// exactly this reason. Applied to fundraising-os-staging-db (2026-10-21,
-// see docs/AI-HANDOFF.md) -- NOT applied to Production. Staging's own
-// "schema-comparison" health check now matches this baseline for
-// trip_financial_attributions; Production's will report this new index
-// (and 0050's four new columns) as a difference until a separately
-// authorized Production deployment round applies both there.
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 51;
+// exactly this reason. Migration 0054 itself is STAGING ONLY -- NOT
+// applied to Production as part of this round (same carve-out as
+// 0046/0047/0050/0051) -- see docs/AI-HANDOFF.md for exactly which
+// migrations are and are not confirmed live in Production as of this
+// round; this manifest describes the intended baseline a newly
+// provisioned or synced environment should have, reconciled against
+// real Production only once a deployment round actually ships there.
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 54;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is

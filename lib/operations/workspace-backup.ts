@@ -131,6 +131,24 @@ export const WORKSPACE_BACKUP_EXCLUDED_TABLES = [
   // d1-restore-order.test.mjs.
   "calendar_event_links",
   "calendar_event_link_history",
+  // Multi-Region Prospect Selection + Manually Added Prospects
+  // (2026-10-25, docs/AI-HANDOFF.md) -- same deliberate-deferral
+  // reasoning as trips/trip_prospects above. trip_prospect_commitments
+  // holds only an unlinked (not-yet-in-FOS) prospect's own trip-reported
+  // pledge/gift figures -- never a real donor's financial record (there
+  // is no donor yet); once linked, the real giving_activities/trip_
+  // financial_attributions rows those figures migrate onto are already
+  // covered by this same deferral above. Covered today only by the
+  // nightly whole-database R2 backup, and by the restore-order/staging-
+  // reset coverage already enforced in lib/operations/staging-reset.ts
+  // and tests/staging-reset.test.mjs/d1-restore-order.test.mjs.
+  "trip_prospect_commitments",
+  // AI Meeting Notes save-identity ledger (migration 0053) -- holds only
+  // a save-idempotency fingerprint, never relationship or financial
+  // data itself. Classified here (rather than left unclassified) as
+  // part of this round's own production-baseline regeneration -- see
+  // lib/operations/staging-reset.ts's own comment on the same gap.
+  "meeting_note_save_identities",
   // Donor Research (Stage A) findings -- same reason as above.
   "donor_research_runs",
   "donor_research_pending_evidence",

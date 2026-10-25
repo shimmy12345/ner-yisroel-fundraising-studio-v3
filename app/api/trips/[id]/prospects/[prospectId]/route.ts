@@ -1,6 +1,9 @@
 import { getChatGPTUser } from "../../../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../../../lib/auth/profile";
-import { getTrip, removeProspect, setSimpleProspectStatus, scheduleProspectMeeting, completeProspectMeeting, updateProspectFields } from "../../../../../../lib/relationships/trips-data";
+import {
+  getTrip, removeProspect, setSimpleProspectStatus, scheduleProspectMeeting, completeProspectMeeting, updateProspectFields,
+  prospectLinkState, scheduleUnlinkedProspectMeeting, completeUnlinkedProspectMeeting,
+} from "../../../../../../lib/relationships/trips-data";
 import { isValidProspectStatus, statusRequiresInteraction, validateMeetingDurationMinutes, validateMeetingLocation, validateNextAction, validateNotes } from "../../../../../../lib/relationships/trip-model";
 import { logger } from "../../../../../../lib/logger";
 
@@ -54,20 +57,41 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (body.status !== undefined) {
     if (!isValidProspectStatus(body.status)) return Response.json({ error: "Choose a valid prospect status" }, { status: 422 });
 
+    // Manually Added Prospects (2026-10-25, see docs/AI-HANDOFF.md): an
+    // unlinked (not-yet-in-FOS) prospect has no donor and therefore no
+    // real `interactions` row or Google Calendar sync -- meeting
+    // scheduling/completion for one is dispatched to the separate,
+    // much simpler trips-data.ts functions that only ever touch this
+    // trip's own workflow fields. The request/response shape is
+    // identical either way; the fundraiser never has to know which
+    // path ran.
+    const linkState = await prospectLinkState(profile.id, id, prospectId);
+    if (linkState === "not_found") return Response.json({ error: "Prospect not found" }, { status: 404 });
+
     if (body.status === "meeting_scheduled") {
       const locationResult = validateMeetingLocation(body.meetingLocation);
       if (!locationResult.ok) return Response.json({ error: "Meeting location is too long" }, { status: 422 });
-      const durationResult = validateMeetingDurationMinutes(body.meetingDurationMinutes);
-      if (!durationResult.ok) return Response.json({ error: "Meeting duration must be a positive number of minutes (24 hours or fewer)" }, { status: 422 });
       if (body.confirmScheduling !== true) return Response.json({ error: "Confirm the meeting time before scheduling it" }, { status: 422 });
-      const result = await scheduleProspectMeeting(profile.id, id, prospectId, body.meetingAtLocal, locationResult.location, durationResult.durationMinutes, true, profile.timezone, now);
-      if (!result.ok) return statusErrorResponse(result.reason);
-      logger.info("trip_prospect_meeting_scheduled", { userId: profile.id, tripId: id, prospectId, durationMinutes: durationResult.durationMinutes });
+      if (linkState === "unlinked") {
+        const result = await scheduleUnlinkedProspectMeeting(profile.id, id, prospectId, body.meetingAtLocal, locationResult.location, profile.timezone, now);
+        if (!result.ok) return statusErrorResponse(result.reason);
+      } else {
+        const durationResult = validateMeetingDurationMinutes(body.meetingDurationMinutes);
+        if (!durationResult.ok) return Response.json({ error: "Meeting duration must be a positive number of minutes (24 hours or fewer)" }, { status: 422 });
+        const result = await scheduleProspectMeeting(profile.id, id, prospectId, body.meetingAtLocal, locationResult.location, durationResult.durationMinutes, true, profile.timezone, now);
+        if (!result.ok) return statusErrorResponse(result.reason);
+        logger.info("trip_prospect_meeting_scheduled", { userId: profile.id, tripId: id, prospectId, durationMinutes: durationResult.durationMinutes });
+      }
     } else if (body.status === "meeting_completed") {
       if (body.confirmCompletion !== true) return Response.json({ error: "Confirm the meeting outcome before marking it completed" }, { status: 422 });
-      const result = await completeProspectMeeting(profile.id, id, prospectId, body.meetingAtLocal, body.completionNotes ?? "", true, profile.timezone, now);
-      if (!result.ok) return statusErrorResponse(result.reason);
-      logger.info("trip_prospect_meeting_completed", { userId: profile.id, tripId: id, prospectId });
+      if (linkState === "unlinked") {
+        const result = await completeUnlinkedProspectMeeting(profile.id, id, prospectId, body.meetingAtLocal, body.completionNotes ?? "", profile.timezone, now);
+        if (!result.ok) return statusErrorResponse(result.reason);
+      } else {
+        const result = await completeProspectMeeting(profile.id, id, prospectId, body.meetingAtLocal, body.completionNotes ?? "", true, profile.timezone, now);
+        if (!result.ok) return statusErrorResponse(result.reason);
+        logger.info("trip_prospect_meeting_completed", { userId: profile.id, tripId: id, prospectId });
+      }
     } else {
       // not_contacted/contacted/meeting_requested/declined/
       // unable_to_schedule -- never touches `interactions` (see

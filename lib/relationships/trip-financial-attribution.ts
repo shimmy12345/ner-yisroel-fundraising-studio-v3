@@ -28,7 +28,19 @@ const DONATION_CATEGORY = "completed_gift";
 export type AttributedGivingRecord = {
   attributionId: string;
   givingActivityId: string;
-  donorId: string;
+  // Manually Added Prospects (2026-10-25, see docs/AI-HANDOFF.md):
+  // `donorId` is null for a commitment recorded against an unlinked
+  // (not-yet-in-FOS) prospect -- summarizeTripFinancials below never
+  // reads this field itself (display-only everywhere it appears), so
+  // widening it to nullable changes no totals math.
+  donorId: string | null;
+  // The owning trip_prospects row's own id -- always present, unlike
+  // donorId, since it is what every UI surface filters an attribution
+  // list by (a donor's own uniqueness-per-trip guarantee made donorId a
+  // usable, if incidental, key before this feature; an unlinked
+  // prospect has no donor at all, so prospectId is the one key that
+  // always works for both cases).
+  prospectId: string;
   donorDisplayName: string;
   category: string;
   workspaceStatus: string;

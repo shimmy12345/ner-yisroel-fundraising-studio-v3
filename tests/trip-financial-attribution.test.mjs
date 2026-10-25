@@ -253,7 +253,13 @@ assert.match(tripsData, /attributeGivingActivityToTrip[\s\S]{0,900}FROM giving_a
 // docs/AI-HANDOFF.md) -- the query grew several CASE expressions longer to
 // resolve a merged pending_gift to its confirmed donation's own live
 // figures at read time; the owner-scoping clause itself is unchanged.
-assert.match(tripsData, /listTripFinancialAttributions[\s\S]{0,1700}t\.owner_user_id = \?/, "listing a trip's attributions must be scoped to the trip's own owner");
+// Widened again to 1900 (2026-10-25, Multi-Region Prospect Selection +
+// Manually Added Prospects, see docs/AI-HANDOFF.md) -- the query gained
+// one more SELECT column and a JOIN onto trip_prospects to resolve
+// prospectId (needed so the UI can key a prospect's own attributions by
+// prospect, not just donor, since an unlinked prospect has no donor);
+// the owner-scoping clause itself is still unchanged.
+assert.match(tripsData, /listTripFinancialAttributions[\s\S]{0,1900}t\.owner_user_id = \?/, "listing a trip's attributions must be scoped to the trip's own owner");
 assert.match(tripsData, /removeTripFinancialAttribution[\s\S]{0,500}trip_id IN \(SELECT id FROM trips WHERE owner_user_id = \?\)/, "removing an attribution must be scoped to the trip's own owner");
 
 // Pending-Gift Reconciliation Fix (2026-10-15, independent review, see

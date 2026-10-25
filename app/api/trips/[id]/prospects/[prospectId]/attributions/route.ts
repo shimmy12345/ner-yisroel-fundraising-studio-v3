@@ -2,7 +2,7 @@ import { getChatGPTUser } from "../../../../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../../../../lib/auth/profile";
 import {
   getTrip, listTripProspects, listEligibleGivingActivitiesForDonor, listReconcilableTripAttributions, attributeGivingActivityToTrip,
-  recordPendingGiftAndAttribute, recordPendingPledgeAndAttribute, type AttributeResult,
+  recordPendingGiftAndAttribute, recordPendingPledgeAndAttribute, recordUnlinkedProspectCommitment, type AttributeResult,
 } from "../../../../../../../lib/relationships/trips-data";
 import { isValidCommitmentKind, validateReportedCashCollectedCents } from "../../../../../../../lib/relationships/trip-model";
 import { logger } from "../../../../../../../lib/logger";
@@ -32,6 +32,15 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   const prospects = await listTripProspects(profile.id, id);
   const prospect = prospects.find((item) => item.id === prospectId);
   if (!prospect) return Response.json({ error: "Prospect not found" }, { status: 404 });
+
+  // An unlinked (not-yet-in-FOS) prospect has no donor to read an
+  // eligible/reconcilable giving_activities list for -- "Associate an
+  // existing donation or pledge" is not applicable to it at all, since
+  // there is no existing donor record for anything to already exist
+  // against. Reported as empty, never an error -- the UI already hides
+  // that action for an unlinked prospect, but this guards the endpoint
+  // itself the same way, independent of the UI.
+  if (!prospect.donorId) return Response.json({ eligible: [], reconcilable: [] });
 
   const eligible = await listEligibleGivingActivitiesForDonor(profile.id, prospect.donorId);
   const reconcilable = await listReconcilableTripAttributions(profile.id, id, prospect.donorId);
@@ -65,6 +74,34 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   catch { return Response.json({ error: "Invalid request" }, { status: 400 }); }
 
   const now = Math.floor(Date.now() / 1000);
+
+  // Unlinked-Prospect Fundraising (2026-10-25, see docs/AI-HANDOFF.md):
+  // "record trip pledges and donations using the existing trip
+  // fundraising workflow" for a prospect with no FOS donor yet --
+  // same action names, same request shape, routed to the separate
+  // trip_prospect_commitments-backed path instead of a real
+  // giving_activities row. "Associate an existing donation or pledge"
+  // has no meaning here (there is no donor for anything to already
+  // exist against), so it is rejected outright rather than silently
+  // matching nothing.
+  const prospects = await listTripProspects(profile.id, id);
+  const prospect = prospects.find((item) => item.id === prospectId);
+  if (!prospect) return Response.json({ error: "Prospect not found" }, { status: 404 });
+
+  if (!prospect.donorId) {
+    if (body.action === "associate_existing") return Response.json({ error: "This prospect is not yet linked to a donor account, so there is nothing existing to associate. Link or convert this prospect to a donor first." }, { status: 422 });
+    if (body.action === "record_donation" || body.action === "record_pledge") {
+      const category = body.action === "record_donation" ? "pending_gift" : "pending_pledge";
+      const result = await recordUnlinkedProspectCommitment(profile.id, id, prospectId, category, { amount: body.amount, date: body.date, designation: body.designation, note: body.note, confirmed: body.confirmed === true }, now);
+      if (!result.ok) {
+        if (result.reason === "prospect_not_found") return Response.json({ error: "Prospect not found" }, { status: 404 });
+        return Response.json({ error: result.error }, { status: 422 });
+      }
+      logger.info("trip_unlinked_prospect_commitment_recorded", { userId: profile.id, tripId: id, prospectId, action: body.action, commitmentId: result.commitmentId, confirmed: body.confirmed === true });
+      return Response.json({ ok: true, attributionId: result.commitmentId }, { status: 201 });
+    }
+    return Response.json({ error: "Choose a valid action." }, { status: 422 });
+  }
 
   if (body.action === "associate_existing") {
     if (typeof body.givingActivityId !== "string" || !body.givingActivityId) return Response.json({ error: "Choose a donation or pledge to associate." }, { status: 422 });

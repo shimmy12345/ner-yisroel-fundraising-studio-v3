@@ -49,14 +49,21 @@ export default async function TripPage({ params, searchParams }: { params: Promi
   const initialProspectQuery = firstValue(requestedParams.q).trim().slice(0, 80);
   const initialStatusFilter = firstValue(requestedParams.status);
   const initialFindQuery = firstValue(requestedParams.findQ).trim().slice(0, 80);
-  const initialAllRegions = firstValue(requestedParams.allRegions) === "1";
+  // Multi-Region Prospect Selection (2026-10-25, see docs/AI-HANDOFF.md):
+  // `regions=all` or the legacy `allRegions=1` (a bookmarked/returned-to
+  // link from before this round) both mean "every region"; a comma-
+  // joined list of region ids narrows to exactly that combination;
+  // absent means the trip's own single destination region, same as
+  // before this round.
+  const regionsParam = firstValue(requestedParams.regions);
+  const initialRegionIds = regionsParam === "all" || firstValue(requestedParams.allRegions) === "1" ? "all" : regionsParam ? regionsParam.split(",").filter(Boolean) : null;
 
   return <AppShell active="today">
     <TripDashboardExperience
       trip={trip} prospects={prospects} findProspectDonors={findProspectDonors} fundraiserTimezone={profile.timezone}
       financialAttributions={financialAttributions} financialSummary={financialSummary}
       initialTab={initialTab} initialProspectQuery={initialProspectQuery} initialStatusFilter={initialStatusFilter}
-      initialFindQuery={initialFindQuery} initialAllRegions={initialAllRegions}
+      initialFindQuery={initialFindQuery} initialRegionIds={initialRegionIds}
     />
   </AppShell>;
 }

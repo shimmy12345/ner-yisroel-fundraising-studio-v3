@@ -178,6 +178,15 @@ export function travelRegionById(id: string | null | undefined): TravelRegion | 
   return TRAVEL_REGIONS.find((region) => region.id === id) ?? null;
 }
 
+// Manually Added Prospects (2026-10-25, see docs/AI-HANDOFF.md) -- a
+// fundraiser picks a region directly (there is no donor record to
+// derive one from), so this is the one place that type-narrows a plain
+// string against the 15 approved region ids, reused by trip-model.ts's
+// validateManualProspectRegionId.
+export function isValidTravelRegionId(value: string): value is TravelRegionId {
+  return TRAVEL_REGIONS.some((region) => region.id === value);
+}
+
 // Display label for a (city, state) pair -- used by every UI surface
 // that lists cities (the directory's City filter, region membership
 // summaries) so there is exactly one place that decides whether to

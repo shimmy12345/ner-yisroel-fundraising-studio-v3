@@ -9,9 +9,11 @@
 import { env } from "cloudflare:workers";
 import { loadMeetingBrief } from "./meeting-brief.ts";
 import { regionsForCityState, travelRegionById, type TravelRegionId } from "./travel-regions.ts";
-import type { DonorSearchRecord } from "./donor-search.ts";
+import { searchDonors, type DonorSearchRecord } from "./donor-search.ts";
 import { zonedTimeToUtc } from "../workspace/local-time.ts";
 import { insertPendingGift, insertPendingPledge } from "../giving/pending-records.ts";
+import { pendingGiftInput, pendingPledgeInput } from "../giving/management.ts";
+import { normalizeDonorContact, changedContactFields, type DonorContactInput } from "../donors/contact.ts";
 import {
   buildSuggestionSnapshot, findCrossTripConflicts, parseLocalDateTimeInput,
   statusRequiresInteraction, timezoneForState, tripCancelledInteractionSource, tripCompletedInteractionSource,
@@ -263,8 +265,20 @@ export async function getTrip(userId: string, tripId: string): Promise<TripRecor
 // trip-model.ts's statusRequiresInteraction()).
 export type TripMeetingCalendarSummary = { status: "pending" | "synced" | "failed"; viewUrl: string | null } | null;
 
+// Manually Added Prospects (2026-10-25, see docs/AI-HANDOFF.md): `donorId`
+// is null exactly when this prospect is NOT yet in FOS -- `isLinked` is a
+// convenience mirror of that same fact, never an independent source of
+// truth. `displayName`/`city`/`state` are always populated (from the real
+// donor row when linked, from the manual_* columns otherwise) so every
+// UI surface can render a prospect identically either way; `manualPhone`/
+// `manualEmail`/`manualNotes`/`manualRegionLabel` are populated only for
+// an unlinked prospect (null once linked -- the real donor record is the
+// source of truth for contact details at that point, even though the
+// manual_* columns themselves are left in place in the database as a
+// harmless historical record).
 export type TripProspectRecord = {
-  id: string; donorId: string; donorDisplayName: string; donorCity: string | null; donorState: string | null; donorCode: string | null;
+  id: string; donorId: string | null; isLinked: boolean; donorDisplayName: string; donorCity: string | null; donorState: string | null; donorCode: string | null;
+  manualPhone: string | null; manualEmail: string | null; manualNotes: string | null; manualRegionLabel: string | null;
   addedMethod: AddedMethod; status: TripProspectStatus; selectedAt: number;
   suggestedReason: string | null; suggestedScore: number | null; suggestedGeneratedAt: number | null;
   manualRank: number | null; meetingAt: number | null; meetingLocation: string | null; nextAction: string | null; trip_notes: string | null;
@@ -279,36 +293,48 @@ export type TripProspectRecord = {
 // deliberately excluded here -- see listDonorsForTripSearch() below for
 // where it DOES surface.
 export async function listTripProspects(userId: string, tripId: string): Promise<TripProspectRecord[]> {
-  const prospectRows = await env.DB.prepare(`SELECT tp.id, tp.donor_id, d.display_name AS donor_display_name, d.city AS donor_city, d.state AS donor_state,
-        d.external_id, d.donor_code,
+  // LEFT JOIN donors (never an INNER JOIN) so an unlinked prospect
+  // (donor_id IS NULL) is still returned -- ownership is checked via an
+  // explicit trips join instead of (as before) incidentally through the
+  // donor join, since an unlinked row has no donor row to check against.
+  const prospectRows = await env.DB.prepare(`SELECT tp.id, tp.donor_id, COALESCE(d.display_name, tp.manual_name) AS display_name,
+        COALESCE(d.city, tp.manual_city) AS city, d.state AS donor_state, d.external_id, d.donor_code,
+        tp.manual_region_id, tp.manual_phone, tp.manual_email, tp.manual_notes,
         tp.added_method, tp.status, tp.selected_at, tp.suggested_reason, tp.suggested_score, tp.suggested_generated_at, tp.manual_rank,
         tp.meeting_at, tp.meeting_location, tp.next_action, tp.trip_notes, tp.linked_interaction_id
-      FROM trip_prospects tp JOIN donors d ON d.id = tp.donor_id
-      WHERE tp.trip_id = ? AND d.owner_user_id = ? AND tp.selected_at IS NOT NULL
-      ORDER BY (tp.manual_rank IS NULL), tp.manual_rank, tp.suggested_score IS NULL, tp.suggested_score DESC, d.display_name`)
+      FROM trip_prospects tp
+      JOIN trips t ON t.id = tp.trip_id
+      LEFT JOIN donors d ON d.id = tp.donor_id
+      WHERE tp.trip_id = ? AND t.owner_user_id = ? AND tp.selected_at IS NOT NULL
+      ORDER BY (tp.manual_rank IS NULL), tp.manual_rank, tp.suggested_score IS NULL, tp.suggested_score DESC, display_name`)
     .bind(tripId, userId).all<{
-      id: string; donor_id: string; donor_display_name: string; donor_city: string | null; donor_state: string | null;
-      external_id: string | null; donor_code: string | null;
+      id: string; donor_id: string | null; display_name: string; city: string | null; donor_state: string | null;
+      external_id: string | null; donor_code: string | null; manual_region_id: string | null; manual_phone: string | null; manual_email: string | null; manual_notes: string | null;
       added_method: AddedMethod; status: TripProspectStatus; selected_at: number; suggested_reason: string | null; suggested_score: number | null; suggested_generated_at: number | null;
       manual_rank: number | null; meeting_at: number | null; meeting_location: string | null; next_action: string | null; trip_notes: string | null; linked_interaction_id: string | null;
     }>();
   if (prospectRows.results.length === 0) return [];
 
-  const donorIds = [...new Set(prospectRows.results.map((row) => row.donor_id))];
+  const donorIds = [...new Set(prospectRows.results.map((row) => row.donor_id).filter((id): id is string => id !== null))];
   // Cross-trip conflicts (Section C): every OTHER trip's SELECTED
   // prospect row for any donor on THIS trip, across every one of this
   // owner's trips -- one query, not one per prospect. A candidate on
   // another trip that was never selected is not a real scheduling
   // conflict (nothing was actually planned there).
-  const conflictRows = await env.DB.prepare(`SELECT tp.donor_id, tp.trip_id, t.name AS trip_name, tp.status, tp.meeting_at
-      FROM trip_prospects tp JOIN trips t ON t.id = tp.trip_id
-      WHERE t.owner_user_id = ? AND tp.trip_id != ? AND tp.selected_at IS NOT NULL AND tp.donor_id IN (${donorIds.map(() => "?").join(",")})`)
-    .bind(userId, tripId, ...donorIds).all<{ donor_id: string; trip_id: string; trip_name: string; status: TripProspectStatus; meeting_at: number | null }>();
   const rowsByDonor = new Map<string, Array<{ tripId: string; tripName: string; status: TripProspectStatus; meetingAt: number | null }>>();
-  for (const row of conflictRows.results) {
-    const list = rowsByDonor.get(row.donor_id) ?? [];
-    list.push({ tripId: row.trip_id, tripName: row.trip_name, status: row.status, meetingAt: row.meeting_at });
-    rowsByDonor.set(row.donor_id, list);
+  // An unlinked prospect has no donor_id to check for cross-trip
+  // conflicts against -- skip the query entirely rather than bind an
+  // empty IN (), which is invalid SQL.
+  if (donorIds.length > 0) {
+    const conflictRows = await env.DB.prepare(`SELECT tp.donor_id, tp.trip_id, t.name AS trip_name, tp.status, tp.meeting_at
+        FROM trip_prospects tp JOIN trips t ON t.id = tp.trip_id
+        WHERE t.owner_user_id = ? AND tp.trip_id != ? AND tp.selected_at IS NOT NULL AND tp.donor_id IN (${donorIds.map(() => "?").join(",")})`)
+      .bind(userId, tripId, ...donorIds).all<{ donor_id: string; trip_id: string; trip_name: string; status: TripProspectStatus; meeting_at: number | null }>();
+    for (const row of conflictRows.results) {
+      const list = rowsByDonor.get(row.donor_id) ?? [];
+      list.push({ tripId: row.trip_id, tripName: row.trip_name, status: row.status, meetingAt: row.meeting_at });
+      rowsByDonor.set(row.donor_id, list);
+    }
   }
   // The SQL above already excludes this trip's own rows (`tp.trip_id !=
   // ?`), but findCrossTripConflicts() still takes `excludeTripId`
@@ -339,10 +365,13 @@ export async function listTripProspects(userId: string, tripId: string): Promise
   };
 
   return prospectRows.results.map((row) => ({
-    id: row.id, donorId: row.donor_id, donorDisplayName: row.donor_display_name, donorCity: row.donor_city, donorState: row.donor_state, donorCode: row.external_id || row.donor_code,
+    id: row.id, donorId: row.donor_id, isLinked: row.donor_id !== null,
+    donorDisplayName: row.display_name, donorCity: row.city, donorState: row.donor_state, donorCode: row.external_id || row.donor_code,
+    manualPhone: row.donor_id === null ? row.manual_phone : null, manualEmail: row.donor_id === null ? row.manual_email : null, manualNotes: row.donor_id === null ? row.manual_notes : null,
+    manualRegionLabel: row.donor_id === null ? (travelRegionById(row.manual_region_id)?.label ?? null) : null,
     addedMethod: row.added_method, status: row.status, selectedAt: row.selected_at, suggestedReason: row.suggested_reason, suggestedScore: row.suggested_score, suggestedGeneratedAt: row.suggested_generated_at,
     manualRank: row.manual_rank, meetingAt: row.meeting_at, meetingLocation: row.meeting_location, nextAction: row.next_action, trip_notes: row.trip_notes,
-    linkedInteractionId: row.linked_interaction_id, crossTripConflicts: conflictsByDonor.get(row.donor_id) ?? [], calendarSync: calendarSyncFor(row.linked_interaction_id),
+    linkedInteractionId: row.linked_interaction_id, crossTripConflicts: row.donor_id !== null ? (conflictsByDonor.get(row.donor_id) ?? []) : [], calendarSync: calendarSyncFor(row.linked_interaction_id),
   }));
 }
 
@@ -1272,9 +1301,16 @@ export async function unconfirmTripAttribution(userId: string, tripId: string, a
 }
 
 export type TripFinancialAttributionRow = {
-  attributionId: string; givingActivityId: string; donorId: string; donorDisplayName: string;
+  attributionId: string; givingActivityId: string; donorId: string | null; prospectId: string; donorDisplayName: string;
   category: string; workspaceStatus: string; committedCents: number | null; paidCents: number | null; balanceCents: number | null;
   note: string | null; createdAt: number;
+  // True for a commitment recorded against an unlinked (not-yet-in-FOS)
+  // prospect (lib/relationships/trips-data.ts's trip_prospect_commitments
+  // table) -- never a real giving_activities row. Presentation-only, same
+  // convention as resolvedViaImportMatch below: summarizeTripFinancials
+  // never reads it, and every money/status field above already carries
+  // the right value either way.
+  isUnlinkedProspectCommitment: boolean;
   // Pending-Gift Reconciliation Fix (2026-10-15, see docs/AI-HANDOFF.md):
   // true when the attributed record was itself a pending_gift that the JL
   // import's own reconciliation (CONFIRM_PENDING_GIFT_SQL, lib/giving/
@@ -1323,7 +1359,7 @@ export type TripFinancialAttributionRow = {
 // workspace, even though CONFIRM_PENDING_GIFT_SQL can only ever stamp a
 // same-owner, same-donor id by construction.
 export async function listTripFinancialAttributions(userId: string, tripId: string): Promise<TripFinancialAttributionRow[]> {
-  const result = await env.DB.prepare(`SELECT tfa.id AS attribution_id, tfa.giving_activity_id, tfa.donor_id, d.display_name AS donor_display_name,
+  const result = await env.DB.prepare(`SELECT tfa.id AS attribution_id, tfa.giving_activity_id, tfa.donor_id, tp.id AS prospect_id, d.display_name AS donor_display_name,
         CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.category ELSE ga.category END AS category,
         CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.workspace_status ELSE ga.workspace_status END AS workspace_status,
         CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.committed_cents ELSE ga.committed_cents END AS committed_cents,
@@ -1337,16 +1373,43 @@ export async function listTripFinancialAttributions(userId: string, tripId: stri
       LEFT JOIN giving_activities confirmed ON confirmed.id = ga.confirmed_by_activity_id AND confirmed.owner_user_id = tfa.user_id
       JOIN donors d ON d.id = tfa.donor_id
       JOIN trips t ON t.id = tfa.trip_id
+      JOIN trip_prospects tp ON tp.trip_id = tfa.trip_id AND tp.donor_id = tfa.donor_id
       WHERE tfa.trip_id = ? AND tfa.removed_at IS NULL AND t.owner_user_id = ?
       ORDER BY tfa.created_at DESC`).bind(tripId, userId)
-    .all<{ attribution_id: string; giving_activity_id: string; donor_id: string; donor_display_name: string; category: string; workspace_status: string; committed_cents: number | null; paid_cents: number | null; balance_cents: number | null; resolved_via_import_match: number; donor_confirmed_at: number | null; commitment_kind: TripCommitmentKind; reported_cash_collected_cents: number | null; reconciled_pending_attribution_id: string | null; note: string | null; created_at: number }>();
-  return result.results.map((row) => ({
-    attributionId: row.attribution_id, givingActivityId: row.giving_activity_id, donorId: row.donor_id, donorDisplayName: row.donor_display_name,
+    .all<{ attribution_id: string; giving_activity_id: string; donor_id: string; prospect_id: string; donor_display_name: string; category: string; workspace_status: string; committed_cents: number | null; paid_cents: number | null; balance_cents: number | null; resolved_via_import_match: number; donor_confirmed_at: number | null; commitment_kind: TripCommitmentKind; reported_cash_collected_cents: number | null; reconciled_pending_attribution_id: string | null; note: string | null; created_at: number }>();
+  const realAttributions: TripFinancialAttributionRow[] = result.results.map((row) => ({
+    attributionId: row.attribution_id, givingActivityId: row.giving_activity_id, donorId: row.donor_id, prospectId: row.prospect_id, donorDisplayName: row.donor_display_name,
     category: row.category, workspaceStatus: row.workspace_status, committedCents: row.committed_cents, paidCents: row.paid_cents, balanceCents: row.balance_cents,
-    resolvedViaImportMatch: Boolean(row.resolved_via_import_match),
+    resolvedViaImportMatch: Boolean(row.resolved_via_import_match), isUnlinkedProspectCommitment: false,
     donorConfirmedAt: row.donor_confirmed_at, commitmentKind: row.commitment_kind, reportedCashCollectedCents: row.reported_cash_collected_cents,
     reconciledPendingAttributionId: row.reconciled_pending_attribution_id,
     note: row.note, createdAt: row.created_at,
+  }));
+  const unlinkedCommitments = await listActiveUnlinkedProspectCommitments(userId, tripId);
+  return [...realAttributions, ...unlinkedCommitments].sort((a, b) => b.createdAt - a.createdAt);
+}
+
+// Unlinked-Prospect Fundraising (2026-10-25, see docs/AI-HANDOFF.md).
+// Every ACTIVE, not-yet-migrated trip_prospect_commitments row for this
+// trip, mapped into the exact same TripFinancialAttributionRow shape a
+// real attribution uses -- "using the existing trip fundraising
+// workflow," literally: summarizeTripFinancials (lib/relationships/
+// trip-financial-attribution.ts) reads only plain fields already present
+// on this shape and has no idea whether a given record came from here or
+// from a real giving_activities join.
+async function listActiveUnlinkedProspectCommitments(userId: string, tripId: string): Promise<TripFinancialAttributionRow[]> {
+  const result = await env.DB.prepare(`SELECT c.id, c.prospect_id, tp.manual_name, c.category, c.committed_cents, c.note, c.donor_confirmed_at, c.created_at
+      FROM trip_prospect_commitments c
+      JOIN trip_prospects tp ON tp.id = c.prospect_id
+      JOIN trips t ON t.id = c.trip_id
+      WHERE c.trip_id = ? AND t.owner_user_id = ? AND c.removed_at IS NULL AND c.migrated_at IS NULL`)
+    .bind(tripId, userId).all<{ id: string; prospect_id: string; manual_name: string | null; category: string; committed_cents: number; note: string | null; donor_confirmed_at: number | null; created_at: number }>();
+  return result.results.map((row) => ({
+    attributionId: row.id, givingActivityId: row.id, donorId: null, prospectId: row.prospect_id, donorDisplayName: row.manual_name ?? "Unlinked prospect",
+    category: row.category, workspaceStatus: "unlinked_prospect", committedCents: row.committed_cents, paidCents: null, balanceCents: null,
+    resolvedViaImportMatch: false, isUnlinkedProspectCommitment: true,
+    donorConfirmedAt: row.donor_confirmed_at, commitmentKind: "new_commitment", reportedCashCollectedCents: null,
+    reconciledPendingAttributionId: null, note: row.note, createdAt: row.created_at,
   }));
 }
 
@@ -1415,6 +1478,357 @@ export async function recordPendingPledgeAndAttribute(userId: string, tripId: st
   if (!attribution.ok) return { ok: false, reason: "recorded_but_not_attributed", activityId: inserted.activityId };
   if (donorConfirmedFlag(rawInput)) await confirmTripAttribution(userId, tripId, attribution.attributionId, now);
   return { ok: true, activityId: inserted.activityId, attributionId: attribution.attributionId };
+}
+
+// ============================================================================
+// Manually Added Prospects (2026-10-25, see docs/AI-HANDOFF.md). A trip
+// prospect that is NOT yet in FOS -- donor_id IS NULL, identified only by
+// the manual_* columns added by drizzle/0054. Everything below is scoped
+// to exactly that case; every function above this point continues to
+// operate only on linked (donor_id IS NOT NULL) prospects exactly as
+// before -- none of them are modified by this round.
+// ============================================================================
+
+export type ManualProspectInput = { name: string; city: string | null; regionId: TravelRegionId | null; phone: string | null; email: string | null; notes: string | null };
+export type AddManualProspectResult = { ok: true; prospectId: string } | { ok: false; reason: "trip_not_found" };
+
+// The one, explicit "Add a prospect manually" action -- parallels
+// selectTripProspect()'s own role for a real FOS donor. `added_method`
+// is 'manual' for the same reason an out-of-region donor search result
+// is: this was never auto-matched to the trip's destination region.
+// `selected_at` is set immediately, same convention as every other
+// deliberate add this feature already makes (selectTripProspect's own
+// doc comment) -- a manually entered prospect is, by construction,
+// always a deliberate outreach target, never an ambiguous candidate.
+export type ProspectLinkState = "linked" | "unlinked" | "not_found";
+
+// A thin, read-only check used by the route layer to decide which pair
+// of functions (the real, donor-linked ones above, or the unlinked-
+// prospect ones below) a status/meeting-scheduling request belongs to.
+export async function prospectLinkState(userId: string, tripId: string, prospectId: string): Promise<ProspectLinkState> {
+  const row = await env.DB.prepare(`SELECT tp.donor_id FROM trip_prospects tp JOIN trips t ON t.id = tp.trip_id
+      WHERE tp.id = ? AND tp.trip_id = ? AND t.owner_user_id = ?`).bind(prospectId, tripId, userId)
+    .first<{ donor_id: string | null }>();
+  if (!row) return "not_found";
+  return row.donor_id === null ? "unlinked" : "linked";
+}
+
+export async function addManualProspect(userId: string, tripId: string, input: ManualProspectInput, now: number): Promise<AddManualProspectResult> {
+  const trip = await getTrip(userId, tripId);
+  if (!trip) return { ok: false, reason: "trip_not_found" };
+  const prospectId = crypto.randomUUID();
+  await env.DB.prepare(`INSERT INTO trip_prospects (id, trip_id, donor_id, manual_name, manual_city, manual_region_id, manual_phone, manual_email, manual_notes, added_method, status, selected_at, created_at, updated_at)
+      VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, 'manual', 'not_contacted', ?, ?, ?)`)
+    .bind(prospectId, tripId, input.name, input.city, input.regionId, input.phone, input.email, input.notes, now, now, now).run();
+  return { ok: true, prospectId };
+}
+
+type UnlinkedProspect = {
+  id: string; manualName: string; manualCity: string | null; manualRegionId: string | null; manualPhone: string | null; manualEmail: string | null; manualNotes: string | null;
+};
+
+// Scoped by `donor_id IS NULL` directly in the WHERE clause (never just
+// checked afterward) -- an already-linked prospect id, or one belonging
+// to another owner's trip, both return null identically, exactly like
+// ownedProspect()'s own ownership scoping above.
+async function ownedUnlinkedProspect(userId: string, tripId: string, prospectId: string): Promise<UnlinkedProspect | null> {
+  const row = await env.DB.prepare(`SELECT tp.id, tp.manual_name, tp.manual_city, tp.manual_region_id, tp.manual_phone, tp.manual_email, tp.manual_notes
+      FROM trip_prospects tp JOIN trips t ON t.id = tp.trip_id
+      WHERE tp.id = ? AND tp.trip_id = ? AND t.owner_user_id = ? AND tp.donor_id IS NULL`).bind(prospectId, tripId, userId)
+    .first<{ id: string; manual_name: string; manual_city: string | null; manual_region_id: string | null; manual_phone: string | null; manual_email: string | null; manual_notes: string | null }>();
+  if (!row) return null;
+  return { id: row.id, manualName: row.manual_name, manualCity: row.manual_city, manualRegionId: row.manual_region_id, manualPhone: row.manual_phone, manualEmail: row.manual_email, manualNotes: row.manual_notes };
+}
+
+export type DonorMatchCandidate = { donorId: string; name: string; city: string | null; state: string | null; code: string | null; email: string | null; phone: string | null };
+
+// Duplicate detection (the task's own explicit requirement) -- reuses
+// searchDonors() (lib/relationships/donor-search.ts), the SAME matching
+// logic the donor directory and "Find prospects" both already use,
+// never a bespoke fuzzy-match implementation. Tries the prospect's own
+// name, phone, and email as three separate queries (a donor matching
+// ANY of them is a plausible duplicate) and merges the results, since
+// searchDonors() only ever takes one query string at a time.
+async function searchLiveDonorsFor(userId: string, queries: readonly string[]): Promise<DonorMatchCandidate[]> {
+  const donorRows = await liveOwnedDonorRows(userId);
+  const records = donorRows.map(toDonorSearchRecord);
+  // searchDonors() is typed over the plain DonorSearchRecord shape, so
+  // its result loses city/state at the type level even though they
+  // still exist at runtime -- resolved back by id, same pattern
+  // TripDashboardExperience.tsx's own findProspectDonorById already
+  // uses for the identical reason.
+  const recordById = new Map(records.map((record) => [record.id, record]));
+  const byId = new Map<string, DonorMatchCandidate>();
+  for (const query of queries) {
+    if (!query.trim()) continue;
+    for (const match of searchDonors(records, query, 5)) {
+      if (byId.has(match.id)) continue;
+      const full = recordById.get(match.id)!;
+      byId.set(match.id, { donorId: match.id, name: match.name, city: full.city, state: full.state, code: match.code, email: match.email, phone: match.phone });
+    }
+  }
+  return [...byId.values()].slice(0, 5);
+}
+
+export async function findPossibleDonorMatches(userId: string, tripId: string, prospectId: string): Promise<DonorMatchCandidate[]> {
+  const prospect = await ownedUnlinkedProspect(userId, tripId, prospectId);
+  if (!prospect) return [];
+  return searchLiveDonorsFor(userId, [prospect.manualName, prospect.manualPhone ?? "", prospect.manualEmail ?? ""]);
+}
+
+// Unlinked-Prospect Fundraising migration (shared by linkProspectToDonor
+// and convertProspectToNewDonor below): every active, not-yet-migrated
+// trip_prospect_commitments row for this prospect becomes a REAL
+// giving_activities row (via the exact same insert shape lib/giving/
+// pending-records.ts's insertPendingGift/insertPendingPledge already
+// use for a brand-new pending record -- deliberately re-implemented
+// here, not called, since those two validate and re-parse a raw string
+// amount/date, and this commitment's own committed_cents/activity_date
+// are already-validated numbers; re-serializing them to a string and
+// re-parsing would risk a cent-rounding mismatch for no benefit) and a
+// REAL trip_financial_attributions row (the exact same link shape
+// attributeGivingActivityToTrip already uses for a 'new_commitment'),
+// preserving the commitment's own category/amount/date/designation/
+// note/donor_confirmed_at exactly. The commitment row itself is marked
+// migrated, never deleted -- every future read of this trip's financial
+// totals (listActiveUnlinkedProspectCommitments above) excludes a
+// migrated commitment, so the new real attribution represents that
+// exact dollar amount exactly once -- never double-counted.
+async function migrateProspectCommitments(userId: string, tripId: string, prospectId: string, donorId: string, now: number): Promise<void> {
+  const commitments = await env.DB.prepare(`SELECT id, category, committed_cents, activity_date, designation, note, donor_confirmed_at
+      FROM trip_prospect_commitments WHERE prospect_id = ? AND removed_at IS NULL AND migrated_at IS NULL`)
+    .bind(prospectId).all<{ id: string; category: "pending_gift" | "pending_pledge"; committed_cents: number; activity_date: number | null; designation: string | null; note: string | null; donor_confirmed_at: number | null }>();
+  if (commitments.results.length === 0) return;
+  const donor = await env.DB.prepare("SELECT id, external_id, donor_code FROM donors WHERE id = ? AND owner_user_id = ?").bind(donorId, userId).first<{ id: string; external_id: string | null; donor_code: string | null }>();
+  if (!donor) return; // defensive: the caller only ever reaches here immediately after confirming donorId is a real, owned donor
+
+  for (const commitment of commitments.results) {
+    const givingActivityId = crypto.randomUUID();
+    const auditId = crypto.randomUUID();
+    const attributionId = crypto.randomUUID();
+    const isGift = commitment.category === "pending_gift";
+    const paidCents = 0; // matches insertPendingGift/insertPendingPledge exactly -- a brand-new pending record always starts with nothing paid
+    const balanceCents = isGift ? 0 : commitment.committed_cents; // matches insertPendingGift (gift: balance 0) / insertPendingPledge (pledge: balance = committed) exactly
+    const fingerprintPrefix = isGift ? "pending" : "pending-pledge";
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO giving_activities
+          (id,owner_user_id,donor_id,external_source,external_household_id,source_fingerprint,activity_date,committed_cents,paid_cents,balance_cents,item_type,description,source_campaign,category,record_origin,workspace_status,private_note,source_snapshot,created_at,updated_at)
+          VALUES (?,?,?,'Fundraising OS',?,?,?,?,?,?,?,?,?,?,'live','active',?,'{}',?,?)`)
+        .bind(givingActivityId, userId, donor.id, donor.external_id || donor.donor_code || donor.id, `${fingerprintPrefix}:${givingActivityId}`, commitment.activity_date, commitment.committed_cents, paidCents, balanceCents, isGift ? "Pending gift" : "Pending pledge", commitment.designation || null, commitment.designation || null, commitment.category, commitment.note || null, now, now),
+      env.DB.prepare(`INSERT INTO giving_activity_management_audits
+          (id,user_id,activity_id,action,next_donor_id,next_status,next_note,created_at)
+          VALUES (?,?,?,?,?,'active',?,?)`).bind(auditId, userId, givingActivityId, isGift ? "pending_created" : "pending_pledge_created", donor.id, commitment.note || null, now),
+      env.DB.prepare(`INSERT INTO trip_financial_attributions (id, user_id, trip_id, donor_id, giving_activity_id, note, commitment_kind, reported_cash_collected_cents, reconciled_pending_attribution_id, donor_confirmed_at, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'new_commitment', NULL, NULL, ?, ?)`)
+        .bind(attributionId, userId, tripId, donor.id, givingActivityId, commitment.note || null, commitment.donor_confirmed_at, now),
+      env.DB.prepare(`UPDATE trip_prospect_commitments SET migrated_giving_activity_id = ?, migrated_attribution_id = ?, migrated_at = ? WHERE id = ?`)
+        .bind(givingActivityId, attributionId, now, commitment.id),
+    ]);
+  }
+}
+
+export type LinkProspectResult = { ok: true } | { ok: false; reason: "prospect_not_found" | "donor_not_found" | "donor_already_on_trip" };
+
+// Links an unlinked prospect to an EXISTING FOS donor -- a plain UPDATE
+// of donor_id on the SAME trip_prospects row (see drizzle/0054's own doc
+// comment for why this is the one and only state transition). The row's
+// id, status, trip_notes, next_action, meeting_at/meeting_location, and
+// manual_rank are every one of them left completely untouched, so "this
+// trip's meeting notes and trip history survive linking" is true by
+// construction, not by any copying logic here. Never creates or
+// modifies a donor record -- the donor must already exist.
+export async function linkProspectToDonor(userId: string, tripId: string, prospectId: string, donorId: string, now: number): Promise<LinkProspectResult> {
+  const prospect = await ownedUnlinkedProspect(userId, tripId, prospectId);
+  if (!prospect) return { ok: false, reason: "prospect_not_found" };
+  const donor = await env.DB.prepare("SELECT id FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL").bind(donorId, userId).first<{ id: string }>();
+  if (!donor) return { ok: false, reason: "donor_not_found" };
+
+  try {
+    const result = await env.DB.prepare("UPDATE trip_prospects SET donor_id = ?, updated_at = ? WHERE id = ? AND donor_id IS NULL")
+      .bind(donorId, now, prospectId).run() as unknown as { meta: { changes?: number } };
+    if ((result.meta.changes ?? 0) === 0) return { ok: false, reason: "prospect_not_found" }; // linked or removed concurrently since the read above
+  } catch {
+    // UNIQUE(trip_id, donor_id) caught this donor already having its own
+    // (separate) trip_prospects row on this same trip.
+    return { ok: false, reason: "donor_already_on_trip" };
+  }
+  await migrateProspectCommitments(userId, tripId, prospectId, donorId, now);
+  return { ok: true };
+}
+
+export type ConvertProspectResult =
+  | { ok: true; donorId: string }
+  | { ok: false; reason: "prospect_not_found" }
+  | { ok: false; reason: "input_invalid"; fieldErrors: Record<string, string> }
+  | { ok: false; reason: "possible_duplicates"; candidates: DonorMatchCandidate[] };
+
+// Converts an unlinked prospect into a brand-new FOS donor account --
+// "Do not automatically create donor accounts ... until the normal
+// import or reconciliation process confirms the transactions": this is
+// never automatic -- it is the one explicit, fundraiser-initiated action
+// that creates a donor from this feature, deliberately mirroring
+// app/api/donors/route.ts's own manual-donor-creation insert exactly
+// (same convention lib/giving/pending-records.ts's own header comment
+// documents: a sensitive, already-tested endpoint is duplicated rather
+// than refactored to share code with a brand-new caller). Duplicate
+// detection (findPossibleDonorMatches, reused) runs BEFORE creating
+// anything, unless the fundraiser already explicitly confirmed via
+// `force` that this is not a duplicate.
+export async function convertProspectToNewDonor(userId: string, tripId: string, prospectId: string, contactInput: DonorContactInput, options: { force?: boolean }, now: number): Promise<ConvertProspectResult> {
+  const prospect = await ownedUnlinkedProspect(userId, tripId, prospectId);
+  if (!prospect) return { ok: false, reason: "prospect_not_found" };
+  const { contact, errors, valid } = normalizeDonorContact(contactInput);
+  if (!valid) return { ok: false, reason: "input_invalid", fieldErrors: errors };
+
+  if (!options.force) {
+    const candidates = await searchLiveDonorsFor(userId, [contact.householdName, contact.mobilePhone, contact.email]);
+    if (candidates.length > 0) return { ok: false, reason: "possible_duplicates", candidates };
+  }
+
+  const donorId = crypto.randomUUID();
+  const auditId = crypto.randomUUID();
+  const after = JSON.stringify(contact);
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO donors
+      (id,owner_user_id,data_source,display_name,email,phone,donor_code,spouse,address,external_source,external_id,last_name,primary_first_name,spouse_first_name,home_phone,address_line_1,city,state,postal_code,country,contact_note,created_at,updated_at)
+      VALUES (?,?,'live',?,?,?,?,?,?,'Manual',NULL,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(donorId, userId, contact.householdName, contact.email || null, contact.mobilePhone || null, null, contact.spouseName || null, contact.address || null, contact.lastName || null, contact.primaryFirstName || null, contact.spouseName || null, contact.homePhone || null, contact.address || null, contact.city || null, contact.state || null, contact.postalCode || null, contact.country || null, contact.note || null, now, now),
+    env.DB.prepare(`INSERT INTO donor_contact_audits (id,user_id,donor_id,action,changed_fields,before_json,after_json,created_at)
+      VALUES (?,?,?,'created',?,NULL,?,?)`).bind(auditId, userId, donorId, JSON.stringify(changedContactFields(null, contact)), after, now),
+    env.DB.prepare("INSERT INTO onboarding_preferences (user_id, sample_data_acknowledged, data_mode, updated_at) VALUES (?, 1, 'live', ?) ON CONFLICT(user_id) DO UPDATE SET data_mode = 'live', updated_at = excluded.updated_at").bind(userId, now),
+  ]);
+  logger.info("manual_donor_created_from_trip_prospect", { donorId, userId, tripId, prospectId });
+
+  await env.DB.prepare("UPDATE trip_prospects SET donor_id = ?, updated_at = ? WHERE id = ? AND donor_id IS NULL").bind(donorId, now, prospectId).run();
+  await migrateProspectCommitments(userId, tripId, prospectId, donorId, now);
+  return { ok: true, donorId };
+}
+
+// Unlinked-Prospect Fundraising (2026-10-25, see docs/AI-HANDOFF.md) --
+// "record trip pledges and donations using the existing trip fundraising
+// workflow" for a prospect with no FOS donor yet. Reuses pendingGiftInput/
+// pendingPledgeInput (lib/giving/management.ts) for the EXACT SAME
+// amount/date/designation/note validation "record a new donation/pledge"
+// already uses -- a placeholder donorId satisfies that validator's own
+// "Choose a donor" check (which is irrelevant here and never surfaced:
+// this path never reads the validator's own returned donorId at all,
+// and a non-empty placeholder means that one error condition never
+// fires). NEVER writes to giving_activities -- this is the one
+// structural guarantee behind "do not automatically create donor
+// accounts or modify official donor financial records": there is no
+// real financial record anywhere for an unlinked prospect's commitment
+// until migrateProspectCommitments runs, which only ever happens once a
+// real donor exists (linkProspectToDonor/convertProspectToNewDonor).
+export type RecordUnlinkedCommitmentResult = { ok: true; commitmentId: string } | { ok: false; reason: "prospect_not_found" } | { ok: false; reason: "input_invalid"; error: string };
+
+export async function recordUnlinkedProspectCommitment(userId: string, tripId: string, prospectId: string, category: "pending_gift" | "pending_pledge", rawInput: unknown, now: number): Promise<RecordUnlinkedCommitmentResult> {
+  const prospect = await ownedUnlinkedProspect(userId, tripId, prospectId);
+  if (!prospect) return { ok: false, reason: "prospect_not_found" };
+  const input = category === "pending_gift"
+    ? pendingGiftInput({ ...(rawInput as Record<string, unknown>), donorId: "unlinked-prospect-placeholder" })
+    : pendingPledgeInput({ ...(rawInput as Record<string, unknown>), donorId: "unlinked-prospect-placeholder" });
+  if (input.errors.length) return { ok: false, reason: "input_invalid", error: input.errors.join(" ") };
+
+  const commitmentId = crypto.randomUUID();
+  const donorConfirmedAt = donorConfirmedFlag(rawInput) ? now : null;
+  await env.DB.prepare(`INSERT INTO trip_prospect_commitments (id, user_id, trip_id, prospect_id, category, committed_cents, activity_date, designation, note, donor_confirmed_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(commitmentId, userId, tripId, prospectId, category, input.amountCents, input.activityDate, input.designation || null, input.note || null, donorConfirmedAt, now).run();
+  logger.info("trip_unlinked_prospect_commitment_recorded", { userId, tripId, prospectId, category, commitmentId, confirmed: donorConfirmedAt !== null });
+  return { ok: true, commitmentId };
+}
+
+export type UnlinkedCommitmentActionResult = { ok: true } | { ok: false; reason: "not_found" };
+
+export async function confirmUnlinkedProspectCommitment(userId: string, tripId: string, commitmentId: string, now: number): Promise<UnlinkedCommitmentActionResult> {
+  const result = await env.DB.prepare(`UPDATE trip_prospect_commitments SET donor_confirmed_at = ?
+      WHERE id = ? AND trip_id = ? AND removed_at IS NULL AND migrated_at IS NULL AND donor_confirmed_at IS NULL
+        AND trip_id IN (SELECT id FROM trips WHERE owner_user_id = ?)`)
+    .bind(now, commitmentId, tripId, userId).run() as unknown as { meta: { changes?: number } };
+  if ((result.meta.changes ?? 0) > 0) return { ok: true };
+  // Idempotent: already confirmed is a no-op success, same convention as
+  // confirmTripAttribution. Only a genuinely missing/foreign/migrated/
+  // removed commitment is reported not_found.
+  const existing = await env.DB.prepare(`SELECT 1 FROM trip_prospect_commitments c JOIN trips t ON t.id = c.trip_id
+      WHERE c.id = ? AND c.trip_id = ? AND t.owner_user_id = ? AND c.removed_at IS NULL AND c.migrated_at IS NULL`)
+    .bind(commitmentId, tripId, userId).first();
+  return existing ? { ok: true } : { ok: false, reason: "not_found" };
+}
+
+export async function unconfirmUnlinkedProspectCommitment(userId: string, tripId: string, commitmentId: string): Promise<UnlinkedCommitmentActionResult> {
+  const result = await env.DB.prepare(`UPDATE trip_prospect_commitments SET donor_confirmed_at = NULL
+      WHERE id = ? AND trip_id = ? AND removed_at IS NULL AND migrated_at IS NULL
+        AND trip_id IN (SELECT id FROM trips WHERE owner_user_id = ?)`)
+    .bind(commitmentId, tripId, userId).run() as unknown as { meta: { changes?: number } };
+  if ((result.meta.changes ?? 0) > 0) return { ok: true };
+  const existing = await env.DB.prepare(`SELECT 1 FROM trip_prospect_commitments c JOIN trips t ON t.id = c.trip_id
+      WHERE c.id = ? AND c.trip_id = ? AND t.owner_user_id = ? AND c.removed_at IS NULL AND c.migrated_at IS NULL`)
+    .bind(commitmentId, tripId, userId).first();
+  return existing ? { ok: true } : { ok: false, reason: "not_found" };
+}
+
+// Removes (soft) an unlinked prospect's commitment -- mirrors
+// removeTripFinancialAttribution's own "never touches the underlying
+// record" guarantee exactly, trivially true here since there IS no
+// underlying giving_activities record for an unlinked commitment yet.
+export async function removeUnlinkedProspectCommitment(userId: string, tripId: string, commitmentId: string, reason: string | null, now: number): Promise<boolean> {
+  const result = await env.DB.prepare(`UPDATE trip_prospect_commitments SET removed_at = ?, removed_reason = ?
+      WHERE id = ? AND trip_id = ? AND removed_at IS NULL
+        AND trip_id IN (SELECT id FROM trips WHERE owner_user_id = ?)`)
+    .bind(now, reason, commitmentId, tripId, userId).run() as unknown as { meta: { changes?: number } };
+  return (result.meta.changes ?? 0) > 0;
+}
+
+export type ScheduleUnlinkedMeetingResult = { ok: true } | { ok: false; reason: "not_found" | "invalid_meeting_time" };
+
+// Meeting scheduling/completion for an unlinked prospect (the task's own
+// "support meeting scheduling, meeting notes, and follow-up tracking"):
+// deliberately a SEPARATE, much simpler pair of functions rather than
+// widening scheduleProspectMeeting/completeProspectMeeting's own already
+// heavily concurrency-guarded internals (see those functions' own doc
+// comments) -- an unlinked prospect has no donor and therefore can never
+// have a real `interactions` row or Google Calendar sync (both require
+// donor_id), so there is no scheduled/completed DONOR INTERACTION to
+// create here, only the trip's own workflow fields. Trip notes and next
+// action already work for any prospect via updateProspectFields above,
+// unchanged -- this only ever sets meeting_at/meeting_location/status.
+// `fallbackTimezone` (the fundraiser's own profile timezone) is used
+// directly -- never resolved per-city like resolveMeetingEpoch() does
+// for a real donor's own state, since there is no donor row to read a
+// state from; picking an arbitrary representative city out of the
+// prospect's own chosen region would risk being MORE misleading than
+// an honest fallback, not less.
+export async function scheduleUnlinkedProspectMeeting(userId: string, tripId: string, prospectId: string, meetingAtLocal: unknown, location: string | null, fallbackTimezone: string, now: number): Promise<ScheduleUnlinkedMeetingResult> {
+  const fields = parseLocalDateTimeInput(meetingAtLocal);
+  if (!fields) return { ok: false, reason: "invalid_meeting_time" };
+  const meetingAt = Math.floor(zonedTimeToUtc(fields.year, fields.month, fields.day, fields.hour, fields.minute, fallbackTimezone).getTime() / 1000);
+  const validated = validateMeetingScheduling(meetingAt, now);
+  if (!validated.ok) return { ok: false, reason: "invalid_meeting_time" };
+  const result = await env.DB.prepare(`UPDATE trip_prospects SET status = 'meeting_scheduled', meeting_at = ?, meeting_location = ?, updated_at = ?
+      WHERE id = ? AND trip_id = ? AND donor_id IS NULL AND trip_id IN (SELECT id FROM trips WHERE owner_user_id = ?)`)
+    .bind(validated.meetingAt, location, now, prospectId, tripId, userId).run() as unknown as { meta: { changes?: number } };
+  return (result.meta.changes ?? 0) > 0 ? { ok: true } : { ok: false, reason: "not_found" };
+}
+
+export async function completeUnlinkedProspectMeeting(userId: string, tripId: string, prospectId: string, meetingAtLocal: unknown, notes: string, fallbackTimezone: string, now: number): Promise<ScheduleUnlinkedMeetingResult> {
+  const fields = parseLocalDateTimeInput(meetingAtLocal);
+  if (!fields) return { ok: false, reason: "invalid_meeting_time" };
+  const meetingAt = Math.floor(zonedTimeToUtc(fields.year, fields.month, fields.day, fields.hour, fields.minute, fallbackTimezone).getTime() / 1000);
+  const validated = validateMeetingCompletion(meetingAt, notes, now);
+  if (!validated.ok) return { ok: false, reason: "invalid_meeting_time" };
+  // Appends to trip_notes rather than overwriting it -- there is no
+  // separate `interactions` row to hold these notes for an unlinked
+  // prospect (unlike completeProspectMeeting's real donor-linked path),
+  // so trip_notes is the only place they can live; overwriting it would
+  // silently destroy anything already saved there, same "never replace,
+  // only append alongside" rule this codebase's real AI Meeting Notes
+  // preservation logic already follows for the linked case.
+  const result = await env.DB.prepare(`UPDATE trip_prospects SET status = 'meeting_completed', meeting_at = ?,
+        trip_notes = CASE WHEN trip_notes IS NULL OR trip_notes = '' THEN ? ELSE trip_notes || char(10) || char(10) || ? END,
+        updated_at = ?
+      WHERE id = ? AND trip_id = ? AND donor_id IS NULL AND trip_id IN (SELECT id FROM trips WHERE owner_user_id = ?)`)
+    .bind(validated.meetingAt, validated.notes, validated.notes, now, prospectId, tripId, userId).run() as unknown as { meta: { changes?: number } };
+  return (result.meta.changes ?? 0) > 0 ? { ok: true } : { ok: false, reason: "not_found" };
 }
 
 export { statusRequiresInteraction, timezoneForState };

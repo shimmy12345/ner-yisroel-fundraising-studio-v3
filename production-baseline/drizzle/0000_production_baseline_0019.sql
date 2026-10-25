@@ -549,7 +549,7 @@ CREATE TABLE `interactions` (
   `summary` text NOT NULL,
   `source` text DEFAULT 'manual' NOT NULL,
   `created_at` integer NOT NULL,
-  `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, `shared_activity_id` text REFERENCES `shared_activities`(`id`), `role` text CHECK (`role` IN ('participant','recipient')), `all_day` integer DEFAULT 0 NOT NULL, `all_day_date` text, `end_at` integer, `location` text,
+  `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, `shared_activity_id` text REFERENCES `shared_activities`(`id`), `role` text CHECK (`role` IN ('participant','recipient')), `all_day` integer DEFAULT 0 NOT NULL, `all_day_date` text, `end_at` integer, `location` text, `write_token` text,
   FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
@@ -611,6 +611,15 @@ CREATE TABLE `legacy_test_cleanup_audits` (
   `archived_reminders` integer NOT NULL,
   `created_at` integer NOT NULL,
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
+CREATE TABLE `meeting_note_save_identities` (
+  `save_id` text PRIMARY KEY NOT NULL,
+  `interaction_id` text NOT NULL,
+  `payload_signature` text NOT NULL,
+  `created_at` integer NOT NULL,
+  `updated_at` integer NOT NULL,
+  FOREIGN KEY (`interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action
 );
 
 CREATE TABLE `onboarding_preferences` (
@@ -774,10 +783,40 @@ CREATE TABLE `trip_financial_attributions` (
 	FOREIGN KEY (`giving_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action
 );
 
-CREATE TABLE `trip_prospects` (
+CREATE TABLE `trip_prospect_commitments` (
+	`id` text PRIMARY KEY NOT NULL,
+	`user_id` text NOT NULL,
+	`trip_id` text NOT NULL,
+	`prospect_id` text NOT NULL,
+	`category` text NOT NULL CHECK (`category` IN ('pending_gift','pending_pledge')),
+	`committed_cents` integer NOT NULL,
+	`activity_date` integer,
+	`designation` text,
+	`note` text,
+	`donor_confirmed_at` integer,
+	`created_at` integer NOT NULL,
+	`removed_at` integer,
+	`removed_reason` text,
+	`migrated_giving_activity_id` text,
+	`migrated_attribution_id` text,
+	`migrated_at` integer,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`prospect_id`) REFERENCES `trip_prospects`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`migrated_giving_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`migrated_attribution_id`) REFERENCES `trip_financial_attributions`(`id`) ON UPDATE no action ON DELETE no action
+);
+
+CREATE TABLE "trip_prospects" (
 	`id` text PRIMARY KEY NOT NULL,
 	`trip_id` text NOT NULL,
-	`donor_id` text NOT NULL,
+	`donor_id` text,
+	`manual_name` text,
+	`manual_city` text,
+	`manual_region_id` text,
+	`manual_phone` text,
+	`manual_email` text,
+	`manual_notes` text,
 	`added_method` text NOT NULL CHECK (`added_method` IN ('auto_region','manual')),
 	`status` text NOT NULL DEFAULT 'not_contacted' CHECK (`status` IN ('not_contacted','contacted','meeting_requested','meeting_scheduled','meeting_completed','declined','unable_to_schedule')),
 	`suggested_reason` text,
@@ -789,8 +828,10 @@ CREATE TABLE `trip_prospects` (
 	`next_action` text,
 	`trip_notes` text,
 	`linked_interaction_id` text,
+	`selected_at` integer,
 	`created_at` integer NOT NULL,
-	`updated_at` integer NOT NULL, `selected_at` integer, `all_day` integer DEFAULT 0 NOT NULL, `all_day_date` text,
+	`updated_at` integer NOT NULL,
+	CHECK (`donor_id` IS NOT NULL OR (`manual_name` IS NOT NULL AND trim(`manual_name`) != '')),
 	FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`linked_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action
@@ -1007,6 +1048,8 @@ CREATE INDEX `jl_payment_assignment_audits_user_date_idx` ON `jl_payment_assignm
 
 CREATE INDEX `jl_payment_assignments_pledge_idx` ON `jl_payment_assignments` (`pledge_activity_id`);
 
+CREATE INDEX `meeting_note_save_identities_interaction_idx` ON `meeting_note_save_identities` (`interaction_id`);
+
 CREATE UNIQUE INDEX `pledge_balance_corrections_active_uidx` ON `pledge_balance_corrections` (`pledge_activity_id`) WHERE `reversed_at` IS NULL;
 
 CREATE INDEX `pledge_balance_corrections_pledge_idx` ON `pledge_balance_corrections` (`pledge_activity_id`,`created_at`);
@@ -1037,6 +1080,10 @@ CREATE INDEX `trip_financial_attributions_donor_idx` ON `trip_financial_attribut
 
 CREATE INDEX `trip_financial_attributions_trip_idx` ON `trip_financial_attributions` (`trip_id`, `removed_at`);
 
+CREATE INDEX `trip_prospect_commitments_prospect_idx` ON `trip_prospect_commitments` (`prospect_id`);
+
+CREATE INDEX `trip_prospect_commitments_trip_idx` ON `trip_prospect_commitments` (`trip_id`, `removed_at`, `migrated_at`);
+
 CREATE INDEX `trip_prospects_donor_idx` ON `trip_prospects` (`donor_id`);
 
 CREATE UNIQUE INDEX `trip_prospects_trip_donor_idx` ON `trip_prospects` (`trip_id`,`donor_id`);
@@ -1062,5 +1109,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','589e41456549546558bca975d35645b16e2b8e27196d227657b6a5d196c8cadf',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','d05979d2e068371230568836e96d57b16cedc514e2497e425ace3f278f85d4ed',1785944072);
 PRAGMA optimize;

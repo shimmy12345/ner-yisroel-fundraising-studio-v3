@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "589e41456549546558bca975d35645b16e2b8e27196d227657b6a5d196c8cadf",
+  "schemaHash": "d05979d2e068371230568836e96d57b16cedc514e2497e425ace3f278f85d4ed",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -52,7 +52,10 @@
     "0047_trip_prospect_selection.sql",
     "0048_google_calendar_sync.sql",
     "0050_trip_attribution_confirmation.sql",
-    "0051_trip_reconciliation_concurrency_guard.sql"
+    "0051_trip_reconciliation_concurrency_guard.sql",
+    "0052_interaction_write_proof_token.sql",
+    "0053_meeting_note_save_identity.sql",
+    "0054_trip_manual_prospects.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -4808,6 +4811,13 @@
             "notNull": false,
             "defaultValue": null,
             "primaryKeyOrder": 0
+          },
+          {
+            "name": "write_token",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
           }
         ],
         "foreignKeys": [
@@ -5362,6 +5372,78 @@
             "name": null,
             "columns": [
               "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "meeting_note_save_identities",
+        "columns": [
+          {
+            "name": "save_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "interaction_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "payload_signature",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "interaction_id",
+            "toTable": "interactions",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "meeting_note_save_identities_interaction_idx",
+            "columns": [
+              "interaction_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `meeting_note_save_identities_interaction_idx` ON `meeting_note_save_identities` (`interaction_id`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "save_id"
             ],
             "unique": true,
             "partial": false,
@@ -6705,6 +6787,197 @@
         ]
       },
       {
+        "name": "trip_prospect_commitments",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "trip_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "prospect_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "category",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "committed_cents",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "activity_date",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "designation",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "note",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_confirmed_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "removed_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "removed_reason",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "migrated_giving_activity_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "migrated_attribution_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "migrated_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "migrated_attribution_id",
+            "toTable": "trip_financial_attributions",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "migrated_giving_activity_id",
+            "toTable": "giving_activities",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "prospect_id",
+            "toTable": "trip_prospects",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "trip_id",
+            "toTable": "trips",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "trip_prospect_commitments_prospect_idx",
+            "columns": [
+              "prospect_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `trip_prospect_commitments_prospect_idx` ON `trip_prospect_commitments` (`prospect_id`)"
+          },
+          {
+            "name": "trip_prospect_commitments_trip_idx",
+            "columns": [
+              "trip_id",
+              "removed_at",
+              "migrated_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `trip_prospect_commitments_trip_idx` ON `trip_prospect_commitments` (`trip_id`, `removed_at`, `migrated_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`category` IN ('pending_gift','pending_pledge'))"
+        ]
+      },
+      {
         "name": "trip_prospects",
         "columns": [
           {
@@ -6724,7 +6997,49 @@
           {
             "name": "donor_id",
             "type": "TEXT",
-            "notNull": true,
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "manual_name",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "manual_city",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "manual_region_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "manual_phone",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "manual_email",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "manual_notes",
+            "type": "TEXT",
+            "notNull": false,
             "defaultValue": null,
             "primaryKeyOrder": 0
           },
@@ -6806,6 +7121,13 @@
             "primaryKeyOrder": 0
           },
           {
+            "name": "selected_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
             "name": "created_at",
             "type": "INTEGER",
             "notNull": true,
@@ -6816,27 +7138,6 @@
             "name": "updated_at",
             "type": "INTEGER",
             "notNull": true,
-            "defaultValue": null,
-            "primaryKeyOrder": 0
-          },
-          {
-            "name": "selected_at",
-            "type": "INTEGER",
-            "notNull": false,
-            "defaultValue": null,
-            "primaryKeyOrder": 0
-          },
-          {
-            "name": "all_day",
-            "type": "INTEGER",
-            "notNull": true,
-            "defaultValue": "0",
-            "primaryKeyOrder": 0
-          },
-          {
-            "name": "all_day_date",
-            "type": "TEXT",
-            "notNull": false,
             "defaultValue": null,
             "primaryKeyOrder": 0
           }
@@ -6910,6 +7211,7 @@
         ],
         "checks": [
           "CHECK (`added_method` IN ('auto_region','manual'))",
+          "CHECK (`donor_id` IS NOT NULL OR (`manual_name` IS NOT NULL AND trim(`manual_name`) != ''))",
           "CHECK (`status` IN ('not_contacted','contacted','meeting_requested','meeting_scheduled','meeting_completed','declined','unable_to_schedule'))"
         ]
       },
@@ -7691,7 +7993,7 @@
     {
       "type": "table",
       "name": "interactions",
-      "sql": "CREATE TABLE `interactions` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL, `occurred_at` integer NOT NULL, `summary` text NOT NULL, `source` text DEFAULT 'manual' NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, `shared_activity_id` text REFERENCES `shared_activities`(`id`), `role` text CHECK (`role` IN ('participant','recipient')), `all_day` integer DEFAULT 0 NOT NULL, `all_day_date` text, `end_at` integer, `location` text, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+      "sql": "CREATE TABLE `interactions` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL, `occurred_at` integer NOT NULL, `summary` text NOT NULL, `source` text DEFAULT 'manual' NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, `shared_activity_id` text REFERENCES `shared_activities`(`id`), `role` text CHECK (`role` IN ('participant','recipient')), `all_day` integer DEFAULT 0 NOT NULL, `all_day_date` text, `end_at` integer, `location` text, `write_token` text, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",
@@ -7712,6 +8014,11 @@
       "type": "table",
       "name": "legacy_test_cleanup_audits",
       "sql": "CREATE TABLE `legacy_test_cleanup_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `preview_hash` text NOT NULL, `records_json` text NOT NULL, `archived_interactions` integer NOT NULL, `archived_reminders` integer NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "meeting_note_save_identities",
+      "sql": "CREATE TABLE `meeting_note_save_identities` ( `save_id` text PRIMARY KEY NOT NULL, `interaction_id` text NOT NULL, `payload_signature` text NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",
@@ -7775,8 +8082,13 @@
     },
     {
       "type": "table",
+      "name": "trip_prospect_commitments",
+      "sql": "CREATE TABLE `trip_prospect_commitments` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `trip_id` text NOT NULL, `prospect_id` text NOT NULL, `category` text NOT NULL CHECK (`category` IN ('pending_gift','pending_pledge')), `committed_cents` integer NOT NULL, `activity_date` integer, `designation` text, `note` text, `donor_confirmed_at` integer, `created_at` integer NOT NULL, `removed_at` integer, `removed_reason` text, `migrated_giving_activity_id` text, `migrated_attribution_id` text, `migrated_at` integer, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`prospect_id`) REFERENCES `trip_prospects`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`migrated_giving_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`migrated_attribution_id`) REFERENCES `trip_financial_attributions`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
       "name": "trip_prospects",
-      "sql": "CREATE TABLE `trip_prospects` ( `id` text PRIMARY KEY NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `added_method` text NOT NULL CHECK (`added_method` IN ('auto_region','manual')), `status` text NOT NULL DEFAULT 'not_contacted' CHECK (`status` IN ('not_contacted','contacted','meeting_requested','meeting_scheduled','meeting_completed','declined','unable_to_schedule')), `suggested_reason` text, `suggested_score` real, `suggested_generated_at` integer, `manual_rank` integer, `meeting_at` integer, `meeting_location` text, `next_action` text, `trip_notes` text, `linked_interaction_id` text, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `selected_at` integer, `all_day` integer DEFAULT 0 NOT NULL, `all_day_date` text, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`linked_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action )"
+      "sql": "CREATE TABLE \"trip_prospects\" ( `id` text PRIMARY KEY NOT NULL, `trip_id` text NOT NULL, `donor_id` text, `manual_name` text, `manual_city` text, `manual_region_id` text, `manual_phone` text, `manual_email` text, `manual_notes` text, `added_method` text NOT NULL CHECK (`added_method` IN ('auto_region','manual')), `status` text NOT NULL DEFAULT 'not_contacted' CHECK (`status` IN ('not_contacted','contacted','meeting_requested','meeting_scheduled','meeting_completed','declined','unable_to_schedule')), `suggested_reason` text, `suggested_score` real, `suggested_generated_at` integer, `manual_rank` integer, `meeting_at` integer, `meeting_location` text, `next_action` text, `trip_notes` text, `linked_interaction_id` text, `selected_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, CHECK (`donor_id` IS NOT NULL OR (`manual_name` IS NOT NULL AND trim(`manual_name`) != '')), FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`linked_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",
@@ -8150,6 +8462,11 @@
     },
     {
       "type": "index",
+      "name": "meeting_note_save_identities_interaction_idx",
+      "sql": "CREATE INDEX `meeting_note_save_identities_interaction_idx` ON `meeting_note_save_identities` (`interaction_id`)"
+    },
+    {
+      "type": "index",
       "name": "pledge_balance_corrections_active_uidx",
       "sql": "CREATE UNIQUE INDEX `pledge_balance_corrections_active_uidx` ON `pledge_balance_corrections` (`pledge_activity_id`) WHERE `reversed_at` IS NULL"
     },
@@ -8222,6 +8539,16 @@
       "type": "index",
       "name": "trip_financial_attributions_trip_idx",
       "sql": "CREATE INDEX `trip_financial_attributions_trip_idx` ON `trip_financial_attributions` (`trip_id`, `removed_at`)"
+    },
+    {
+      "type": "index",
+      "name": "trip_prospect_commitments_prospect_idx",
+      "sql": "CREATE INDEX `trip_prospect_commitments_prospect_idx` ON `trip_prospect_commitments` (`prospect_id`)"
+    },
+    {
+      "type": "index",
+      "name": "trip_prospect_commitments_trip_idx",
+      "sql": "CREATE INDEX `trip_prospect_commitments_trip_idx` ON `trip_prospect_commitments` (`trip_id`, `removed_at`, `migrated_at`)"
     },
     {
       "type": "index",

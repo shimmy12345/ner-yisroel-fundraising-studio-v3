@@ -314,3 +314,59 @@ export function validateReportedCashCollectedCents(value: unknown): { ok: true; 
   if (!Number.isFinite(amount) || amount < 0 || amount > MAX_REPORTED_CASH_COLLECTED_DOLLARS) return { ok: false };
   return { ok: true, cents: Math.round(amount * 100) };
 }
+
+// Manually Added Prospects (2026-10-25, see docs/AI-HANDOFF.md). A
+// not-yet-in-FOS prospect needs only a name; city/region/phone/email/
+// notes are all optional. Same `{ ok: true; <field> } | { ok: false }`
+// validator shape as every other field above, for the same reason.
+const MAX_MANUAL_NAME_LENGTH = 200;
+const MAX_MANUAL_CITY_LENGTH = 100;
+const MAX_MANUAL_CONTACT_LENGTH = 50;
+const MAX_MANUAL_EMAIL_LENGTH = 254;
+
+export function validateManualProspectName(value: unknown): { ok: true; name: string } | { ok: false } {
+  const name = typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
+  if (!name || name.length > MAX_MANUAL_NAME_LENGTH) return { ok: false };
+  return { ok: true, name };
+}
+
+export function validateManualProspectCity(value: unknown): { ok: true; city: string | null } | { ok: false } {
+  if (value === undefined || value === null) return { ok: true, city: null };
+  if (typeof value !== "string") return { ok: false };
+  const city = value.trim() || null;
+  if (city && city.length > MAX_MANUAL_CITY_LENGTH) return { ok: false };
+  return { ok: true, city };
+}
+
+// A TravelRegionId string, or null -- never validated against the
+// donor's own city here (unlike regionsForCityState's own derivation
+// for a real FOS donor, a manually entered prospect's region is simply
+// the fundraiser's own direct choice, since there is no donor record to
+// derive it from).
+export function validateManualProspectRegionId<T extends string>(value: unknown, isValidRegionId: (candidate: string) => candidate is T): { ok: true; regionId: T | null } | { ok: false } {
+  if (value === undefined || value === null || value === "") return { ok: true, regionId: null };
+  if (typeof value !== "string" || !isValidRegionId(value)) return { ok: false };
+  return { ok: true, regionId: value };
+}
+
+export function validateManualProspectPhone(value: unknown): { ok: true; phone: string | null } | { ok: false } {
+  if (value === undefined || value === null || value === "") return { ok: true, phone: null };
+  if (typeof value !== "string") return { ok: false };
+  const phone = value.trim();
+  if (phone.length > MAX_MANUAL_CONTACT_LENGTH) return { ok: false };
+  const digitCount = phone.replace(/\D/g, "").length;
+  if (digitCount < 7 || digitCount > 15) return { ok: false };
+  return { ok: true, phone };
+}
+
+export function validateManualProspectEmail(value: unknown): { ok: true; email: string | null } | { ok: false } {
+  if (value === undefined || value === null || value === "") return { ok: true, email: null };
+  if (typeof value !== "string") return { ok: false };
+  const email = value.trim().toLowerCase();
+  if (email.length > MAX_MANUAL_EMAIL_LENGTH || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { ok: false };
+  return { ok: true, email };
+}
+
+export function validateManualProspectNotes(value: unknown): { ok: true; notes: string | null } | { ok: false } {
+  return validateNotes(value);
+}
