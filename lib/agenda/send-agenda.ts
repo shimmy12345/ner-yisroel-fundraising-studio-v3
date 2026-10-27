@@ -131,9 +131,12 @@ export async function sendDailyAgenda(now = Math.floor(Date.now() / 1000)): Prom
 // may have already succeeded moments before whatever stopped this
 // function from reaching the commit -- so per this round's explicit
 // requirement, the recovery path never attempts the claim+send sequence
-// again in that case; it logs a distinct, alerting error instead and
-// leaves the row exactly as it is for manual investigation. A 'sent' row
-// is simply left alone. This reuses the exact same claim/send/commit
+// again in that case; it logs a distinct error AND rethrows it (same
+// visibility mechanism as the real send-failure path above -- Cloudflare
+// records this scheduled invocation itself as failed in Observability,
+// not merely a log line that nothing is watching), and leaves the row
+// exactly as it is for manual investigation. A 'sent' row is simply left
+// alone. This reuses the exact same claim/send/commit
 // calls the 9 AM path already uses -- the recovery window changes only
 // WHEN this function is willing to run them, never HOW. The actual
 // branch taken is decided by decideAgendaSendAction (send-log.ts), a
@@ -160,12 +163,16 @@ export async function runScheduledAgendaSend(now: number): Promise<void> {
     return;
   }
   if (action === "skip_uncertain_status") {
-    logger.error(
-      "daily_agenda_recovery_skipped_uncertain_status",
-      new Error("A claim exists for today whose outcome cannot be confirmed as sent or not sent; refusing to auto-retry -- this requires manual investigation."),
-      { now },
+    // Logged AND rethrown -- never just logged -- so this scheduled
+    // invocation itself is recorded as failed in Cloudflare Observability
+    // (the same visibility mechanism the real send-failure path below
+    // already relies on), rather than completing as a silent, apparently
+    // successful no-op that only a log search would ever surface.
+    const error = new Error(
+      "A claim exists for today whose outcome cannot be confirmed as sent or not sent; refusing to auto-retry -- this requires manual investigation.",
     );
-    return;
+    logger.error("daily_agenda_recovery_skipped_uncertain_status", error, { now });
+    throw error;
   }
   if (isRecoveryHour) logger.info("daily_agenda_recovery_attempt", { now });
 

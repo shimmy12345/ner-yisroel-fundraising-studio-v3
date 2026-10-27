@@ -77,6 +77,10 @@ function commitSent(db, userId, sendDate, now) {
 // the real sendDailyAgenda()/sendGmail(), which require a Workers
 // runtime; `sendResult` stands in for that one call so each scenario can
 // choose "succeeds" or "throws" without ever touching a real credential.
+// Like the real function, an uncertain-status decision THROWS rather than
+// returning a result -- it must be as visible as a genuine send failure
+// (Cloudflare would record the real scheduled invocation as failed), not
+// a silently-successful no-op.
 function simulateTick(db, userId, sendDate, now, sendResult = "succeeds") {
   const isSendHour = isDailyAgendaSendHour(now);
   const isRecoveryHour = isDailyAgendaRecoveryHour(now);
@@ -84,7 +88,10 @@ function simulateTick(db, userId, sendDate, now, sendResult = "succeeds") {
 
   const state = isRecoveryHour ? readState(db, userId, sendDate) : null;
   const action = decideAgendaSendAction({ isSendHour, isRecoveryHour, state });
-  if (action === "skip_already_sent" || action === "skip_uncertain_status") {
+  if (action === "skip_uncertain_status") {
+    throw new Error("A claim exists for today whose outcome cannot be confirmed as sent or not sent; refusing to auto-retry -- this requires manual investigation.");
+  }
+  if (action === "skip_already_sent") {
     return { action, claimed: false, sent: false };
   }
 
@@ -209,18 +216,26 @@ async function run() {
   //    by the time a recovery-hour tick runs. Per this round's explicit
   //    requirement, this must NEVER be auto-retried, even though the
   //    existing claim query's own staleness window would, by itself,
-  //    treat this exact row as reclaimable.
+  //    treat this exact row as reclaimable. It also must not complete as
+  //    a silent, apparently-successful no-op: the real function throws
+  //    (after logging) so Cloudflare records the scheduled invocation as
+  //    failed -- the ChatGPT-review finding this round's follow-up fixed.
   // =====================================================================
   {
     const db = freshDatabase();
     seedUser(db);
     claim(db, "u1", SEND_DATE, NINE_AM); // simulates the 9 AM attempt making its claim, then never resolving (crash, or Gmail outcome unknown)
-    assert.equal(readRow(db, "u1", SEND_DATE).status, "pending");
+    const rowBeforeRecoveryTick = readRow(db, "u1", SEND_DATE);
+    assert.equal(rowBeforeRecoveryTick.status, "pending");
 
-    const recoveryTick = simulateTick(db, "u1", SEND_DATE, TEN_AM);
-    assert.equal(recoveryTick.action, "skip_uncertain_status", "a pending claim must be surfaced for investigation, never silently retried");
-    assert.equal(recoveryTick.claimed, false, "the recovery path must never even attempt the claim statement when the status is uncertain");
-    assert.equal(readRow(db, "u1", SEND_DATE).status, "pending", "the row itself must be left exactly as-is for manual investigation");
+    assert.throws(
+      () => simulateTick(db, "u1", SEND_DATE, TEN_AM),
+      /cannot be confirmed as sent or not sent/,
+      "a pending claim must be surfaced as a thrown, actionable failure -- never silently retried AND never a silently-successful no-op",
+    );
+    const rowAfterRecoveryTick = readRow(db, "u1", SEND_DATE);
+    assert.equal(rowAfterRecoveryTick.status, "pending", "the row itself must be left exactly as-is for manual investigation");
+    assert.equal(rowAfterRecoveryTick.claimed_at, rowBeforeRecoveryTick.claimed_at, "the recovery path must never even attempt the claim statement when the status is uncertain -- claimed_at must be untouched");
 
     // Contrast proof: by TEN_AM (one hour after the NINE_AM claim, well
     // past AGENDA_CLAIM_STALE_AFTER_SECONDS), the row IS, in isolation,

@@ -161,9 +161,25 @@ async function run() {
   const decideIndex = runScheduledBody.search(/decideAgendaSendAction\(/);
   assert.ok(decideIndex >= 0 && decideIndex < claimIndex, "the decision function must be consulted before the claim statement is ever reached");
   assert.match(runScheduledBody, /if\s*\(isRecoveryHour\)\s*\{[\s\S]{0,200}buildAgendaSendStateQuery/, "the agenda_send_log state read must be conditioned on the recovery window, never run unconditionally on every hourly tick");
+  // An uncertain-status decision must be logged AND rethrown -- NOT just
+  // logged-and-returned -- so Cloudflare records this scheduled
+  // invocation itself as failed in Observability (same visibility
+  // mechanism as the real send-failure path asserted above), rather than
+  // completing as a silent, apparently-successful no-op that only a log
+  // search would ever surface.
   const skipUncertainIndex = runScheduledBody.search(/action === "skip_uncertain_status"/);
-  const skipUncertainReturnIndex = skipUncertainIndex >= 0 ? runScheduledBody.indexOf("return;", skipUncertainIndex) : -1;
-  assert.ok(skipUncertainIndex >= 0 && skipUncertainReturnIndex >= 0 && skipUncertainReturnIndex < claimIndex, "an uncertain-status decision must return before the claim statement is ever reached, never fall through to it");
+  const skipUncertainLogIndex = skipUncertainIndex >= 0 ? runScheduledBody.indexOf("logger.error(", skipUncertainIndex) : -1;
+  const skipUncertainThrowIndex = skipUncertainIndex >= 0 ? runScheduledBody.indexOf("throw ", skipUncertainIndex) : -1;
+  assert.ok(
+    skipUncertainIndex >= 0 && skipUncertainLogIndex >= 0 && skipUncertainThrowIndex >= 0 &&
+      skipUncertainIndex < skipUncertainLogIndex && skipUncertainLogIndex < skipUncertainThrowIndex && skipUncertainThrowIndex < claimIndex,
+    "an uncertain-status decision must log, then throw, before the claim statement is ever reached -- logging alone is not an actionable alert",
+  );
+  assert.doesNotMatch(
+    runScheduledBody.slice(skipUncertainIndex, skipUncertainThrowIndex),
+    /return;/,
+    "the uncertain-status branch must not return before its throw -- a bare return would make the invocation look successful to Observability",
+  );
   const skipSentIndex = runScheduledBody.search(/action === "skip_already_sent"/);
   const skipSentReturnIndex = skipSentIndex >= 0 ? runScheduledBody.indexOf("return;", skipSentIndex) : -1;
   assert.ok(skipSentIndex >= 0 && skipSentReturnIndex >= 0 && skipSentReturnIndex < claimIndex, "an already-sent decision must return before the claim statement is ever reached, never fall through to a second claim attempt");

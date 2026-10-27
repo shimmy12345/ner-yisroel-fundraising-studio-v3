@@ -57828,3 +57828,95 @@ behavior changed outside the new file and the files listed in Section
   Gmail OAuth outage spanning three hours), the day's email is still
   genuinely not sent, same as the pre-existing one-hour-window risk
   this change narrows but does not eliminate.
+
+## Follow-up: Uncertain-Status Alert Visibility Fix (2026-10-27) -- NOT DEPLOYED, PRODUCTION UNCHANGED, NO EMAIL SENT
+
+An independent review (ChatGPT) of the recovery-window implementation
+above identified a real gap: in `runScheduledAgendaSend()`'s
+`skip_uncertain_status` branch, the code called `logger.error(...)` and
+then `return` -- no exception propagated out of the function. Checked
+`lib/logger.ts`: `logger.error` is a plain `console.error(...)`, nothing
+more -- it does not throw, page, or route through any alerting
+mechanism. Combined with the bare `return`, this meant that when an
+uncertain-status day was detected, the scheduled invocation completed
+*without error* from Cloudflare's own point of view -- `console.error`
+output is visible in the Logs/Tail stream for anyone actively searching
+it, but it is **not** what Cloudflare Observability uses to flag a
+scheduled invocation as failed (that requires an uncaught
+exception/rejection). So this branch, as originally written, degraded
+to a log line nobody is paged for, not the "investigate or alert"
+outcome requirement 4 actually called for -- confirmed, not merely
+suspected: this file's OWN pre-existing failure path (the real
+send-failure `catch` block two branches below) already relies
+specifically on "logged AND rethrown" to get Cloudflare to record a
+failed invocation (see that block's own header comment); the
+uncertain-status branch was the one place that philosophy was not
+applied.
+
+**Smallest safe fix**: the `skip_uncertain_status` branch now logs the
+same error it always did, then `throw`s it -- mirroring the exact
+`logger.error(...); throw error;` shape the file's own real-failure
+`catch` block already uses, rather than inventing a second alerting
+mechanism (e.g. reusing `lib/backup-alert/run.ts`'s email-alert
+pattern, which would have been out of scope for "smallest safe
+change"). Verified safe to rethrow here: `worker/index.ts`'s
+`scheduled()` handler passes `runScheduledAgendaSend(...)` to its own,
+independent `ctx.waitUntil(...)`, entirely separate from
+`runScheduledBackupAlertCheck(...)`'s own `waitUntil` -- Cloudflare
+tracks each `waitUntil` promise independently, so this throw can never
+affect whether the sibling backup-alert check runs or how it is
+reported (exactly the same isolation already documented for the
+unrelated real-failure path). This still never auto-retries an
+uncertain day -- the throw happens before the claim query is ever
+reached, identical to the pre-fix ordering; only the *visibility* of
+the skip changed, not the no-auto-retry guarantee itself.
+
+**Files changed, this follow-up only**: `lib/agenda/send-agenda.ts`
+(the fix itself, plus its header comment updated to describe the new
+log-and-rethrow behavior), `tests/agenda-safety.test.mjs` (source-level
+assertion updated to require a `throw` after the `logger.error` call in
+this branch, before the claim statement, and to confirm no bare
+`return;` appears first), `tests/agenda-recovery.test.mjs`
+(`simulateTick`'s uncertain-status branch now throws, mirroring the
+real function; Scenario 5 updated to assert the throw via
+`assert.throws(...)` and to confirm the row's `claimed_at` is left
+completely untouched, rather than inspecting a returned result object
+that no longer exists for this branch). No other file was touched this
+round -- `git diff --stat` against the prior commit confirms exactly
+these 3 files, and `lib/agenda/email-send-guard.ts`,
+`lib/agenda/gmail-client.ts`, `wrangler.staging.jsonc`, and
+`wrangler.production.jsonc` all show zero diff, confirming the
+Production-only send guard and both environments' Cron Trigger config
+are completely unchanged by this fix.
+
+**Verification, all passing, no regressions:**
+
+- `node --experimental-strip-types tests/agenda-recovery.test.mjs`,
+  `tests/agenda-safety.test.mjs`, and `tests/agenda-timezone.test.mjs`
+  individually -- all pass.
+- `npx tsc --noEmit` -- clean.
+- `node scripts/run-tests.mjs` -- **243/243 test files passed.** The
+  same two pre-existing, unrelated conditions as the prior round
+  recurred identically (`scripts/check-main-restore-sync.mjs`'s
+  unrelated main-vs-branch Trip Planner migration drift, and the
+  unregistered `tests/meeting-notes-experience-summary-fallback.test.mjs`
+  warning) -- confirmed unrelated to this change, not a regression.
+- `pnpm run lint` -- 94 errors / 46 warnings, identical to the existing
+  baseline -- zero new issues.
+- `pnpm run build:production-independent` -- clean, exit 0.
+- `pnpm run build:staging-independent` -- clean, exit 0.
+- Staging-cannot-send-real-email guarantee re-confirmed unaffected:
+  this fix touches zero lines of `email-send-guard.ts` or
+  `gmail-client.ts`, and the allowlist check those files implement is
+  still the unconditional first thing `sendGmail()` does, reached
+  identically regardless of which branch of `runScheduledAgendaSend`
+  calls it.
+
+**Remaining risk, unchanged from before this follow-up**: the
+sqlite-vs-real-D1 gap disclosed in the recovery-window section's
+Section 5 above still stands -- this follow-up made no attempt to
+re-run the stalled live-Staging-harness technique, since the fix here
+is pure application logic (log-then-throw) with no D1 or network
+behavior of its own to verify live. Everything else about this
+follow-up is covered by the sqlite end-to-end test and source
+inspection above.
