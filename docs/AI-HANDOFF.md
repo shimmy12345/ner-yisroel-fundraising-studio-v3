@@ -57920,3 +57920,175 @@ is pure application logic (log-then-throw) with no D1 or network
 behavior of its own to verify live. Everything else about this
 follow-up is covered by the sqlite end-to-end test and source
 inspection above.
+
+## Authorized Production Deployment: Agenda Email Recovery Fix (2026-10-27) -- DEPLOYED
+
+Owner-authorized (explicit, in-chat, scoped to one commit, Production
+only) deployment of the same-day recovery window and its uncertain-
+status visibility fix, both documented above. ChatGPT's independent
+review was cited by the owner as supporting context; the deployment
+authorization itself came directly from the owner's own instructions.
+
+### 1. Approved commit confirmed exact
+
+`git rev-parse HEAD` -> `1b0b25a8a18ce813d10f3c86ebbca3736b436167` on
+`trip-planner-multi-region-manual-prospects`, working tree clean
+(`git status --short` empty), and `git diff HEAD
+origin/trip-planner-multi-region-manual-prospects` empty -- local,
+remote, and the approved commit SHA are identical; nothing unapproved
+was present.
+
+### 2. Pre-deployment Production Worker version recorded for rollback
+
+`wrangler deployments list --config wrangler.production.jsonc`'s
+current (100%) entry before this deploy: **`e288bd0a-8602-4da9-99ae-
+1ed46e92a98d`** (created 2026-10-25T17:38:14.164Z -- the Trip Planner
+release version from the original incident report). `wrangler versions
+view` on it recorded the full pre-deploy baseline: handlers
+`fetch, scheduled`; exactly the 3 Gmail OAuth secrets; `env.DB` ->
+`a51c6571-ae16-4614-aa9a-08f8e6be3ecd` (`fundraising-os-production-db`);
+all other bindings/vars as listed in wrangler.production.jsonc.
+**Rollback command, if ever needed:** `wrangler rollback
+e288bd0a-8602-4da9-99ae-1ed46e92a98d --config wrangler.production.jsonc`
+(not run -- recorded for reference only).
+
+### 3. Latest Production backup confirmed available before deployment
+
+Read directly from the Production status bucket
+(`fundraising-os-production-backup-status`, via `wrangler r2 object
+get --remote`, read-only):
+
+```json
+// backup-latest-success.json
+{
+  "databaseName": "fundraising-os-production-db",
+  "completedAt": "2026-10-27T14:23:49Z",
+  "backupObjectKey": "daily/fundraising-os-production-db-20261027T142344Z.sql.gz.gpg",
+  "workflowRunId": "40520632185"
+}
+```
+
+`backup-latest-attempt.json` matched: same `workflowRunId`,
+`attemptStatus: "success"`. A full, successful, encrypted Production
+backup completed the same day as this deployment (2026-10-27T14:23:49Z,
+roughly 3.5 hours before the deploy below), via the dedicated
+`d1-backup-nightly-production.yml` workflow -- confirmed available
+before proceeding.
+
+### 4. Production environment, D1, and configuration verified correct
+
+`wrangler.production.jsonc`: `"name": "fundraising-os-production"`,
+D1 `fundraising-os-production-db`
+(`a51c6571-ae16-4614-aa9a-08f8e6be3ecd`, isolated from Staging's own
+`6c18396c-...`), `"triggers": { "crons": ["0 * * * *"] }` (exactly one
+entry, nothing broader), Production-specific vars (`APP_BASE_URL`:
+`https://shimmydonors.org`, correct `TEAM_DOMAIN`/`POLICY_AUD`, etc.).
+The deploy script itself
+(`package.json`'s `deploy:production-independent`: build -> verify
+build manifest -> `wrangler deploy --config wrangler.production.jsonc`)
+contains no migration step of any kind -- confirmed by reading the
+script before running it, not merely assumed.
+
+### 5. Deployment executed -- Production only
+
+Ran `pnpm run deploy:production-independent`. Build completed, then
+`verify-build-manifest.mjs` confirmed `dist/` was built for
+`"production-independent"` **0 seconds ago** (the exact commit above,
+not a stale prior build), then `wrangler deploy --config
+wrangler.production.jsonc` uploaded and deployed it. Staging's own
+deploy command was never invoked this round.
+
+### 6. No migration, no donor/financial mutation, no manual email
+
+- The deploy script has no migration step (Section 4); none was run.
+- Post-deploy, read-only D1 fingerprint against Production:
+  `donors: 297`, `giving_activities: 5954`, `agenda_send_log: 12` --
+  the query itself reported `"rows_written": 0, "changed_db": false`.
+  The deployment process performed zero D1 writes of any kind.
+- No replacement email for October 27 was sent. No manual/test agenda
+  email was triggered at any point in this deployment. The next normal
+  9 AM Eastern tick -- 2026-10-28, since today's 9-11 AM Eastern window
+  had already passed by the time this deployment ran -- will be the
+  first real-world exercise of the new code, exactly as instructed.
+
+### 7. New Worker version live; Production healthy
+
+`wrangler deployments list` immediately after deploy: current (100%)
+entry **`d35b84fc-f803-4e21-8364-07385f2ba03e`** (created
+2026-10-27T17:58:25.775Z). `wrangler versions view` on it: identical
+handlers (`fetch, scheduled`), identical 3 Gmail secrets, identical
+`env.DB` -> `a51c6571-ae16-4614-aa9a-08f8e6be3ecd`, identical
+bindings/vars to the Section 2 pre-deploy baseline -- nothing
+unexpected changed. Health check: an unauthenticated `GET
+https://fundraising-os-production.sgoldstein.workers.dev/` returned
+HTTP 200, correctly redirected to Cloudflare Access's own login
+challenge at `fundraising-os.cloudflareaccess.com` with the right
+`POLICY_AUD`/hostname embedded in the signed redirect -- proving the
+Worker is live and serving requests AND that the Access gate is still
+correctly enforced, without the check ever reaching the app's own
+routing, any donor data, or any agenda/email code path. No agenda
+preview or send route was called at any point.
+
+### 8. Production-only email guard, cron, and recovery logic confirmed intact
+
+- `git diff` on `lib/agenda/email-send-guard.ts`, `lib/agenda/
+  gmail-client.ts`, `wrangler.staging.jsonc`, and `wrangler.production.
+  jsonc` against the prior deployed state: **zero changes** -- the
+  fail-closed allowlist (`EMAIL_SEND_ALLOWED_ENVIRONMENT ===
+  "production-independent"`, checked unconditionally as the first thing
+  `sendGmail()` does) is byte-for-byte what was already live.
+- Cron: `"triggers": ["0 * * * *"]`, confirmed both in
+  `wrangler.production.jsonc` and in the deploy command's own output
+  (`schedule: 0 * * * *`) -- exactly one entry, unchanged.
+- Recovery logic confirmed present in the deployed build, not merely in
+  source: `isDailyAgendaRecoveryHour` (`lib/agenda/timezone.ts`),
+  `decideAgendaSendAction` (`lib/agenda/send-log.ts`), and the
+  log-then-throw uncertain-status fix (`lib/agenda/send-agenda.ts`) are
+  all present at commit `1b0b25a`, and Section 5's `verify-build-
+  manifest.mjs` confirmation ties this exact deployed bundle to that
+  commit, built immediately (0s) before the deploy ran.
+
+### 9. Production and Staging isolation confirmed
+
+- D1: Production `a51c6571-ae16-4614-aa9a-08f8e6be3ecd`
+  (`fundraising-os-production-db`) vs. Staging `6c18396c-0a8f-4f2c-
+  ba83-ea809ec10289` (`fundraising-os-staging-db`) -- separate
+  databases, unchanged.
+- Cron: Staging's `wrangler.staging.jsonc` still carries exactly one
+  `"crons"` entry, explicitly `[]` -- confirmed unchanged by this
+  round's `git diff` (Section 8).
+- Staging's own Worker was never redeployed this round:
+  `wrangler deployments list --config wrangler.staging.jsonc`'s current
+  entry is still `7e293d12-106d-4c54-991f-ea3aa925ff03`, created
+  2026-10-25T16:50:19.166Z -- two days before this deployment, and
+  untouched by it.
+
+### 10. Rollback reference
+
+If this version ever needs to be rolled back: `wrangler rollback
+e288bd0a-8602-4da9-99ae-1ed46e92a98d --config
+wrangler.production.jsonc` (the Section 2 pre-deploy version). Not run
+-- recorded for reference only, since no issue was observed.
+
+### Remaining risks after this deployment
+
+- The sqlite-vs-real-D1 verification gap disclosed earlier in this
+  document (the stalled `wrangler dev --remote` harness) still applies:
+  this deployment's health check confirmed the Worker is live and the
+  Access gate holds, but did not and could not exercise the recovery
+  path's actual D1 read/write behavior live, since doing so would have
+  required triggering the agenda code path -- explicitly out of scope
+  per this round's own instructions.
+- The first genuine exercise of the new recovery/alert-visibility logic
+  in Production will be tomorrow's (2026-10-28) normal 9 AM Eastern
+  tick, or, if that is somehow missed again, the 10-11 AM Eastern
+  recovery window immediately after it. If the 9 AM tick succeeds
+  normally, the recovery logic simply never activates that day, which
+  is the expected, unremarkable outcome, not a sign anything failed to
+  deploy.
+- An uncertain-status day, if one ever occurs, will now surface as a
+  failed scheduled invocation in Cloudflare Observability (per this
+  round's fix) -- nothing currently pages a human for that beyond
+  whatever alerting the owner has separately configured on Observability
+  itself; this deployment does not add any new alerting channel (e.g.
+  email/SMS) beyond making the existing Observability signal accurate.
