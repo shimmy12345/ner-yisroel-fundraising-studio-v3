@@ -57389,3 +57389,196 @@ None found. The release matches what was reviewed and authorized; every check sp
 ### Rollback target (unchanged from the readiness review, now the live rollback reference)
 
 If a rollback is ever separately authorized: redeploy Worker version `8882fe86-c759-470b-add5-a19d5e73632e` (`wrangler rollback --config wrangler.production.jsonc` or `wrangler deploy` of that prior build). The new schema is inert to that old code -- safe to roll back the Worker alone, leaving the migrations in place. No destructive database rollback or restore was performed, needed, or attempted this round.
+
+## Missing October 27 9 AM Production Agenda Email -- Investigation (2026-10-27) -- READ-ONLY, NO PRODUCTION CHANGE, NO FIX APPLIED, NO EMAIL SENT
+
+The owner reported not receiving the usual 9 AM (America/New_York) Daily
+Fundraising Agenda email on 2026-10-27, one day after the Trip Planner
+release above went live (`e288bd0a-8602-4da9-99ae-1ed46e92a98d`,
+deployed 2026-10-25). This entry is a focused, read-only investigation
+only -- no Production data, configuration, or deployment was changed,
+and no email was sent (manually or otherwise) as part of this round.
+
+### 1. Confirmed: today's email was never attempted, from two independent sources
+
+- **Production D1, `agenda_send_log`** (the per-day send-idempotency
+  ledger added after the 2026-10-14 incident -- see that entry above):
+  an unbroken streak of `'sent'` rows for every single day from
+  `2026-10-15` through `2026-10-26` (12/12 days, zero `'pending'` rows
+  ever). **Zero row of any status exists for `2026-10-27`**, re-checked
+  at both 13:18 UTC and again at 14:06 UTC (over an hour after the
+  expected 13:00 UTC/9 AM EDT firing) -- the row count never changed.
+  Because the claim `INSERT` (`buildAgendaClaimQuery`,
+  `lib/agenda/send-log.ts`) is the very first database write
+  `runScheduledAgendaSend` performs once the 9 AM hour-gate passes, a
+  missing row (not even a stale `'pending'` one) means execution never
+  reached that line today.
+- **Gmail, searched directly** (`subject:"Fundraising Agenda"
+  newer_than:3d`, including Trash): only the `2026-10-25` and `2026-10-26`
+  emails exist, both sent at `:01` past the hour, matching the D1
+  timestamps almost exactly. **No `2026-10-27` email exists anywhere in
+  the mailbox.** No Google OAuth-revocation, security-alert, or
+  delivery-failure/bounce email appears in the same window either --
+  this makes a Gmail-side rejection or revoked refresh token less likely
+  (such a failure happens *after* the D1 claim succeeds, inside
+  `sendGmail()`, and would leave a `'pending'` row behind -- there is no
+  row at all), though it is not fully excluded by this alone.
+
+### 2. Confirmed: yesterday's Trip Planner deployment did not cause this
+
+- `wrangler versions view` on both the previous
+  (`8882fe86-c759-470b-add5-a19d5e73632e`) and new
+  (`e288bd0a-8602-4da9-99ae-1ed46e92a98d`) Production Worker versions
+  shows **identical** `Handlers: fetch, scheduled`, all three Gmail
+  OAuth secrets present on both, and identical bindings (`env.DB` ->
+  the same `fundraising-os-production-db` id, `AI`, `STATUS_WORKER`, and
+  every environment variable, including `STAGING_OWNER_EMAIL`).
+- `wrangler.production.jsonc`'s `"triggers": {"crons": ["0 * * * *"]}`
+  is unchanged; `git log` shows the last commit to touch that file at
+  all was `0fbf723` (2026-10-15, an unrelated Workers AI binding
+  change), well before this release, and it did not touch `triggers`.
+  The Trip Planner release itself made no `wrangler.production.jsonc`
+  change whatsoever.
+- Conclusion: the deployment is not implicated. The release did not
+  alter the cron schedule, the scheduled-handler wiring, Gmail secrets,
+  or the owner-email binding in any way.
+
+### 3. Confirmed live: the Cron Trigger is firing normally right now
+
+A temporary, bounded (`timeout 2700`) `wrangler tail --config
+wrangler.production.jsonc` was run directly against the live Production
+Worker (read-only; a log tail cannot mutate anything) to directly
+observe the *next* hourly invocation in real time, since there is no
+queryable history of past scheduled-invocation attempts in this
+codebase (same disclosed limitation as the 2026-10-14 incident). It
+captured:
+
+```
+"0 * * * *" @ 10/27/2026, 10:00:56 AM - Ok
+  (info) {"level":"info","message":"backup_alert_check_no_alert","now":1793109656823,"reason":"fresh"}
+```
+
+This is the 14:00 UTC / 10:00 AM EDT tick, logged and executed
+successfully -- `runScheduledBackupAlertCheck` (the sibling
+`ctx.waitUntil()` on the same `scheduled()` invocation, sharing the
+exact same cron) ran and logged cleanly. There is deliberately no log
+line for the Daily Agenda path at this tick -- `isDailyAgendaSendHour`
+correctly evaluated `10 !== 9` and returned early before any logging,
+exactly as designed (23 of 24 hourly ticks are a silent no-op by
+construction).
+
+**This directly proves the Cloudflare Cron Trigger is alive, correctly
+registered, and invoking `scheduled()` on this exact live deployment** --
+ruling out "the Cron Trigger silently stopped firing altogether" as an
+ongoing condition. It does not, and cannot, retroactively prove what
+happened at the one tick in question (13:00 UTC earlier that same
+morning) -- the tail could only be started after that tick had already
+passed, and this codebase still has no persisted log of past invocation
+attempts (Cloudflare Observability/dashboard access, which would show
+this conclusively, remains unavailable to this session, same as the
+2026-10-14 incident).
+
+### 4. Confirmed: Staging is not and cannot be the source
+
+- `wrangler.staging.jsonc`'s `"triggers": {"crons": []}` remains
+  explicitly cleared in source (unchanged by this investigation).
+- `wrangler deployments list --config wrangler.staging.jsonc` shows
+  Staging's last deployment at `2026-10-25T16:50:21Z`, **before** the
+  Production release and with nothing deployed to Staging since --
+  ruling out a Staging redeploy as a factor.
+- Independent of both of the above, `lib/agenda/email-send-guard.ts`'s
+  fail-closed allowlist (untouched by the Trip Planner release) blocks
+  any real Gmail send from any environment other than
+  `"production-independent"` at the `sendGmail()` call site itself.
+- The Gmail search in Section 1 found no Staging-linked agenda email
+  either (Staging's donor data/links would be visibly different, as in
+  the 2026-10-14 incident) -- consistent with Staging never having
+  reached a send attempt.
+
+### 5. Root cause determination
+
+**Most likely**: a one-time, transient miss at the single 13:00 UTC
+(9 AM EDT) tick on 2026-10-27 -- either Cloudflare's Cron Trigger
+infrastructure did not fire that one specific invocation (a documented,
+rare possibility with Cloudflare Cron Triggers in general, and not
+something any command available to this session can prove or disprove
+after the fact), or the Worker's `scheduled()` invocation started but
+hit a transient failure (e.g. a momentary D1 unavailability) before
+reaching the claim `INSERT` -- which, unlike every failure point *after*
+the claim, is not wrapped in a `try/catch` in `runScheduledAgendaSend`
+and so would leave zero row behind if it threw there, exactly matching
+what was observed.
+
+**Ruled out**: the Trip Planner deployment (Section 2), a Staging
+cross-send (Section 4), a sustained/ongoing Cron Trigger failure
+(Section 3 -- it is demonstrably working again one hour later), and
+(with lower but non-zero confidence) a Gmail-side send/delivery failure
+(Section 1 -- no `'pending'` row, no bounce/revocation email).
+
+**Not conclusively provable without Cloudflare Observability/dashboard
+access** -- a disclosed, real limitation of this investigation,
+identical in kind to the open question left unresolved in the
+2026-10-14 incident entry above.
+
+### 6. Is tomorrow's email at risk?
+
+**Not expected to recur, but not provable in advance.** Nothing
+discovered in this investigation is an ongoing defect: the cron
+schedule, Worker bindings, Gmail secrets, and hour-gate logic are all
+confirmed unchanged and currently functioning (Section 3). If this was
+a one-time Cloudflare-side missed tick, tomorrow's 13:00 UTC firing is
+expected to succeed exactly as it did on 12 of the last 12 days before
+today. The one concrete, low-cost recommendation below would turn
+"not provable in advance" into "confirmed or caught immediately,"
+rather than discovered only by its absence again.
+
+### 7. Recommended fix -- smallest safe correction, NOT applied, awaiting the owner's decision
+
+No code or configuration defect was found, so there is nothing to patch
+in the sense of correcting a bug. Two separate, independent decisions
+are available to the owner; neither was taken automatically, per the
+explicit instruction not to send a duplicate email and not to change
+Production without authorization:
+
+1. **Recovering today's missed email.** There is currently no live,
+   deployed route or mechanism in this application that can trigger a
+   real `sendDailyAgenda()` call on demand (the one-time "controlled
+   Production Gmail OAuth verification" mechanism referenced in
+   `lib/agenda/send-agenda.ts`'s own comments from the 2026-10-14 round
+   no longer has a live route calling it -- confirmed by searching every
+   caller of `sendDailyAgenda`/`runScheduledAgendaSend`/`generateAgenda`;
+   only the read-only preview route remains). Recovering today's email
+   would require either (a) building and running a temporary, never-
+   committed standalone script that imports and calls the real,
+   unmodified `sendDailyAgenda()` directly against real Production D1 +
+   Gmail secrets (the same "harness Worker calling real functions
+   directly" technique used earlier in this engagement for verification,
+   zero auth bypassed) -- which would send one real email outside the
+   normal 9 AM window, or (b) taking no action and letting tomorrow's
+   9 AM tick resume normally. **Awaiting the owner's explicit choice --
+   nothing was sent.**
+2. **A lightweight, low-cost reliability improvement for detection** (not
+   yet implemented, offered only as a recommendation): a second, separate
+   scheduled check later each day (e.g. at 10 AM Eastern) that reads
+   `agenda_send_log` for today's date and, if still absent, sends a
+   *distinct*, clearly-labeled "Daily Agenda did not send today" alert
+   -- mirroring the existing Backup Scheduling Reliability Stage 3
+   alert's own pattern (`lib/backup-alert/run.ts`) rather than inventing
+   a new one. This would turn a silent miss (what happened today) into
+   an immediate, actionable notification instead of the owner noticing
+   its absence. **Not implemented -- offered for the owner's decision,
+   out of scope for this read-only investigation.**
+
+### 8. Scope discipline
+
+No donor, financial, trip, or pledge data was read beyond the counts
+already covered by prior rounds. The only Production reads this round
+performed were: `wrangler versions view` (x2, informational only),
+`wrangler deployments list` (x2, informational only), two read-only
+`SELECT`s against `agenda_send_log`, and one bounded, read-only
+`wrangler tail` session (45-minute timeout, self-terminated, no
+interactive session left running). No Production migration, deploy,
+secret, or config was applied or changed. No email was sent. The
+Gmail search covered only the "Fundraising Agenda" subject and
+Google-security-notification senders -- no other mailbox content was
+read.
