@@ -57582,3 +57582,249 @@ secret, or config was applied or changed. No email was sent. The
 Gmail search covered only the "Fundraising Agenda" subject and
 Google-security-notification senders -- no other mailbox content was
 read.
+
+## Same-Day Recovery Window for the 9 AM Production Agenda Email -- Implementation (2026-10-27) -- NOT DEPLOYED, PRODUCTION UNCHANGED, NO EMAIL SENT
+
+Follow-up to the investigation above. Per the owner's explicit request,
+implemented recommendation option 2's spirit (automatic same-day
+recovery, not just a detection alert) as a narrowly scoped change.
+**Not deployed anywhere. Staging live-verification of this exact
+mechanism hit a tooling limitation, disclosed in Section 5 below rather
+than worked around or claimed as proven.**
+
+### 1. Design
+
+Two states the 9 AM tick can be in by the time the 10 AM tick runs,
+distinguished by reading `agenda_send_log` for today's Eastern date:
+
+- **Absent** -- no row at all. The 9 AM attempt never reached its first
+  database write (exactly what happened on 2026-10-27, confirmed in the
+  investigation above). Safe to recover: nothing was ever claimed or
+  attempted, so attempting the identical claim+send now cannot
+  duplicate anything.
+- **`pending`** -- a row exists but was never marked `sent`. A claim was
+  made and a send was genuinely attempted; whether it actually reached
+  Gmail before failing/crashing/timing out is **unknowable from this
+  table alone** (see `send-log.ts`'s pre-existing "duplicate-send risk"
+  disclosure). Per requirement 4, this must never be auto-retried --
+  only the existing stale-claim mechanism (120s) can still reclaim it,
+  and only naturally, the same way it always could.
+- **`sent`** -- nothing to do.
+
+This reduces to one pure decision function, `decideAgendaSendAction`
+(`lib/agenda/send-log.ts`), taking `isSendHour`, `isRecoveryHour`, and
+the resolved state, returning one of `outside_window` /
+`attempt_send` / `skip_already_sent` / `skip_uncertain_status`.
+`runScheduledAgendaSend` (`lib/agenda/send-agenda.ts`) now computes
+both hour-gates every tick and calls this function; during the primary
+9 AM hour the state is never read at all (`state: null`), preserving
+the pre-existing "23 of 24 hourly ticks never touch D1" property
+exactly. Only when `isRecoveryHour` is true does it read
+`agenda_send_log` first via a new read-only query
+(`buildAgendaSendStateQuery`), classify it (`resolveAgendaSendState`),
+and branch. An `attempt_send` verdict (primary hour, or recovery hour
+with state `absent`) falls through to the **exact same, unmodified**
+atomic claim -> send -> commit sequence that has handled the 9 AM hour
+since the October 14 incident fix -- no second/parallel claim
+mechanism was added, so the existing concurrency guarantee (one
+D1/SQLite UPSERT, serialized by the database itself) automatically
+covers overlapping recovery-hour cron deliveries too, per requirement
+3.
+
+### 2. Why this satisfies each requirement
+
+1. **Normal 9 AM schedule preserved** -- the cron string
+   (`"0 * * * *"` in `wrangler.production.jsonc`) is untouched; the
+   application-level 9 AM gate (`isDailyAgendaSendHour`) is untouched;
+   its branch (`attempt_send`, unconditionally, exactly as before) is
+   untouched.
+2. **10 AM-12 PM Eastern recovery window** -- new
+   `isDailyAgendaRecoveryHour` (`lib/agenda/timezone.ts`), `[10, 12)`
+   local hour, DST-safe by construction (reads the real local hour at
+   call time via the same `currentEasternHour` the 9 AM guard already
+   uses -- no new UTC-instant arithmetic). Noon is a firm, visible
+   close, not a drifting window.
+3. **Reuses `agenda_send_log` and existing idempotency/overlap
+   protection** -- no new table, no new migration, no new claim
+   mechanism; see "Design" above.
+4. **Never auto-retries an uncertain send** -- the `pending` branch
+   (`skip_uncertain_status`) returns before ever reaching the claim
+   query again; see `tests/agenda-safety.test.mjs`'s new source-level
+   assertions (Section 4) proving this ordering directly in the shipped
+   code, not just in a test double.
+5. **Production-only guard preserved** -- entirely untouched;
+   `lib/agenda/email-send-guard.ts`'s allowlist check is still the
+   first thing `sendGmail()` does (`lib/agenda/gmail-client.ts:105-106`,
+   before `requireGmailCredentials()`, before any network call), and it
+   is reached identically regardless of whether the call came from the
+   primary-hour or recovery-hour branch -- the new code adds a decision
+   about *whether* to attempt a send, never a new way to actually send
+   one. See Section 5 for why this still matters despite the harness
+   limitation.
+6. **Focused tests** -- see Section 4.
+7. **Verify on Staging without sending real email** -- partially
+   completed; see Section 5 for exactly what was and was not proven,
+   and why.
+8. **Nothing sent, nothing deployed** -- confirmed in Section 6.
+
+### 3. Files changed
+
+- `lib/agenda/timezone.ts` -- added `AGENDA_RECOVERY_WINDOW_START_HOUR`
+  (10), `AGENDA_RECOVERY_WINDOW_END_HOUR` (12, exclusive), and
+  `isDailyAgendaRecoveryHour(nowSeconds)`.
+- `lib/agenda/send-log.ts` -- added `buildAgendaSendStateQuery`
+  (read-only `SELECT status ...`), `AgendaSendState` type and
+  `resolveAgendaSendState` (row -> `"absent" | "pending" | "sent"`,
+  defensively treating any future/unrecognized status as `"pending"`,
+  never `"absent"`), and `AgendaSendAction` type and
+  `decideAgendaSendAction` (the one pure branch point, detailed above).
+- `lib/agenda/send-agenda.ts` -- `runScheduledAgendaSend` now computes
+  `isSendHour`/`isRecoveryHour`, conditionally reads send state only
+  inside the recovery window, and delegates to
+  `decideAgendaSendAction` before falling through to the pre-existing,
+  unmodified claim/send/commit sequence.
+- `tests/agenda-timezone.test.mjs` -- recovery-window assertions across
+  January/July and both 2026 DST transition days (same pattern as the
+  existing 9 AM-guard DST tests).
+- `tests/agenda-safety.test.mjs` -- source-level assertions that
+  `decideAgendaSendAction` is called before the claim query, that the
+  state read is conditioned on `isRecoveryHour`, and that both skip
+  branches `return` strictly before the claim query is ever reached.
+- `tests/agenda-recovery.test.mjs` (new) -- real-`node:sqlite`,
+  real-migration, real-exported-function end-to-end scenarios (Section
+  4).
+- `scripts/run-tests.mjs` -- registered the new test file.
+
+No migration was added or needed -- `agenda_send_log`'s existing schema
+(`user_id`, `send_date`, `status`, `claimed_at`, `sent_at`) already
+supports everything this change reads or writes.
+
+### 4. Test results
+
+`tests/agenda-recovery.test.mjs` (new), built on real `drizzle/*.sql`
+migrations replayed into an in-memory `node:sqlite` database (same
+pattern as `tests/agenda-send-idempotency-e2e.test.mjs`), exercising
+the real exported query builders and the real `decideAgendaSendAction`
+-- not test doubles -- across six scenario blocks:
+
+1. Pure decision-matrix coverage of all four `decideAgendaSendAction`
+   outcomes.
+2. Normal 9 AM delivery, unchanged (state never read; `attempt_send`
+   unconditionally).
+3. Missed 9 AM execution (`absent`) -> successful 10/11 AM recovery ->
+   window correctly closed at noon.
+4. Duplicate prevention, including two concurrent claim attempts
+   simulating overlapping cron executions during the recovery window --
+   exactly one wins, matching the primary-hour guarantee already
+   proven elsewhere.
+5. Uncertain send status (`pending`) -> recovery hour skips without
+   touching the claim query, **plus a direct contrast proof**: the same
+   stale `pending` row run through the raw claim query alone (bypassing
+   the new state-check gate) *would* have been reclaimed and resent --
+   demonstrating the new gate is what actually prevents the ambiguous
+   retry, not an accident of timing.
+6. Window-boundary firm-close checks (9/10/11 AM eligible in some form,
+   12 PM eligible in none).
+
+Full verification, all passing, no regressions:
+
+- `npx tsc --noEmit` -- clean.
+- `node scripts/run-tests.mjs` -- **243/243 test files passed**
+  (242 pre-existing + the 1 new file). Two pre-existing, unrelated
+  conditions confirmed via `git stash`/`git stash pop` (clean restore
+  both times) to be identical with or without this round's changes,
+  so neither is a regression: `scripts/check-main-restore-sync.mjs`
+  fails on unrelated already-deployed Trip Planner migrations
+  (0054/0055) vs. `origin/main`, and
+  `tests/meeting-notes-experience-summary-fallback.test.mjs` is an
+  unrelated pre-existing unregistered-test warning.
+- `pnpm run lint` -- 94 errors / 46 warnings, byte-for-byte identical
+  with and without this round's changes (same stash/pop technique) --
+  zero new lint issues.
+- `pnpm run build:staging-independent` -- clean, exit 0.
+- `pnpm run build:production-independent` -- clean, exit 0 (build
+  only; nothing deployed).
+
+### 5. Staging verification (requirement 7) -- partial: tooling limitation disclosed
+
+What requirement 7 asked for beyond the sqlite simulation above: prove,
+against a *live* Worker bound to real Staging D1, that the recovery
+path cannot send a real email. Two independent attempts were made
+using a temporary, never-committed standalone harness Worker
+(`wrangler dev --remote`, bound to real Staging D1 by database ID,
+importing and calling the real, unmodified `runScheduledAgendaSend`
+directly -- the same "harness Worker calling real functions directly,
+zero auth bypassed" technique used earlier in this engagement).
+
+**Both attempts stalled identically**: the harness bundled correctly,
+bound correctly to Staging's real D1/vars, and reached "Starting remote
+preview..." / "Refreshing preview token... refreshed successfully,"
+but never printed a "Ready on ..." line and never actually opened the
+local port -- confirmed by direct `curl` connection-refused against
+the port on both attempts, even after the background process was
+independently confirmed still alive (Windows process list, not just
+the log). This reproduced identically after a full clean restart
+(process killed, port confirmed free, harness relaunched from
+scratch), so it is treated as a genuine environment/tooling limitation
+of `wrangler dev --remote` in this sandboxed, non-interactive (piped
+stdout) setup -- not a flake and not a defect in the code under test.
+Both stuck processes were terminated, the harness directory was
+deleted (never committed), and Staging's real `agenda_send_log` was
+read afterward and confirmed to still have **zero rows** -- consistent
+with the harness never having actually received a request, so no test
+data was left behind to clean up.
+
+**What stands in place of the live-harness proof, and why it is still
+strong evidence:**
+
+- `lib/agenda/email-send-guard.ts`'s allowlist check is unconditional,
+  environment-only (build-time `deploymentEnvironment`, never a
+  request or a code path), and sits at the very top of
+  `sendGmail()` -- before credentials, before any network call
+  (`lib/agenda/gmail-client.ts:100-108`). This round's change adds
+  zero new call sites into `sendGmail()`; the recovery path's
+  `attempt_send` branch reaches Gmail only via the exact same,
+  unmodified `sendDailyAgenda` -> `sendGmail` call the primary hour
+  already used. There is no new code path for a real email to travel
+  through that the existing guard does not already cover.
+  Staging/`staging-independent` was already proven unable to send a
+  real email through this exact function (the October 14 incident's
+  own fix, and this session's earlier live `wrangler tail` evidence).
+- The sqlite end-to-end tests (Section 4) exercise the real exported
+  query-building and decision functions against a real
+  migration-replayed schema, including the overlapping-claim and
+  uncertain-status scenarios the live harness was meant to additionally
+  confirm against real D1 latency/consistency behavior.
+
+**What remains unproven, disclosed rather than hidden**: this round
+did not obtain live confirmation of the recovery path's exact
+behavior against real Staging D1 under real network conditions (e.g.
+D1's actual read latency for `buildAgendaSendStateQuery`, or any
+D1-specific concurrency edge case the in-memory sqlite simulation
+cannot reproduce). The sqlite simulation already proves the logic is
+correct against the real schema and real query text; it does not prove
+real D1's runtime behavior matches sqlite's in every particular. This
+is the same category of disclosed limitation as the investigation
+above ("cannot be conclusively proven without Cloudflare Observability
+access") -- a known gap, not a claimed success.
+
+### 6. Scope discipline
+
+Today's missed (2026-10-27) email was **not** sent or recovered by this
+work -- recommendation option 1 from the investigation above still
+requires the owner's separate, explicit decision. Nothing was deployed
+to Production or Staging. No donor, financial, trip, or pledge data was
+touched. No migration was added. No existing test, lint, or build
+behavior changed outside the new file and the files listed in Section
+3.
+
+### 7. Remaining risks
+
+- The disclosed sqlite-vs-real-D1 gap in Section 5.
+- A `pending`/ambiguous day still has no further automated remedy --
+  by design (requirement 4) -- it requires manual investigation,
+  exactly like today's incident did.
+- If every tick across the entire 9 AM-12 PM window fails (e.g. a
+  Gmail OAuth outage spanning three hours), the day's email is still
+  genuinely not sent, same as the pre-existing one-hour-window risk
+  this change narrows but does not eliminate.

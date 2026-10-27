@@ -107,3 +107,69 @@ export function buildAgendaSentCommitQuery(userId: string, sendDate: string, now
     params: [now, userId, sendDate],
   };
 }
+
+// --- Same-day recovery window (2026-10-27 missed-send investigation --
+// docs/AI-HANDOFF.md) ---
+//
+// On 2026-10-27, Production's 9 AM tick never reached the claim INSERT
+// above at all -- no row of any status was ever written for that day,
+// confirmed by direct D1 read hours later. The window above already
+// describes exactly this as a disclosed, accepted risk ("Missed-delivery
+// risk"). This read-only query and the pure classifier below let
+// send-agenda.ts's recovery path (10-11 AM Eastern, see
+// isDailyAgendaRecoveryHour in timezone.ts) answer, before ever touching
+// the claim query again, one question: is today's row truly ABSENT (safe
+// to attempt the exact same claim+send as the 9 AM path would have), or
+// does one already exist -- SENT (nothing to do) or PENDING (a claim was
+// made and a send was genuinely attempted; whether it actually reached
+// Gmail is now unknowable from this table alone, so this must never be
+// auto-retried -- see send-agenda.ts for how it is surfaced instead).
+export function buildAgendaSendStateQuery(userId: string, sendDate: string): SqlQuery {
+  return {
+    sql: `SELECT status FROM agenda_send_log WHERE user_id = ? AND send_date = ?`,
+    params: [userId, sendDate],
+  };
+}
+
+export type AgendaSendState = "absent" | "pending" | "sent";
+
+// Pure classifier for the row (or lack of one) buildAgendaSendStateQuery
+// reads back -- the one decision point the recovery path branches on.
+// Any status value other than the two this table ever writes
+// ('pending'/'sent') is treated as "pending" (the conservative,
+// never-auto-retry branch), not "absent" -- a defensive default in case
+// a future status value is ever added here without updating this
+// function, consistent with this codebase's established allowlist-not-
+// denylist preference (see email-send-guard.ts's own header comment).
+export function resolveAgendaSendState(row: { status: string } | null | undefined): AgendaSendState {
+  if (!row) return "absent";
+  if (row.status === "sent") return "sent";
+  return "pending";
+}
+
+export type AgendaSendAction = "outside_window" | "attempt_send" | "skip_already_sent" | "skip_uncertain_status";
+
+// The one decision point send-agenda.ts's runScheduledAgendaSend branches
+// on, pulled out as a pure function so it is directly unit-testable
+// without a Workers runtime or a real D1 binding (matching this file's own
+// established convention) -- every one of this round's required test
+// scenarios (normal delivery, missed execution, successful recovery,
+// duplicate prevention, uncertain send status) reduces to one call of
+// this function plus, for the ones that actually touch the database, the
+// real query builders above.
+//
+// `state` is only ever looked at inside the recovery branch -- during the
+// primary 9 AM hour this is passed as `null` without ever reading
+// agenda_send_log first, preserving the pre-existing "23 of 24 hourly
+// ticks never touch D1 at all" property exactly. The primary hour's own
+// result is unconditionally "attempt_send": the real claim query's
+// changed-row count (not this function) is still what decides whether
+// that attempt actually proceeds to a send, exactly as before this round.
+export function decideAgendaSendAction(options: { isSendHour: boolean; isRecoveryHour: boolean; state: AgendaSendState | null }): AgendaSendAction {
+  const { isSendHour, isRecoveryHour, state } = options;
+  if (!isSendHour && !isRecoveryHour) return "outside_window";
+  if (!isRecoveryHour) return "attempt_send";
+  if (state === "sent") return "skip_already_sent";
+  if (state === "pending") return "skip_uncertain_status";
+  return "attempt_send";
+}

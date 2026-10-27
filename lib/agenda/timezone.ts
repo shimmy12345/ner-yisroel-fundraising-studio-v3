@@ -34,6 +34,25 @@ export function isDailyAgendaSendHour(nowSeconds: number): boolean {
   return currentEasternHour(nowSeconds) === 9;
 }
 
+// Same-day recovery window (2026-10-27 missed-send investigation --
+// docs/AI-HANDOFF.md) -- the two hourly ticks immediately after the
+// normal 9 AM send hour, reserved for automatically recovering a day
+// whose 9 AM attempt never even reached its first database write (see
+// send-agenda.ts's own header comment for exactly which condition
+// qualifies). 10 and 11 only: the 12 PM tick is deliberately the first
+// one that does NOT attempt recovery, so the window has a firm, visible
+// close rather than drifting forward indefinitely. Like
+// isDailyAgendaSendHour, this reads the real local hour at call time, so
+// it stays correct across both DST transitions without any UTC-instant
+// arithmetic of its own.
+export const AGENDA_RECOVERY_WINDOW_START_HOUR = 10;
+export const AGENDA_RECOVERY_WINDOW_END_HOUR = 12; // exclusive
+
+export function isDailyAgendaRecoveryHour(nowSeconds: number): boolean {
+  const hour = currentEasternHour(nowSeconds);
+  return hour >= AGENDA_RECOVERY_WINDOW_START_HOUR && hour < AGENDA_RECOVERY_WINDOW_END_HOUR;
+}
+
 // "Wednesday, August 26" -- the weekday/month/day phrase used in the email
 // subject and heading, computed from America/New_York's calendar date
 // (which can differ from UTC's date near midnight), not the server's own

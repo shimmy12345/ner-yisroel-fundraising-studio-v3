@@ -11,8 +11,15 @@ import { userIdForEmail } from "../auth/profile.ts";
 import { buildAgenda, type Agenda } from "./agenda-model.ts";
 import { renderAgendaHtml, renderAgendaText } from "./agenda-render.ts";
 import { sendGmail } from "./gmail-client.ts";
-import { isDailyAgendaSendHour, easternDateKey, AGENDA_TIMEZONE } from "./timezone.ts";
-import { buildAgendaClaimQuery, buildAgendaSentCommitQuery } from "./send-log.ts";
+import { isDailyAgendaSendHour, isDailyAgendaRecoveryHour, easternDateKey, AGENDA_TIMEZONE } from "./timezone.ts";
+import {
+  buildAgendaClaimQuery,
+  buildAgendaSentCommitQuery,
+  buildAgendaSendStateQuery,
+  resolveAgendaSendState,
+  decideAgendaSendAction,
+  type AgendaSendState,
+} from "./send-log.ts";
 import { logger } from "../logger.ts";
 
 export class AgendaOwnerNotConfiguredError extends Error {
@@ -106,11 +113,62 @@ export async function sendDailyAgenda(now = Math.floor(Date.now() / 1000)): Prom
 // A claimed-but-failed attempt deliberately leaves its row 'pending' (see
 // send-log.ts) rather than releasing it, so crash recovery and
 // explicit-failure recovery share the same staleness-based reclaim path.
+//
+// Same-day recovery window (2026-10-27 missed-send investigation --
+// docs/AI-HANDOFF.md): on that date, the 9 AM tick never reached the
+// claim INSERT below at all, for a reason that remains unconfirmed
+// (most likely a one-time missed Cron Trigger invocation or a transient
+// D1 failure before this function's first database write -- Cloudflare
+// Observability access, unavailable to this investigation, would be
+// needed to say which). isDailyAgendaRecoveryHour (timezone.ts) extends
+// eligibility to the 10 and 11 AM Eastern ticks on the SAME calendar
+// day, but ONLY to recover that exact, unambiguous failure mode: no
+// agenda_send_log row exists for today at all, which can only mean the
+// claim was never attempted, which in turn can only mean no send was
+// ever attempted (a real send is never reachable without first
+// claiming). When a row DOES exist and is still 'pending', the actual
+// outcome is genuinely unknowable from this table alone -- Gmail's send
+// may have already succeeded moments before whatever stopped this
+// function from reaching the commit -- so per this round's explicit
+// requirement, the recovery path never attempts the claim+send sequence
+// again in that case; it logs a distinct, alerting error instead and
+// leaves the row exactly as it is for manual investigation. A 'sent' row
+// is simply left alone. This reuses the exact same claim/send/commit
+// calls the 9 AM path already uses -- the recovery window changes only
+// WHEN this function is willing to run them, never HOW. The actual
+// branch taken is decided by decideAgendaSendAction (send-log.ts), a
+// pure function kept separate specifically so this round's required
+// test scenarios can exercise it directly, without a Workers runtime.
 export async function runScheduledAgendaSend(now: number): Promise<void> {
-  if (!isDailyAgendaSendHour(now)) return;
+  const isSendHour = isDailyAgendaSendHour(now);
+  const isRecoveryHour = isDailyAgendaRecoveryHour(now);
+  if (!isSendHour && !isRecoveryHour) return;
   const ownerEmail = requireOwnerEmail();
   const userId = userIdForEmail(ownerEmail);
   const sendDate = easternDateKey(now);
+
+  let state: AgendaSendState | null = null;
+  if (isRecoveryHour) {
+    const stateQuery = buildAgendaSendStateQuery(userId, sendDate);
+    const stateRow = await env.DB.prepare(stateQuery.sql).bind(...stateQuery.params).first<{ status: string }>();
+    state = resolveAgendaSendState(stateRow);
+  }
+
+  const action = decideAgendaSendAction({ isSendHour, isRecoveryHour, state });
+  if (action === "skip_already_sent") {
+    logger.info("daily_agenda_recovery_already_sent", { now });
+    return;
+  }
+  if (action === "skip_uncertain_status") {
+    logger.error(
+      "daily_agenda_recovery_skipped_uncertain_status",
+      new Error("A claim exists for today whose outcome cannot be confirmed as sent or not sent; refusing to auto-retry -- this requires manual investigation."),
+      { now },
+    );
+    return;
+  }
+  if (isRecoveryHour) logger.info("daily_agenda_recovery_attempt", { now });
+
   const claim = buildAgendaClaimQuery(userId, sendDate, now);
   const claimResult = await env.DB.prepare(claim.sql).bind(...claim.params).run() as { meta: { changes?: number } };
   if ((claimResult.meta.changes ?? 0) === 0) {
@@ -121,9 +179,9 @@ export async function runScheduledAgendaSend(now: number): Promise<void> {
     await sendDailyAgenda(now);
     const commit = buildAgendaSentCommitQuery(userId, sendDate, now);
     await env.DB.prepare(commit.sql).bind(...commit.params).run();
-    logger.info("daily_agenda_sent", { now });
+    logger.info(isRecoveryHour ? "daily_agenda_recovered" : "daily_agenda_sent", { now });
   } catch (error) {
-    logger.error("daily_agenda_send_failed", error);
+    logger.error("daily_agenda_send_failed", error, { now, recoveryHour: isRecoveryHour });
     throw error;
   }
 }

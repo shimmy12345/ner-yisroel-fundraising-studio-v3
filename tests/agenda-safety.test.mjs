@@ -148,6 +148,26 @@ async function run() {
   assert.ok(claimIndex >= 0 && sendDailyAgendaCallIndex >= 0 && claimIndex < sendDailyAgendaCallIndex, "runScheduledAgendaSend must attempt the idempotency claim before calling sendDailyAgenda");
   assert.match(runScheduledBody, /changes\s*\?\?\s*0\)\s*===\s*0/, "a lost claim (zero rows changed) must cause an early return, never fall through to a send");
 
+  // --- Same-day recovery window (2026-10-27 missed-send investigation,
+  // docs/AI-HANDOFF.md): the recovery decision must be made by the pure
+  // decideAgendaSendAction function, and that decision must be checked
+  // BEFORE the claim statement is ever reached -- so an uncertain-status
+  // day is never claimed, let alone sent. The state read itself must be
+  // conditioned on the recovery window, never run during the primary 9
+  // AM hour (preserving the pre-existing "23 of 24 hourly ticks never
+  // touch D1 at all" property for every hour outside both windows). ---
+  assert.match(sendAgenda, /isDailyAgendaRecoveryHour\(now\)/, "runScheduledAgendaSend must gate recovery eligibility on the real DST-safe recovery-window guard, not an unconditional or ad hoc hour check");
+  assert.match(sendAgenda, /decideAgendaSendAction\(/, "the recovery/primary branch decision must flow through the one pure, directly-tested decision function, never be re-decided ad hoc inline");
+  const decideIndex = runScheduledBody.search(/decideAgendaSendAction\(/);
+  assert.ok(decideIndex >= 0 && decideIndex < claimIndex, "the decision function must be consulted before the claim statement is ever reached");
+  assert.match(runScheduledBody, /if\s*\(isRecoveryHour\)\s*\{[\s\S]{0,200}buildAgendaSendStateQuery/, "the agenda_send_log state read must be conditioned on the recovery window, never run unconditionally on every hourly tick");
+  const skipUncertainIndex = runScheduledBody.search(/action === "skip_uncertain_status"/);
+  const skipUncertainReturnIndex = skipUncertainIndex >= 0 ? runScheduledBody.indexOf("return;", skipUncertainIndex) : -1;
+  assert.ok(skipUncertainIndex >= 0 && skipUncertainReturnIndex >= 0 && skipUncertainReturnIndex < claimIndex, "an uncertain-status decision must return before the claim statement is ever reached, never fall through to it");
+  const skipSentIndex = runScheduledBody.search(/action === "skip_already_sent"/);
+  const skipSentReturnIndex = skipSentIndex >= 0 ? runScheduledBody.indexOf("return;", skipSentIndex) : -1;
+  assert.ok(skipSentIndex >= 0 && skipSentReturnIndex >= 0 && skipSentReturnIndex < claimIndex, "an already-sent decision must return before the claim statement is ever reached, never fall through to a second claim attempt");
+
   // --- Production's email links must point at the real custom domain,
   // not a workers.dev placeholder -- the second, independent bug found
   // during the October 14 investigation (docs/AI-HANDOFF.md). Source-only
