@@ -58092,3 +58092,198 @@ wrangler.production.jsonc` (the Section 2 pre-deploy version). Not run
   whatever alerting the owner has separately configured on Observability
   itself; this deployment does not add any new alerting channel (e.g.
   email/SMS) beyond making the existing Observability signal accurate.
+
+## Production Homepage Sections Missing: Root Cause + Fix (2026-10-27) -- NOT DEPLOYED, PRODUCTION DATA UNCHANGED
+
+Investigated why "Fundraising Intelligence" ("Right Now") and
+"Portfolio Focus" ("This Month") appeared on Staging but were missing
+from the Production homepage (`app/page.tsx`, `shimmydonors.org`).
+Read-only throughout -- no donor, financial, or any other Production
+row was ever written; every D1 query run during this investigation
+reported `"changes": 0`.
+
+### 1. How both sections are wired (ruling out deployment/config/auth)
+
+`app/page.tsx`'s `TodayPage` loads both sections through one shared
+call, `loadStrategicSectionsForToday()` -> `computePortfolioFocusAndBrief()`
+(`lib/fundraising-intelligence/compute.ts`), wrapped in a single
+`try/catch`: on ANY thrown error, both `portfolioFocusRows` and
+`intelligenceTeaserRows` are quietly set to `[]`, logged once via
+`logger.error("today_strategic_sections_load_failed", ...)`, and the
+page renders normally otherwise -- each section's `<section>` is
+itself gated on `rows.length > 0`. This single shared failure path is
+the first clue: both sections disappearing TOGETHER, specifically,
+points at one shared upstream failure, not two independent coincidences.
+
+Ruled out directly, with evidence, before looking at the data layer:
+- **Missing deployment**: Portfolio Focus and the Fundraising
+  Intelligence Brief both predate 2026-08-28/the UI phase, long before
+  every Production deployment version in `wrangler deployments list`'s
+  history (earliest recorded: 2026-10-19) -- the code has been present
+  in every one of them.
+- **Feature flag / data mode**: `getDataMode()` reads
+  `onboarding_preferences.data_mode`; Production's row for
+  `user_sgoldstein@nirc.edu` is `'live'` (confirmed by direct read) --
+  `loadStrategicSectionsForToday()` is not short-circuited.
+- **Auth condition**: both sections render identically for any
+  authenticated user in `mode === "live"`; nothing in `requireChatGPTUser`/
+  `ensureUserProfile` is environment-specific.
+- **Missing migration/schema drift**: checked directly against
+  Production D1's real schema (`sqlite_master`, `PRAGMA table_info`) --
+  every table (`pledge_balance_corrections`, `jl_payment_assignment_audits`,
+  `pledge_payment_plans`, `gift_acknowledgments`, `donor_historical_context`,
+  `donor_relationship_facts`, `recommendations`) and every column
+  (`giving_activities.source_campaign`/`record_origin`/`workspace_status`)
+  these two features' one data-loading query
+  (`lib/portfolio-focus/data.ts`'s `loadPortfolioFocusRawData`) depends
+  on is present and correctly shaped on Production. This is not a
+  migration gap.
+
+### 2. Reproduced the actual failure with real Production data, read-only
+
+Pulled all 12 of `loadPortfolioFocusRawData`'s raw queries directly
+against Production D1 (`wrangler d1 execute --remote`, read-only, for
+`user_sgoldstein@nirc.edu`) and fed the real results through the
+REAL, unmodified, pure (no-D1) downstream functions
+(`aggregatePortfolioFocusInputs`, `buildPortfolioContext`,
+`scorePortfolioFocus`, `buildFundraisingIntelligenceBrief`,
+`buildTodayPortfolioFocusRows`, `buildTodayIntelligenceTeaserRows`) in
+a throwaway local Node script -- zero Workers runtime, zero writes,
+same technique as this engagement's earlier read-only harness work.
+
+**Result: a real exception**, reproduced exactly:
+
+```
+Error: Portfolio Focus: unexpected giving_activities category "pending_pledge" -- refusing to silently ignore it
+    at aggregatePortfolioFocusInputs (lib/portfolio-focus/aggregate.ts:132)
+```
+
+### 3. Root cause
+
+`lib/portfolio-focus/aggregate.ts`'s `aggregatePortfolioFocusInputs`
+deliberately throws (fail-closed, by design -- see its own
+`KNOWN_GIVING_CATEGORIES` comment) on any `giving_activities.category`
+value outside `{completed_gift, open_pledge, partially_paid_pledge}`
+that reaches it. `lib/portfolio-focus/data.ts`'s own raw-pull query
+excludes three categories from ever reaching that point:
+`needs_review`, `nonfinancial_entry`, `pending_gift`.
+
+That exclusion list was written 2026-08-28 (Portfolio Focus Phase 1).
+**`pending_pledge` -- the pledge-side counterpart to `pending_gift`,
+added 2026-10-16 for the Trip Fundraising Results Dashboard feature
+(`lib/giving/management.ts`'s `COUNTED_GIVING_SQL`, which already
+correctly excludes it from every other giving total in the app) --
+was never added to this one, older, duplicate exclusion list.**
+
+Confirmed directly against real data: Production's real
+`giving_activities` for this user has **2 rows with `category =
+'pending_pledge'`** (real, recorded trip pledges awaiting JL import --
+confirmed via `SELECT category, COUNT(*) ... GROUP BY category`).
+Staging's entire `giving_activities` table has **zero** such rows
+(`SELECT ... WHERE category = 'pending_pledge'` returns no results,
+any owner) -- confirmed directly. This is exactly why the bug was
+invisible on Staging and only manifested on Production: Staging's
+dataset had simply never exercised this code path, not because the
+code behaves differently there.
+
+**Classification, per the investigation's own requirement**: a
+**Production data/API issue** -- specifically, application code (a
+stale, duplicated category-exclusion list) that a real, legitimate
+Production data shape (a `pending_pledge` row from real trip
+fundraising activity) exposed. Not a missing deployment, not a
+configuration difference, and not a rendering/auth condition.
+
+### 4. Fix -- smallest safe correction
+
+One line, `lib/portfolio-focus/data.ts`: added `'pending_pledge'` to
+the existing `category NOT IN (...)` exclusion list, so it is now
+`('needs_review','nonfinancial_entry','pending_gift','pending_pledge')`
+-- bringing this list into alignment with the canonical
+`COUNTED_GIVING_SQL` list it had silently drifted out of sync with.
+Deliberately did **not** touch `KNOWN_GIVING_CATEGORIES` or loosen the
+fail-closed throw in `aggregate.ts` -- that guard is a safety property
+worth keeping exactly as strict as it already is (it is what surfaced
+this bug for investigation at all, rather than a silent miscalculation);
+the correct fix is to stop a category that was never meant to reach it
+from reaching it, exactly as its sibling `pending_gift` already
+doesn't.
+
+This changes zero calculations for any other row or donor: a
+`pending_pledge` row was never successfully scored before (it crashed
+the whole computation for that user); excluding it now gives it the
+same treatment its sibling `pending_gift` already receives, which is
+the app's own existing, established rule (`COUNTED_GIVING_SQL`), not a
+new one. No migration. No change to any other file.
+
+### 5. Fix verified against real Production data, read-only
+
+Re-ran the exact same read-only reproduction with the corrected
+exclusion applied to the raw pull: **no exception**, and both sections
+now populate for this real user --
+`portfolioFocusRows: 5`, `intelligenceTeaserRows: 3` (sample rows
+recorded in this investigation's own scratch notes, omitted here as
+they name real donors) -- confirming the fix actually restores both
+homepage sections, not merely changes the error text.
+
+### 6. Tests added, full verification
+
+- `tests/portfolio-focus-pending-pledge-exclusion.test.mjs` (new): (a)
+  source-inspects `data.ts`'s SQL text for the actual shipped
+  exclusion; (b) proves `aggregatePortfolioFocusInputs` still throws on
+  a synthetic `pending_pledge` row reached directly (the fail-closed
+  guard this fix relies on, not loosens, remains intact); (c) proves a
+  normal, fully-excluded giving set still aggregates correctly with no
+  behavior change. Registered in `scripts/run-tests.mjs`.
+- `npx tsc --noEmit` -- clean.
+- `node scripts/run-tests.mjs` -- **244/244 test files passed** (243
+  pre-existing + the 1 new file). The same two pre-existing, unrelated
+  conditions as every prior round recurred identically
+  (`scripts/check-main-restore-sync.mjs`'s unrelated main-vs-branch Trip
+  Planner migration drift, and the unregistered
+  `tests/meeting-notes-experience-summary-fallback.test.mjs` warning) --
+  confirmed unrelated to this change, not a regression.
+- `pnpm run lint` -- 94 errors / 46 warnings, identical to the existing
+  baseline -- zero new issues.
+- `pnpm run build:production-independent` -- clean, exit 0 (build
+  only -- nothing deployed).
+
+### 7. Scope and data safety
+
+- Files changed: `lib/portfolio-focus/data.ts` (the one-line fix),
+  `tests/portfolio-focus-pending-pledge-exclusion.test.mjs` (new),
+  `scripts/run-tests.mjs` (registration) -- `git status --short`
+  confirms exactly these three paths, nothing else.
+- No donor, pledge, payment, or other financial data was modified.
+  Every D1 query run during this investigation (against both
+  Production and Staging) was a read-only `SELECT`; every result
+  reported `"changes": 0`. The 2 real `pending_pledge` rows on
+  Production are completely untouched -- this fix only stops them from
+  being pulled into Portfolio Focus/Fundraising Intelligence's
+  computation, exactly like their sibling `pending_gift` rows already
+  are; their own category, status, and every other field are unchanged.
+- No recommendation calculation changed for any donor or category this
+  fix does not touch.
+- **Not deployed.** This fix exists only on the working branch,
+  verified against real Production data read-only and against the
+  full local test/build gates -- awaiting the owner's explicit
+  Production deployment authorization, per this round's own
+  instruction not to deploy without it.
+
+### Remaining risks
+
+- This fix addresses the one category (`pending_pledge`) actually
+  found in Production data today. If a future category is ever added
+  to `giving_activities.category` without updating BOTH
+  `lib/giving/management.ts`'s `COUNTED_GIVING_SQL` AND this file's
+  own exclusion list, the same class of bug recurs -- the two lists
+  remain independently maintained, duplicated literals, not a single
+  shared source of truth. Unifying them would be a reasonable follow-up
+  but is deliberately out of scope here (the task asked for the
+  smallest safe correction, not a refactor).
+- Not yet verified live against a deployed Staging/Production Worker
+  (would require either deploying this fix or exercising it through
+  the stalled `wrangler dev --remote` harness technique documented
+  earlier in this file) -- the read-only reproduction against real
+  Production data (Section 2/5) is what stands in its place, using the
+  exact real data and the exact real downstream functions the deployed
+  app itself calls.

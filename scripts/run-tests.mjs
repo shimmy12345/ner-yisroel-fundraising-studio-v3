@@ -238,6 +238,7 @@ const TEST_FILES = [
   "tests/pledge-review.test.mjs",
   "tests/pledge-payment-plan-reviews.test.mjs",
   "tests/portfolio-focus-payment-plan-bugfix.test.mjs",
+  "tests/portfolio-focus-pending-pledge-exclusion.test.mjs",
   "tests/payment-plan-intelligence.test.mjs",
   "tests/relationship-facts-lifecycle-reclassify.test.mjs",
   "tests/pledge-payment-plan-completed-visibility.test.mjs",

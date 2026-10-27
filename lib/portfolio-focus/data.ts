@@ -32,10 +32,27 @@ export async function loadPortfolioFocusRawData(userId: string): Promise<Portfol
     // Evaluation, see docs/AI-HANDOFF.md) -- lets Fundraising Intelligence
     // Brief name the SPECIFIC pledge/campaign responsible for a stale or
     // behind-schedule recommendation, rather than a generic "Open pledge."
+    //
+    // 'pending_pledge' added to the exclusion list 2026-10-27 (Production
+    // Homepage Sections Missing investigation, docs/AI-HANDOFF.md). This
+    // list predates that category (added 2026-10-16, Trip Fundraising
+    // Results Dashboard -- see lib/giving/management.ts's own header
+    // comment) and was never updated to match it: KNOWN_GIVING_CATEGORIES
+    // (lib/portfolio-focus/aggregate.ts) deliberately throws on any
+    // category it doesn't recognize rather than silently ignoring it, so
+    // any real 'pending_pledge' row reaching that point crashed the
+    // ENTIRE Portfolio Focus + Fundraising Intelligence computation for
+    // that user -- silently, since app/page.tsx's Today-page caller
+    // swallows the error and degrades both homepage sections to empty.
+    // 'pending_pledge' is, like 'pending_gift' already excluded here, not
+    // yet a JL-confirmed financial fact (see lib/giving/management.ts's
+    // COUNTED_GIVING_SQL, the canonical list this one must stay in sync
+    // with) -- excluding it here is a pure alignment with that existing
+    // rule, not a new one.
     env.DB.prepare(`SELECT ga.id, ga.donor_id, ga.paid_cents, COALESCE(pbc.corrected_balance_cents, ga.balance_cents) AS balance_cents, ga.activity_date, ga.category, ga.item_type, ga.description, ga.source_campaign
       FROM giving_activities ga
       LEFT JOIN pledge_balance_corrections pbc ON pbc.pledge_activity_id = ga.id AND pbc.reversed_at IS NULL
-      WHERE ga.owner_user_id = ? AND ga.record_origin = 'live' AND ga.workspace_status = 'active' AND ga.category NOT IN ('needs_review','nonfinancial_entry','pending_gift')`).bind(userId).all<RawGivingRow>(),
+      WHERE ga.owner_user_id = ? AND ga.record_origin = 'live' AND ga.workspace_status = 'active' AND ga.category NOT IN ('needs_review','nonfinancial_entry','pending_gift','pending_pledge')`).bind(userId).all<RawGivingRow>(),
     env.DB.prepare(`SELECT id, donor_id, amount_cents, purpose, status, asked_at, source_interaction_id FROM asks WHERE user_id = ?`).bind(userId).all<RawAskRow>(),
     env.DB.prepare(`SELECT donor_id, type, occurred_at, role FROM interactions WHERE user_id = ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at))`).bind(userId).all<RawInteractionRow>(),
     env.DB.prepare(`SELECT id AS recommendation_id, donor_id, action, reason, due_at FROM recommendations WHERE user_id = ? AND status = 'open'`).bind(userId).all<RawReminderRow>(),
