@@ -58287,3 +58287,139 @@ homepage sections, not merely changes the error text.
   Production data (Section 2/5) is what stands in its place, using the
   exact real data and the exact real downstream functions the deployed
   app itself calls.
+
+## Authorized Production Deployment: Homepage Sections Fix (2026-10-27) -- DEPLOYED
+
+Owner-authorized (explicit, in-chat, scoped to commit `dfcc150`,
+Production only) deployment of the `pending_pledge` exclusion fix
+documented above.
+
+### 1. Approved commit confirmed exact
+
+`git rev-parse HEAD` -> `dfcc15071d10938e4f2b5c596963503fa6415e22` on
+`trip-planner-multi-region-manual-prospects`, working tree clean, and
+`git diff HEAD origin/trip-planner-multi-region-manual-prospects`
+empty -- local, remote, and the approved commit are identical. `git
+show --stat dfcc150` confirms its scope is exactly the four files
+documented in the prior section (`lib/portfolio-focus/data.ts`, the
+new test, `scripts/run-tests.mjs`, `docs/AI-HANDOFF.md`) -- nothing
+unrelated.
+
+### 2. Pre-deployment Production Worker version recorded for rollback
+
+Current (100%) entry before this deploy: **`d35b84fc-f803-4e21-8364-
+07385f2ba03e`** (created 2026-10-27T17:58:25.775Z -- the agenda
+recovery fix deployed earlier today). **Rollback command, if ever
+needed:** `wrangler rollback d35b84fc-f803-4e21-8364-07385f2ba03e
+--config wrangler.production.jsonc` (not run -- recorded for
+reference only).
+
+### 3. Latest Production backup confirmed available
+
+Re-checked (read-only, `wrangler r2 object get --remote` against
+`fundraising-os-production-backup-status`): same backup as this
+morning's agenda-fix deployment, `completedAt: 2026-10-27T14:23:49Z`,
+still the latest, still `attemptStatus: "success"` -- confirmed
+available before proceeding.
+
+### 4. Production environment and D1 confirmed correct
+
+`wrangler.production.jsonc`: `git diff --stat` against this round's
+starting point shows **zero changes** -- `fundraising-os-production`,
+D1 `fundraising-os-production-db` (`a51c6571-ae16-4614-aa9a-
+08f8e6be3ecd`), cron `["0 * * * *"]`, all unchanged. The deploy
+script (`deploy:production-independent`) still contains no migration
+step.
+
+### 5. Deployment executed -- Production only
+
+Ran `pnpm run deploy:production-independent`. `verify-build-manifest.mjs`
+confirmed `dist/` was built for `"production-independent"` **0 seconds
+ago** (commit `dfcc150`, not a stale build). Staging's deploy command
+was never invoked this round.
+
+### 6. No migration, no donor/financial mutation, no emails sent
+
+- No migration ran (none exists in the deploy script).
+- Post-deploy, read-only D1 fingerprint against Production:
+  `donors: 297` (unchanged), `giving_activities: 5954` (unchanged),
+  `pending_pledge_rows: 2` (the same 2 real rows, **preserved exactly
+  as the safety requirement asked** -- this fix only stops them from
+  being pulled into one computation, it never touches the rows
+  themselves). The query itself reported `"rows_written": 0`.
+- No email of any kind was sent or triggered as part of this
+  deployment.
+
+### 7. New Worker version live; application healthy
+
+Current (100%) entry after deploy: **`e8f7af13-7150-43aa-b235-
+2ae08d2ad14a`** (created 2026-10-27T18:35:32.440Z). `wrangler versions
+view`: identical handlers (`fetch, scheduled`), identical 3 Gmail
+secrets, identical `env.DB` -> `a51c6571-...`, identical
+bindings/vars to the Section 2 pre-deploy baseline. An unauthenticated
+`GET` returned `302` (redirect to Cloudflare Access) -- used only as a
+basic liveness signal, explicitly NOT treated as proof the homepage
+sections work, per this round's own instruction.
+
+### 8. Authenticated Production homepage check -- both sections verified populated
+
+Using an already-authenticated browser session (Cloudflare Access
+session already present for the owner's own account, `Shimmy
+Goldstein -- Ner Yisroel`, confirmed from the page's own account
+panel) against the real, live, just-deployed Production URL
+(`https://fundraising-os-production.sgoldstein.workers.dev/`, the same
+Worker `shimmydonors.org` routes to) -- a genuine authenticated page
+load, not an HTTP ping:
+
+- **Fundraising Intelligence ("RIGHT NOW")**: present and populated
+  with 3 real donor rows (Mr. & Mrs. Mordechai Schwartz -- "DIN2026 has
+  gone stale"; Mr. & Mrs. Shmuel Luxenburg -- "DIN2025 has gone
+  stale"; Rabbi & Mrs. Joshua Broide -- "DIN2025 has gone stale"),
+  each linking to its real donor page.
+- **Portfolio Focus ("THIS MONTH")**: present and populated with 5
+  real donor rows (Mr. & Mrs. Eitan Zeffren, Dr. & Mrs. Avi Stein, Mr.
+  & Mrs. Mordechai Schwartz, Rabbi & Mrs. Yehudah Bienstock, Mr. & Mrs.
+  Michie Nudell), matching this investigation's own earlier read-only
+  reproduction (Section 5 of the prior entry) rank-for-rank for the
+  #1 row (Eitan Zeffren, $100,000 commitment).
+- A screenshot of both sections rendered live was captured during this
+  verification for the record.
+
+Both sections render only when their row array has at least one row
+(`app/page.tsx`'s `.length > 0` gate) -- their mere presence, populated
+with real donor names and real pledge/relationship detail, is itself
+the proof the underlying computation no longer throws in Production.
+
+### 9. Production and Staging isolation confirmed
+
+- D1: unchanged from the agenda-fix deployment earlier today --
+  Production `a51c6571-...` vs. Staging `6c18396c-...`, separate.
+- Staging's own Worker was never redeployed this round either:
+  `wrangler deployments list --config wrangler.staging.jsonc`'s
+  current entry is still `7e293d12-106d-4c54-991f-ea3aa925ff03`,
+  created 2026-10-25T16:50:19.166Z -- untouched by both of today's
+  Production deployments.
+
+### 10. Rollback reference
+
+If this version ever needs to be rolled back: `wrangler rollback
+d35b84fc-f803-4e21-8364-07385f2ba03e --config
+wrangler.production.jsonc` (the Section 2 pre-deploy version, itself
+today's agenda-recovery-fix deployment -- rolling back to it would
+only undo the homepage-sections fix, not the agenda fix). Not run --
+recorded for reference only, since no issue was observed.
+
+### Remaining risks after this deployment
+
+- Unchanged from the prior entry: the two category-exclusion lists
+  (`lib/giving/management.ts`'s `COUNTED_GIVING_SQL` and
+  `lib/portfolio-focus/data.ts`'s own list) remain independently
+  maintained, duplicated literals. A future new `giving_activities`
+  category added to one and not the other reproduces this exact class
+  of bug. Unifying them was deliberately left out of scope (smallest
+  safe correction, not a refactor).
+- The authenticated check in Section 8 covered the one account that
+  reported the bug (`sgoldstein@nirc.edu`) -- the only account this
+  application currently has (confirmed earlier: `STAGING_OWNER_EMAIL`/
+  `TEAM_DOMAIN`/`POLICY_AUD` all scope to this one authorized owner).
+  There is no other Production user to separately re-check.
