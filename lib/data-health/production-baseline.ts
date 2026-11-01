@@ -9,6 +9,22 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
+// 55 as of 0048_google_calendar_sync.sql -- APPLY ONLY TOGETHER WITH
+// (immediately after, never before) actually applying migration 0048
+// to real Production. Prepared 2026-11-01 (see docs/AI-HANDOFF.md's
+// "Two Production Problems Investigated" / release-plan entries) as
+// the pre-built follow-up to the Problem 1 fix: once 0048 is applied to
+// Production, `calendar_event_links`/`calendar_event_link_history`
+// (plus the new `interactions`/`trip_prospects`/`users` columns) become
+// real, live, EXPECTED Production schema -- leaving this file at its
+// prior (0048-excluding) state after that point would make the monthly
+// restore-verification workflow fail again immediately, on the exact
+// opposite complaint ("Unexpected table: calendar_event_links") instead
+// of the complaint it correctly raises today ("Missing table"). This
+// commit must land in the SAME release as the migration itself, not
+// before (merging it first would make restore-verify wrongly fail
+// against real Production's CURRENT, pre-migration schema) and not
+// skipped afterward.
 // 54 as of 0055_trip_multi_region.sql (see the 2026-11-01 note below)
 // Manual sync (prepared 2026-10-22; the automated prepare-sync tool
 // (scripts/prepare-main-restore-sync-patch.mjs) again refused this one --
@@ -81,7 +97,7 @@ export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map(
 // checks the hash's FORMAT (64 hex chars), never a specific expected
 // value. 0048/0049 remain correctly excluded -- that part of the Oct 22
 // decision is unaffected by this round.
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 54;
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 55;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is
