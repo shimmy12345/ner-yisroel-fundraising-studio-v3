@@ -59743,3 +59743,123 @@ No Production data, deployment, or credential was touched this round.
 No Google Calendar event was created, modified, or deleted at any
 point -- only link `href` attributes were read, never clicked. The
 UNAUTHORIZED stash remains untouched.
+
+## Authorized Production Deployment: Restored Calendar Features + Regression Safeguards (2026-11-01) -- DEPLOYED AND VERIFIED LIVE
+
+Deployed commit `2536c526e9c5acfdc006653a95e9b011983e1136` to Production,
+exactly as authorized -- no OAuth credentials provisioned, no
+background sync enabled, no unrelated changes.
+
+### Pre-deployment checks (all passed, verified live, not assumed)
+
+1. **Current live Production Worker version and commit, confirmed
+   live**: `wrangler deployments status` showed version `e8f7af13-
+   7150-43aa-b235-2ae08d2ad14a`, created `2026-10-27T18:35:33.209Z` --
+   an EXACT match to this session's own prior record of that same
+   version (commit `dfcc15071d10938e4f2b5c596963503fa6415e22`), proving
+   nothing has changed Production since that record was made. Not
+   assumed from notes alone -- the live version ID itself was the
+   proof.
+2. **Ancestry check, run for real** against that live-confirmed
+   commit: `node scripts/check-production-branch-ancestry.mjs
+   dfcc15071d10938e4f2b5c596963503fa6415e22 2536c526e9c5acfdc006653a95
+   e9b011983e1136` -- "confirmed to be a descendant," exit 0.
+3. **249/249 test files pass, `tsc --noEmit` clean**, re-run fresh at
+   this exact commit (clean working tree confirmed first).
+4. **Latest Production backup confirmed valid**: completed
+   `2026-11-01T18:28:14Z` (run `41336743491`), and independently
+   restore-verified at `2026-11-01T18:33:06Z` (run `41336810556`) --
+   the restore-verify's own `verifiedBackupObjectKey` matches that
+   exact backup's key, proving the restore-verify genuinely tested
+   THIS backup, not a stale one.
+5. **Rollback target recorded**: `e8f7af13-7150-43aa-b235-
+   2ae08d2ad14a`.
+6. **No migration needed, confirmed by design**: every change is an
+   additive `SELECT` (donor address columns, `interactions.end_at`)
+   on the application side; the database schema itself is unchanged
+   by this release.
+
+### Deployment
+
+`PRODUCTION_LIVE_COMMIT=dfcc15071d10938e4f2b5c596963503fa6415e22 pnpm
+run deploy:production-independent` -- the full chain ran for real:
+build -> `verify-build-manifest` OK -> feature-fingerprint check (5/5
+found, all 3 behavioral checks passed) -> branch-ancestry check
+(passed) -> `wrangler deploy`. **New live Production Worker version:
+`b75eedb7-e5e2-40a6-bb93-345338823cb6`**, created
+`2026-11-01T20:34:28.699Z`, confirmed at 100% via a follow-up
+`wrangler deployments status`. Bindings confirmed unchanged/correct
+in the deploy output: `env.DB (fundraising-os-production-db)`, cron
+`0 * * * *` intact, no new OAuth/calendar credential binding of any
+kind appeared.
+
+### Post-deployment verification -- live, mostly read-only, against real Production
+
+- **Correct Worker version live**: confirmed via `wrangler deployments
+  status` (100%, matching the version just deployed).
+- **"Add to Google Calendar" visible for real, pre-existing scheduled
+  meetings** -- found via a read-only D1 query, then confirmed live in
+  the browser, with zero new data created: 5 real meetings on the
+  "Teaneck" trip (Bashevkin, Cohen, Fineberg, Greenberg, Tabacznik) and
+  1 more (Abdelhak, on a separate real trip) all correctly show the
+  link. Read Bashevkin's actual href directly off the live page:
+  `https://calendar.google.com/calendar/render?action=TEMPLATE&text=
+  Meeting+with+Rabbi+%26+Mrs.+Dovid+Bashevkin&dates=20261020T190000Z
+  %2F20261020T193000Z&location=his+home` -- correct name, correct Oct
+  20 3:00-3:30 PM EDT, correct location, byte-identical in structure
+  to what the original 2026-10-19/21 release verified live. Abdelhak's
+  own link (no location on file) correctly omits the `location`
+  param entirely rather than sending it blank.
+- **"Use donor address" visible and functional, verified live without
+  creating any real data**: opened the scheduling panel for a real,
+  not-yet-scheduled donor (Kopstick) on the real "Teaneck" trip,
+  clicked "Use donor address" -- the location field filled with
+  "122 Maiden Ln, Bergenfield, NJ 07621-4102" (his real, on-file
+  address) -- then clicked **Cancel**, never "Confirm scheduled
+  meeting." A direct, read-only D1 re-check afterward confirmed
+  Kopstick's real `status` (`not_contacted`) and `meeting_location`
+  (`null`) are exactly unchanged -- the whole interaction was local
+  browser state only, nothing was ever written.
+- **Manually-added prospects and multi-region trips remain
+  supported**: `trip_destination_regions` row count (6) and `donors`/
+  `giving_activities` row counts (297/5960) confirmed identical,
+  read-only, to every count recorded earlier in this session, before
+  any of today's work. The real "NYC" trip's multi-region label still
+  renders correctly (4 regions listed). No real unlinked prospect
+  currently exists on Production to click-test live, but the
+  unlinked/manually-added path was already proven working end-to-end
+  on Staging (see the prior entry) and is covered by the deploy's own
+  passing feature-fingerprint + behavioral checks.
+- **Existing meeting workflows unaffected**: the `CalendarSyncBadge`
+  "Calendar sync pending" display, "✦ AI meeting notes" links, and
+  trip fundraising sections all rendered normally alongside the
+  restored feature throughout.
+- **Zero Google Calendar network activity**: `read_network_requests`
+  filtered for `google` returned zero matches throughout the entire
+  verification session; zero console errors. No link was ever
+  clicked -- only `href` attributes were read directly from the page.
+- **No unrelated donor or financial data changed**: `donors` (297)
+  and `giving_activities` (5960) row counts identical before and
+  after this entire round, confirmed by direct, read-only query.
+
+### Final report
+
+1. **Deployed commit**: `2536c526e9c5acfdc006653a95e9b011983e1136`.
+   **New Production Worker version**: `b75eedb7-e5e2-40a6-bb93-
+   345338823cb6`.
+2. **Previous Worker version, retained as rollback target**:
+   `e8f7af13-7150-43aa-b235-2ae08d2ad14a`.
+3. **Pre-deployment**: all 6 checks above passed, each with live or
+   fresh evidence, not assumed from prior notes.
+4. **Post-deployment**: all 8 verification items above confirmed
+   against real, live Production.
+5. **Donor/financial data preserved**: confirmed identical row counts
+   (`donors` 297, `giving_activities` 5960) before and after.
+6. **Unresolved issues**: none. The restoration is live, verified,
+   and no regression was observed anywhere in this round.
+
+No Production donor record, pledge, payment, or trip was modified.
+No database migration applied. No credential changed or provisioned.
+No background Google Calendar synchronization enabled. No Google
+Calendar event created, modified, or deleted. The UNAUTHORIZED stash
+remains untouched.
