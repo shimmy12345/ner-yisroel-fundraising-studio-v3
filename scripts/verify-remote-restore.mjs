@@ -53,8 +53,31 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { FUNDRAISING_DATA_TABLES, PRODUCTION_BASELINE_HASH, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
+import { ACCOUNT_CONFIGURATION_TABLES, PRODUCTION_BASELINE_HASH, PRODUCTION_BASELINE_TABLES, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
+import { STAGING_BASELINE_HASH, STAGING_BASELINE_OBJECTS, STAGING_BASELINE_TABLES } from "../lib/data-health/staging-baseline.ts";
+import { PRODUCTION_BASELINE_OBJECTS } from "../lib/data-health/production-baseline.ts";
 import { findInsertedRow, planD1Restore } from "../lib/operations/d1-restore-order.ts";
+
+// Baseline selection by DATABASE_NAME (2026-11-01, "both monthly restore-verify
+// jobs failing for real reasons" investigation -- see docs/AI-HANDOFF.md).
+// Staging and Production have genuinely diverged real schemas (Staging has
+// migration 0048's tables/columns live, Production does not -- see
+// lib/data-health/production-baseline.ts's and staging-baseline.ts's own
+// header comments), so each environment's restore-verify run must compare
+// against ITS OWN baseline, never the other's. DATABASE_NAME is already set
+// as a job-level env var by both calling workflows (d1-restore-verify-
+// monthly.yml / d1-restore-verify-monthly-production.yml) -- no workflow YAML
+// change was needed for this. Fails loudly (not a silent default) for any
+// other/unexpected value: guessing which baseline to use would be worse than
+// refusing outright.
+const DATABASE_NAME = process.env.DATABASE_NAME;
+const BASELINE = DATABASE_NAME === "fundraising-os-production-db"
+  ? { objects: PRODUCTION_BASELINE_OBJECTS, hash: PRODUCTION_BASELINE_HASH, fundraisingDataTables: PRODUCTION_BASELINE_TABLES.filter((table) => !ACCOUNT_CONFIGURATION_TABLES.includes(table)) }
+  : DATABASE_NAME === "fundraising-os-staging-db"
+  ? { objects: STAGING_BASELINE_OBJECTS, hash: STAGING_BASELINE_HASH, fundraisingDataTables: STAGING_BASELINE_TABLES.filter((table) => !ACCOUNT_CONFIGURATION_TABLES.includes(table)) }
+  : null;
+if (!BASELINE) throw new Error(`DATABASE_NAME must be exactly "fundraising-os-production-db" or "fundraising-os-staging-db" to select the correct schema baseline -- got: ${JSON.stringify(DATABASE_NAME)}`);
+const FUNDRAISING_DATA_TABLES = BASELINE.fundraisingDataTables;
 
 const backupArgument = process.argv.slice(2).find((argument) => argument !== "--");
 const backupPath = backupArgument ? path.resolve(backupArgument) : null;
@@ -236,8 +259,8 @@ try {
   // see below for why that is a deliberate, separate concern.
   console.log("Validating restored schema against the current packaged manifest (structural integrity + migration readiness)...");
   const schemaRows = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", "SELECT name,type,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY type,name;"])?.[0]?.results ?? [];
-  const schemaComparison = compareSchemaObjects(stagingSchemaObjects(schemaRows));
-  assert.equal(schemaComparison.matches, true, `Restored schema does not match the production baseline: ${schemaComparison.differences.join(" ")}`);
+  const schemaComparison = compareSchemaObjects(stagingSchemaObjects(schemaRows), BASELINE.objects);
+  assert.equal(schemaComparison.matches, true, `Restored schema does not match the ${DATABASE_NAME} baseline: ${schemaComparison.differences.join(" ")}`);
 
   // BACKUP FIDELITY for production_schema_baseline (id '0019'): this row is
   // a write-once historical lineage stamp, not a continuously-reverified
@@ -264,8 +287,8 @@ try {
     sourceBaselineRow.schema_hash,
     `Restored production_schema_baseline row does not match the SOURCE BACKUP's own marker (backup fidelity failure): restored="${restoredBaselineRow?.schema_hash}" backup="${sourceBaselineRow.schema_hash}".`,
   );
-  const stampedCurrent = restoredBaselineRow.schema_hash === PRODUCTION_BASELINE_HASH;
-  console.log(`production_schema_baseline backup fidelity OK (schema_hash=${restoredBaselineRow.schema_hash}${stampedCurrent ? ", also matches today's packaged hash" : " -- a stale historical stamp relative to today's packaged hash " + PRODUCTION_BASELINE_HASH + ", which is expected and does not indicate a problem; current structural integrity was already verified independently above"}).`);
+  const stampedCurrent = restoredBaselineRow.schema_hash === BASELINE.hash;
+  console.log(`production_schema_baseline backup fidelity OK (schema_hash=${restoredBaselineRow.schema_hash}${stampedCurrent ? ", also matches today's packaged hash" : " -- a stale historical stamp relative to today's packaged hash " + BASELINE.hash + ", which is expected and does not indicate a problem; current structural integrity was already verified independently above"}).`);
 
   console.log("Validating every fundraising table is present and queryable (basic row integrity)...");
   const rowCounts = {};
