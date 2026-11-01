@@ -59338,3 +59338,230 @@ investigation only, per your explicit instruction.
 
 No Production data modified. No Production calendar sync enabled. No
 deployment made. The UNAUTHORIZED stash remains untouched.
+
+## CORRECTION: The Owner's Recollection Was Right -- "Add to Google Calendar" + "Use Donor Address" Genuinely Worked on Production, Then Was Silently Dropped by a Later Deployment (2026-11-01)
+
+The owner reported personally using a working "create a real Google
+Calendar event, using the donor's address as location" feature
+roughly 1-2 weeks before this entry, and pushed back on this
+assistant's prior conclusion that calendar functionality had never
+worked on Production. **The owner was correct. The prior entry's
+conclusion was real but incomplete** -- it correctly found that the
+*automatic OAuth-based Trip Planner sync* (`calendar_event_links`,
+this session's own earlier work) has never had live credentials
+anywhere, but it missed an entirely separate, simpler, already-shipped
+feature that genuinely did create real Google Calendar events, and
+that regressed off Production without anyone deploying anything that
+mentioned calendar at all.
+
+### What actually worked, and how
+
+**"Add to Google Calendar" link + "Use donor address" button**
+(`lib/relationships/trip-calendar-link.ts`, commit `adb97c0`, 2026-
+10-19) -- a deliberately small, non-sync release: a plain template
+URL (`https://calendar.google.com/calendar/render?action=TEMPLATE&...`)
+pre-filled with the donor's name, the meeting's date/time/duration,
+and (if the owner clicked "Use donor address") the donor's saved
+address as location. **No OAuth, no API call, no credential of any
+kind** -- FOS only ever built a URL; clicking it opened Google
+Calendar's own native event-creation screen, already pre-filled, for
+the owner to review and press Save themselves. This is exactly why it
+required no Google Calendar credentials to exist anywhere (consistent
+with every "no GOOGLE_CALENDAR_OAUTH_* secret, no live Google API
+call" note throughout this file -- those notes were all true, and
+were about the OTHER system) and exactly why the owner's own
+button-press is what actually created the real event -- which is
+genuinely real, working functionality, not a simulation, even though
+FOS itself never calls Google's API.
+
+**This explains every expected behavior the owner described**:
+donor's-address-as-location (the explicit button), the donor's name/
+date/time/duration pre-filled, and overlapping events allowed without
+modifying existing ones (Google Calendar's own native create-event
+screen has no app-side conflict logic at all -- there was never any
+code to allow or disallow overlap).
+
+### Confirmed genuinely deployed and working, not just built
+
+- Deployed to Production **2026-10-19T21:07:33Z**, Worker version
+  `b79b0182-0422-49b2-bc76-059fd73d8c69` -- verified live at the time
+  against real donor rows (Tabacznik, Fineberg, Greenberg, Bashevkin).
+- Survived at least one later, unrelated Production release
+  (`release/trip-confirmation-production`, commit `354b889`, adding
+  the donor-confirmation/`0050`/`0051` feature) -- that round's own
+  `grep` of the rebuilt `dist/` explicitly confirmed "Add to Google
+  Calendar" and `AddToGoogleCalendarLink` were still present and
+  unchanged, and a LIVE verification read Bashevkin's actual rendered
+  link directly from the Production page: `https://calendar.google.
+  com/calendar/render?action=TEMPLATE&text=Meeting+with+Rabbi+%26+Mrs.
+  +Dovid+Bashevkin&dates=20261020T190000Z%2F20261020T193000Z&location=
+  his+home` -- a real, live, working feature, confirmed working on
+  Production as recently as that round (deployed `2ba9e1b4-5309-479b-
+  9639-f8c934c7a516`, 2026-10-21T15:04:18Z).
+
+### When and why it disappeared -- found and confirmed, not guessed
+
+**2026-10-25T17:38:14Z, Worker version `e288bd0a-8602-4da9-99ae-
+1ed46e92a98d`**, deploying commit `58a9c60e5fbbccdfef619c01df0ce29bc30f9e53`
+on branch **`trip-planner-multi-region-manual-prospects`** (migrations
+0054/0055, "Trip Manual Prospects" + "Trip Multi Region" -- the exact
+feature set this entire session's own working branch has continued
+from ever since, through today's own agenda-email and homepage-
+sections fixes, and today's migration-0048 release). That deployment's
+own record makes no mention of calendar functionality at all -- it
+was not deploying a removal, it was deploying a DIFFERENT, independent
+line of work that simply never had the calendar-link feature in it.
+
+**Root cause, confirmed via git, not inferred**: `trip-planner-multi-
+region-manual-prospects` and `feature/trip-meeting-add-to-google-
+calendar` (-> `release/trip-confirmation-production`) share a common
+ancestor, `a0ccb2f`, and diverged from each other there -- `git
+merge-base --is-ancestor adb97c0 58a9c60e` returns false; 82 commits
+of independent work exist on the `trip-planner-multi-region-manual-
+prospects` side of that fork that never incorporated the calendar-link
+commit. **The two lineages were never reconciled.** When Production
+deployment practice switched to always deploying from `trip-planner-
+multi-region-manual-prospects` (the actively-developed branch, used
+for every deployment this entire session, including today's), the
+"Add to Google Calendar"/"Use donor address" feature -- real, shipped,
+working functionality -- was silently dropped, because nothing in the
+deployment process ever diffed the outgoing Production code against
+the INCOMING one for feature loss, only ever checked that the
+intended new feature was present.
+
+**Confirmed absent today, directly**: this assistant's own live Trip
+Planner testing earlier today (scheduling/rescheduling/completing a
+real linked-prospect meeting, see the "Live Trip Planner workflows
+tested end to end" entry above) never showed an "Add to Google
+Calendar" link or a "Use donor address" button at any point -- only
+the newer, OAuth-based "Calendar sync pending" status. A fresh
+repo-wide search for `googleCalendarTemplateUrl` (the function that
+built the link) on the current working branch returns zero matches --
+the file `trip-calendar-link.ts` does not exist here at all.
+
+### What remains genuinely uncertain
+
+- The EXACT date the owner's own last successful use occurred (between
+  commit `b79b0182` going live on 2026-10-19 and `e288bd0a` replacing
+  it on 2026-10-25) cannot be pinned more precisely than "sometime in
+  that 6-day window" from this investigation alone -- no application-
+  level usage log of this specific link being clicked exists (it was
+  a plain `<a>` tag with no click tracking, by the original design's
+  own explicit choice: "No click/open tracking of any kind").
+- Whether `8882fe86-c759-470b-add5-a19d5e73632e` (live 2026-10-22,
+  between the two confirmed-good checkpoints) also had the feature is
+  inferred from its short, ~13-hour gap after the confirmed-good
+  `2ba9e1b4`, not independently re-verified against ITS OWN dist --
+  doesn't change the conclusion either way.
+
+### The simplest way to restore it
+
+**Re-port the existing, already-built, already-verified code** --
+`lib/relationships/trip-calendar-link.ts`, the `AddToGoogleCalendarLink`
+component and "Use donor address" button in
+`TripDashboardExperience.tsx`, and the two additive `SELECT` columns
+in `trips-data.ts`'s `listTripProspects()` -- from commit `adb97c0`
+(or its descendant `354b889`) forward onto the current working branch.
+This is a small, self-contained, read-only-at-the-data-layer feature
+(no migration, no credential, no write-path change, confirmed by the
+original implementation's own verification) that was fully built and
+Production-verified once already -- **nothing needs to be redesigned
+or rebuilt, only re-applied**, per the instruction to prioritize
+restoring existing functionality. Not done this round -- investigation
+only, per explicit instruction.
+
+No Production data modified. No deployment made. No Google Calendar
+event created, modified, or deleted by this assistant at any point.
+The UNAUTHORIZED stash remains untouched.
+
+## Production Feature Baseline + Regression Protection Recommendations (2026-11-01)
+
+Created `docs/PRODUCTION-FEATURE-BASELINE.md` -- see that file for the
+full per-feature table. Summary of method and findings below.
+
+### Method
+
+For each feature, status is based on evidence actually produced
+**this session** (live Production reads, real deployment records with
+commit SHAs, or direct code/dist inspection) wherever available, not
+on "the code exists" or "a simulated test passes" -- per explicit
+instruction. Three tiers used throughout: **Verified working in
+Production** (direct, recent, real evidence), **Implemented, not
+independently verified** (code exists and is plausibly deployed, but
+no fresh, direct confirmation this session), **Incomplete or
+unavailable** (confirmed gap, with evidence).
+
+### Headline findings feeding the baseline
+
+- Trip Planner meeting scheduling/rescheduling/completion/cancellation:
+  **verified working** -- today's own live browser test against real
+  Production, with real `200` API responses and direct DB confirmation.
+- Trip Planner "Use donor address" + "Add to Google Calendar": **
+  confirmed incomplete/unavailable on current Production** -- a real
+  regression, fully root-caused above, not merely unimplemented.
+- Automatic OAuth-based Google Calendar sync: **implemented, not
+  active** -- backend complete, deliberately gated behind a Google
+  OAuth setup step never taken on either environment (confirmed via
+  `wrangler secret list`).
+- Backup + restore verification: **verified working** -- today's own
+  real, independently-confirmed GitHub Actions runs (backup, then
+  restore-verify using that exact backup, both success) plus the
+  Production schema-baseline fix that made the comparison itself
+  correct.
+- Daily Fundraising Agenda email: **implemented, not independently
+  re-verified this round** -- the recovery-window fix was deployed and
+  source-verified earlier this session, but this round did not
+  independently re-confirm a real 9 AM send has actually fired and
+  succeeded since.
+- Donor profiles/giving history, pledges/payments/payment plans/
+  reconciliation, AI Meeting Notes: **implemented, not independently
+  re-verified this round** -- long-standing, heavily-documented
+  features with extensive historical test/deployment evidence in this
+  file, but not freshly re-confirmed against live Production in this
+  specific investigation (distinct from "unverified" -- there is a
+  large prior evidence trail, just not refreshed today).
+
+### Recommended regression protection -- small, deliberately not a new framework
+
+1. **A single new script, `scripts/check-production-feature-
+   fingerprints.mjs`** (proposed, NOT created this round): greps a
+   freshly built `dist/` for one short, distinctive string per
+   baseline feature marked "Verified working in Production" (e.g.
+   `AddToGoogleCalendarLink`, `googleCalendarTemplateUrl`,
+   `CalendarSyncBadge`, `scheduleProspectMeeting`, `recordTripMeeting
+   Scheduled`, `D1_RESTORE_DATA_ORDER`, `runScheduledAgendaSend`) and
+   **fails loudly, listing exactly which fingerprint(s) went missing,
+   if even one is absent** -- this is the exact, lightweight technique
+   already used informally and manually throughout this file's own
+   deployment history (`grep -rl "Add to Google Calendar" dist/`,
+   repeated by hand each time) made into one standing, mandatory,
+   automated step. This specific check would have caught this exact
+   regression immediately, the very first time `58a9c60e` was built,
+   before it was ever deployed.
+2. **One line added to the existing deploy process** (proposed, not
+   made): run that script immediately after `pnpm run build:
+   production-independent` and before `wrangler deploy`, for every
+   Production deployment, no exceptions -- refuse to deploy on any
+   missing fingerprint without an explicit, named override.
+3. **A short, practical pre-deployment checklist** (drafted in
+   `docs/PRODUCTION-FEATURE-BASELINE.md`'s own "Pre-deployment
+   checklist" section) -- the one new habit this recommends: before
+   deploying, run `git log <current-production-commit>..<new-commit>
+   --first-parent` AND confirm the new commit is actually a
+   *descendant* of the current Production commit (`git merge-base
+   --is-ancestor <current-prod-commit> <new-commit>`) -- this one
+   check alone would have surfaced this exact incident as a question
+   ("the new commit is NOT a descendant of what's currently live --
+   are you sure?") before it ever shipped.
+4. **Deliberately not recommended**: a general feature-flag system, a
+   new test harness/runner, or expanding the existing CI-only
+   local-D1/workerd test suite -- none of those would have caught this
+   specific class of regression (a whole feature living on a branch
+   that was never merged forward), and the user explicitly asked to
+   avoid unnecessary complexity. The fingerprint check + the ancestor
+   check are both already-available tools (`grep`, `git merge-base`)
+   used in a new, standing way, not new infrastructure.
+
+Nothing in this section has been implemented yet -- recommendations
+and the baseline document only, per explicit instruction. No
+Production change of any kind was made.
