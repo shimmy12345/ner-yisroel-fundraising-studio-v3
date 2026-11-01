@@ -10,6 +10,7 @@ import { numericDonorCode } from "../../../lib/relationships/donor-identity";
 import type { TripRecord, TripProspectRecord, TripFinancialAttributionRow, EligibleGivingActivity, ReconcilableAttribution, FindProspectDonor } from "../../../lib/relationships/trips-data";
 import type { TripFinancialSummary } from "../../../lib/relationships/trip-financial-attribution";
 import { DEFAULT_MEETING_DURATION_MINUTES, TRIP_PROSPECT_STATUSES, timezoneForState, type TripProspectStatus } from "../../../lib/relationships/trip-model";
+import { DEFAULT_GOOGLE_CALENDAR_DURATION_MINUTES, googleCalendarTemplateUrl, formatDonorAddress } from "../../../lib/relationships/trip-calendar-link";
 import { FinancialSummaryCard, FinancialSummaryGrid } from "../../components/FinancialSummaryCard";
 import { ProgressBar } from "../../components/ProgressBar";
 
@@ -501,6 +502,31 @@ function ManualProspectSection({ trip, show, onShow, onSubmit }: {
   </div>;
 }
 
+// "Add to Google Calendar" (restored 2026-11-01, originally commit
+// `adb97c0`, 2026-10-19 -- see docs/AI-HANDOFF.md). Shown ONLY for a
+// confirmed, timed `meeting_scheduled` prospect (never requested/
+// declined/completed/unable_to_schedule -- the caller below gates on
+// prospect.status itself). `durationMinutes` is the REAL, already-saved
+// duration (see trips-data.ts's computeMeetingDurationMinutes) when one
+// exists, or the fixed default for an unlinked prospect -- never a
+// second, separate, unsaved duration input (the original 2026-10-19
+// release had one only because no persisted duration existed yet at
+// that time; it does now). No OAuth, no Google API call, no background
+// job, no sync, no event tracking of any kind -- this only ever opens
+// Google Calendar's own event-creation screen, pre-filled, for the
+// fundraiser to review and save themselves. Repeated clicks can produce
+// duplicate Google Calendar events; no click-tracking or duplicate-
+// prevention is built for this feature, by design -- Google Calendar's
+// own native screen already allows overlapping events freely, and
+// nothing here adds any conflict logic on top of that.
+function AddToGoogleCalendarLink({ donorDisplayName, meetingAtEpoch, durationMinutes, meetingLocation }: { donorDisplayName: string; meetingAtEpoch: number; durationMinutes: number; meetingLocation: string | null }) {
+  const href = googleCalendarTemplateUrl(donorDisplayName, meetingAtEpoch, durationMinutes, meetingLocation);
+  return <p className="travel-planning-google-calendar">
+    <a href={href} target="_blank" rel="noopener noreferrer">Add to Google Calendar</a>
+    <br /><small>Save this event in Google Calendar. Later changes or cancellations must be updated there manually.</small>
+  </p>;
+}
+
 function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction, onRemove, attributions, onRefresh, findProspectDonors }: {
   tripId: string; prospect: TripProspectRecord; busy: boolean; fundraiserTimezone: string; onBusyAction: (action: () => Promise<void>) => void; onRemove: () => void;
   attributions: TripFinancialAttributionRow[]; onRefresh: () => void; findProspectDonors: FindProspectDonor[];
@@ -509,6 +535,14 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
   // 2026-10-15) -- never the browser's. Falls back to the fundraiser's
   // own home timezone only when this donor has no state on file.
   const timezone = timezoneForState(prospect.donorState, fundraiserTimezone);
+  // "Use donor address" (restored 2026-11-01, originally commit
+  // `adb97c0`, 2026-10-19) -- this donor's OWN already-on-file address,
+  // never looked up anywhere new. Always null for an unlinked prospect
+  // (no donor row at all). Computed once per render, not state:
+  // clicking the button below copies it into locationDraft EXPLICITLY,
+  // so an already-typed location is never silently overwritten just
+  // because this value happens to be available.
+  const donorAddress = prospect.isLinked ? formatDonorAddress(prospect.donorAddressLine1, prospect.donorCity, prospect.donorState, prospect.donorPostalCode) : null;
   const [notesDraft, setNotesDraft] = useState(prospect.trip_notes ?? "");
   const [nextActionDraft, setNextActionDraft] = useState(prospect.nextAction ?? "");
   const [scheduling, setScheduling] = useState(false);
@@ -617,10 +651,28 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
       >✦ AI meeting notes</a>}
     </p>}
 
+    {/* "Add to Google Calendar" (restored 2026-11-01) -- gated on
+        status === "meeting_scheduled" specifically, never merely on
+        meetingAt being present (which is also true for
+        meeting_completed). Works for both a linked prospect (real
+        duration from the scheduled interaction) and an unlinked one
+        (fixed default duration, no interaction to read one from). */}
+    {prospect.status === "meeting_scheduled" && prospect.meetingAt && !scheduling && !completing &&
+      <AddToGoogleCalendarLink
+        donorDisplayName={prospect.donorDisplayName}
+        meetingAtEpoch={prospect.meetingAt}
+        durationMinutes={prospect.meetingDurationMinutes ?? DEFAULT_GOOGLE_CALENDAR_DURATION_MINUTES}
+        meetingLocation={prospect.meetingLocation}
+      />}
+
     {showDetails && <>
       {scheduling && <div className="travel-planning-confirm-panel">
         <label>Meeting date &amp; time -- local time at destination ({timezone})<input type="datetime-local" value={meetingAtDraft} onChange={(event) => setMeetingAtDraft(event.target.value)} /></label>
         <label>Location (optional)<input type="text" value={locationDraft} onChange={(event) => setLocationDraft(event.target.value)} maxLength={300} /></label>
+        {prospect.isLinked && <p className="travel-planning-use-address">
+          <button type="button" className="travel-planning-use-address-button" disabled={!donorAddress} onClick={() => setLocationDraft(donorAddress ?? "")}>Use donor address</button>
+          {!donorAddress && <small>No address on file for this donor.</small>}
+        </p>}
         {prospect.isLinked && <label>Duration (minutes)<input type="number" min={1} max={1440} step={1} value={durationDraft} onChange={(event) => setDurationDraft(event.target.value)} /></label>}
         <p className="travel-planning-confirm-hint">{prospect.isLinked
           ? "This creates a real scheduled interaction on this donor's timeline and, if Google Calendar sync is enabled in Settings, a matching one-way calendar event."

@@ -59565,3 +59565,181 @@ unavailable** (confirmed gap, with evidence).
 Nothing in this section has been implemented yet -- recommendations
 and the baseline document only, per explicit instruction. No
 Production change of any kind was made.
+
+## Restore Original Trip Planner Calendar Features and Prevent Future Regressions (2026-11-01) -- RESTORED AND VERIFIED ON STAGING, NOT YET DEPLOYED TO PRODUCTION
+
+Implemented the approved plan following the prior "CORRECTION" entry's
+root cause. Four parts, all complete except the authorized Production
+deployment itself.
+
+### Part 1 + 2: Restored functionality, preserving everything added since 2026-10-19
+
+Re-implemented (never cherry-picked verbatim -- the files have
+diverged too far since `adb97c0` for that to apply cleanly) the exact
+behavior of the original release, onto the CURRENT shape of these
+files:
+
+- **`lib/relationships/trip-calendar-link.ts`** (new file, restored):
+  `toGoogleCalendarUtcStamp`, `googleCalendarTemplateUrl`,
+  `formatDonorAddress` ported essentially byte-for-byte. One
+  deliberate improvement over the original, not a deviation from it:
+  `computeMeetingDurationMinutes` reads the REAL, already-saved
+  meeting duration (`interactions.end_at - meeting_at`, now possible
+  since migration 0048 added `end_at`, which didn't exist at the
+  original's base commit) instead of reintroducing a second, unsaved,
+  separate duration input -- the original only had that input because
+  no persisted duration existed yet at the time. Falls back to the
+  fixed 30-minute default for a manually-added (unlinked) prospect,
+  which has no `interactions` row and therefore no `end_at` at all.
+- **`lib/relationships/trips-data.ts`**: `listTripProspects()`'s
+  existing SELECT now also reads `d.address_line_1`/`d.postal_code`
+  (two more already-existing, already-deployed donor columns, LEFT
+  JOINed, so always `null` for an unlinked prospect) and, via one more
+  small additive query mirroring the existing `calendarSync`-status
+  query's own convention, `interactions.end_at` for every linked
+  interaction on the page. Zero changes to any write path.
+- **`app/travel-planning/[id]/TripDashboardExperience.tsx`**: restored
+  `AddToGoogleCalendarLink` (gated on `status === "meeting_scheduled"`
+  specifically, exactly as original) and the "Use donor address"
+  button (gated on `prospect.isLinked`, since an unlinked prospect has
+  no donor to use an address from at all -- the control is hidden
+  entirely for them, not merely disabled). "No address on file for
+  this donor." shown, disabled button, when a linked donor genuinely
+  has nothing on file -- never an error.
+- **`app/globals.css`**: the four original CSS classes restored.
+- Confirmed preserved, by direct `git diff` review and by the full
+  test suite passing unchanged: multi-region trips, manually-added
+  prospects, meeting scheduling/rescheduling/completion/cancellation,
+  the existing `CalendarSyncBadge`/Retry (OAuth sync) UI, AI Meeting
+  Notes, trip financial totals/pledges/donations. Nothing else was
+  touched.
+
+### Part 3: Two regression safeguards, both real and wired into the deploy process
+
+See `docs/PRODUCTION-FEATURE-BASELINE.md`'s "Regression protection"
+section for full detail. Summary:
+
+- **`scripts/check-production-feature-fingerprints.mjs`** -- greps a
+  freshly built `dist/` for one fingerprint per "Verified working"
+  feature AND actually runs 3 of this project's own real test files as
+  subprocesses (not merely checking they exist), per the explicit
+  instruction not to rely on text search alone. Wired into both
+  `deploy:staging-independent` and `deploy:production-independent`.
+- **`scripts/check-production-branch-ancestry.mjs`** -- requires the
+  current live Production commit stated explicitly, confirms the
+  commit about to deploy is a real git descendant of it, refuses
+  otherwise. Wired into `deploy:production-independent` only. **Proven
+  against the real 2026-10-25 incident**: run directly against the
+  actual diverged commits (`354b889`/`58a9c60e`), it correctly fails
+  with "is NOT a descendant"; run against a genuine descendant pair,
+  it correctly passes.
+- Both have their own unit tests (`tests/check-production-feature-
+  fingerprints.test.mjs`, `tests/check-production-branch-ancestry.
+  test.mjs`), including real CLI-spawn tests, matching this project's
+  own established `verify-build-manifest.mjs`/`.test.mjs` convention.
+- Deliberately not built: a feature-flag system, a new test framework,
+  or any expansion of the CI-only local-D1/workerd harness -- none of
+  those would have caught this specific class of regression (a whole
+  feature living only on a branch that was never merged forward), and
+  would have added complexity the task explicitly asked to avoid.
+
+### Part 4: Tested on Staging -- real deployment, real browser, real cleanup
+
+**Automated**: 249/249 test files pass (247 + the 2 new regression-
+protection test files), `tsc --noEmit` clean, build clean. The full
+safeguard chain ran for real as part of the actual deploy (not
+separately): `verify-build-manifest` OK, all 5 feature fingerprints
+found, all 3 behavioral checks passed.
+
+**Deployed to Staging**: `pnpm run deploy:staging-independent` --
+new live Staging Worker version `e3861fde-01c8-4845-9a6f-4240db846751`
+(rollback target: `7e293d12-106d-4c54-991f-ea3aa925ff03`, live since
+2026-10-25). `env.DB (fundraising-os-staging-db)` confirmed as the
+bound database in the deploy output -- Staging's own, never
+Production's.
+
+**Live, authenticated browser testing against real Staging** (a
+disposable test trip, three disposable test prospects -- a real
+donor with a real address, the project's own pre-established
+"QA TEST" safe synthetic donor with no address on file, and a freshly
+created manually-added/unlinked prospect -- all fully removed
+afterward):
+
+1. "Use donor address" populated the real donor's exact on-file
+   address verbatim: clicking it filled the location field with
+   "615 Winthrop Road, Teaneck, NJ 07666-3306", read directly from
+   `donors.address_line_1`/`city`/`state`/`postal_code`.
+2. Manual meeting locations remain fully supported: typed "Manually
+   typed location, 1 Test Plaza" and "Coffee shop downtown" for two
+   different prospects; both saved and both appeared correctly in the
+   generated calendar link.
+3. Google Calendar links contained the correct name in every case:
+   "Meeting with Dr. & Mrs. Yaakov Abdelhak", "Meeting with QA TEST --
+   AI Meeting Notes (safe synthetic donor, do not use for real data)",
+   "Meeting with TEST Manual Prospect - DELETE ME".
+4. Date/start/duration/end time all correct, with a REAL, non-default
+   duration specifically exercised: a 45-minute meeting (not the
+   30-minute default) produced `dates=20261205T190000Z/20261205T194500Z`
+   -- 2:00 PM-2:45 PM America/New_York in December (EST, UTC-5),
+   confirming the real, persisted `end_at`-derived duration is read
+   correctly, not a hardcoded default. DST correctness itself remains
+   covered by the unit tests (both 2026 transitions, Eastern/Central/
+   Pacific), not re-tested live since today's date doesn't sit on a
+   transition.
+5. The manually-added (unlinked) prospect generated a correct calendar
+   link (`Meeting with TEST Manual Prospect - DELETE ME`, correct
+   time, "Coffee shop downtown") with no donor account and no
+   interaction at all, using the fixed default duration -- confirming
+   calendar links work without requiring a donor profile.
+6. The donor with no address on file showed "No address on file for
+   this donor." cleanly, with the button correctly disabled -- no
+   error, no crash, confirmed live.
+7. Existing Trip Planner functionality continued working throughout:
+   status changes, the `CalendarSyncBadge` "Calendar sync pending"
+   display, "✦ AI meeting notes" links, and trip fundraising sections
+   all rendered normally across all three test prospects.
+8. **Zero Google network activity**: confirmed both by direct
+   inspection (no `google`-matching network request appeared) and by
+   construction (the link is a plain `<a href>`, never clicked by this
+   assistant, never fetched by any code path).
+9. **No unintended data changes**: `donors` (266) and
+   `giving_activities` (5488) row counts identical before and after
+   the entire test. `trips`/`trip_prospects` increased by exactly the
+   3 disposable test records created, then decreased back to the
+   exact original counts (2 trips, 45 prospects) after cleanup
+   (`calendar_event_link_history` -> `calendar_event_links` ->
+   `trip_prospects` -> `interactions` -> `trips`, in that FK order).
+
+### Final report
+
+1. **What was restored**: the "Add to Google Calendar" link and "Use
+   donor address" button, functionally equivalent to commit `adb97c0`,
+   with one real improvement (reads the actual saved meeting duration
+   instead of reintroducing an unsaved duplicate input).
+2. **Were all existing Trip Planner features preserved?** Yes --
+   confirmed by `git diff` scope, the full unchanged test suite
+   passing, and live Staging testing exercising scheduling,
+   rescheduling, status changes, AI meeting notes, and the existing
+   OAuth-sync badge display alongside the restored feature.
+3. **Tests passed**: 249/249 automated test files, `tsc`/build clean,
+   all 9 numbered Staging verification items above confirmed with
+   real, live evidence.
+4. **Are both regression safeguards operational?** Yes -- both are
+   real code, both have passing unit tests, both are wired into the
+   real `package.json` deploy scripts, and the branch-ancestry check
+   was proven directly against the actual 2026-10-25 incident commits.
+5. **What remains unresolved**: nothing in the restored functionality
+   itself. The automatic OAuth-based Calendar sync system remains
+   exactly as before -- implemented, inactive, untouched, not expanded
+   -- per explicit instruction.
+6. **Ready for Production deployment?** Yes, pending your explicit
+   authorization -- `pnpm run deploy:production-independent` (now
+   requires `PRODUCTION_LIVE_COMMIT=<current live commit>` to satisfy
+   the new ancestry check) is the only remaining step; no migration,
+   no credential, and no database change of any kind is needed for
+   this release.
+
+No Production data, deployment, or credential was touched this round.
+No Google Calendar event was created, modified, or deleted at any
+point -- only link `href` attributes were read, never clicked. The
+UNAUTHORIZED stash remains untouched.

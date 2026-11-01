@@ -29,45 +29,75 @@ sufficient on its own for that top tier.
 | Donor profiles, giving history | Implemented, not independently re-verified this round | Core, long-standing feature with extensive historical deployment/test evidence in `docs/AI-HANDOFF.md`; row counts and financial totals read live today (2026-11-01, migration-0048 release) as a side effect of unrelated work, not a dedicated feature check. |
 | Pledges, payments, payment plans, reconciliation | Implemented, not independently re-verified this round | Same as above -- heavily documented history, not freshly re-confirmed against live Production in this specific investigation. |
 | Trip Planner -- meeting scheduling, rescheduling, completion, cancellation | **Verified working in Production** | Live browser test against real `https://shimmydonors.org`, 2026-11-01: real `PATCH` calls returned `200`, direct D1 reads confirmed the resulting `interactions`/`trip_prospects`/`calendar_event_links` rows matched exactly (scheduled -> rescheduled -> completed; separately, scheduled -> cancelled). Disposable test records, fully cleaned up afterward. |
-| Trip Planner -- "Use donor's home address" as meeting location | **Confirmed incomplete/unavailable on current Production** | Was built and Production-verified once (commit `adb97c0`, 2026-10-19), then dropped by an unrelated deployment on 2026-10-25 whose branch never incorporated it (see the AI-HANDOFF.md correction entry). Not present in the current working branch's code at all (`grep` for `googleCalendarTemplateUrl`/`formatDonorAddress` returns zero matches). |
-| Trip Planner -- "Add to Google Calendar" link (template URL, no OAuth) | **Confirmed incomplete/unavailable on current Production** | Same root cause and evidence as the row above -- these two shipped together in the same commit. |
+| Trip Planner -- "Use donor's home address" as meeting location | **Restored and verified working on Staging; NOT yet deployed to Production** | Was built and Production-verified once (commit `adb97c0`, 2026-10-19), dropped by an unrelated deployment on 2026-10-25, then restored 2026-11-01 (see AI-HANDOFF.md's "Restore Original Trip Planner Calendar Features" entry). Live-tested on real Staging: a real donor's exact on-file address populated the location field verbatim; a donor with no address on file showed the clear "No address on file for this donor." message with no error; a manually-added (unlinked) prospect correctly never shows the control at all. Awaiting Production deployment authorization. |
+| Trip Planner -- "Add to Google Calendar" link (template URL, no OAuth) | **Restored and verified working on Staging; NOT yet deployed to Production** | Same restoration as the row above. Live-tested on real Staging for three distinct cases -- a linked donor with a real address and a custom 45-minute duration, a linked donor with a manually-typed location, and an unlinked (manually added) prospect -- all three produced a correct `calendar.google.com/calendar/render` link with the right donor/prospect name, correct UTC start/end times (derived from the real, already-saved meeting duration), and correct location. Zero Google network requests at any point (confirmed both by direct observation and by code: the link is a plain `<a href>`, never fetched). Awaiting Production deployment authorization. |
 | Trip Planner -- automatic OAuth-based Google Calendar sync (create/update/cancel via the Google API) | Implemented, not active | Backend (`lib/calendar/`, `trip-calendar-sync.ts`, Settings UI) fully built and exercised live today against real Production (scheduling/rescheduling/cancelling correctly wrote `calendar_event_links` rows) -- but no real Google OAuth credential exists on Staging OR Production (`wrangler secret list` on both, 2026-11-01, shows only `GMAIL_OAUTH_*`), so no live Google API call has ever actually been made by this system. Deliberately gated behind an explicit owner-approved OAuth setup step that has never been taken, per the design doc's own rollout sequence -- not a bug. |
 | AI Meeting Notes + donor-profile synchronization | Implemented, not independently re-verified this round | The "✦ AI meeting notes" link was observed present and reachable during today's live Trip Planner test, but its own save/sync behavior was not independently exercised this round. |
 | Daily Fundraising Agenda email + donor recommendations | Implemented, not independently re-verified this round | The same-day recovery-window fix was deployed and source-verified earlier this session (commit `1b0b25a`, deployed), but this round did not independently confirm a real 9 AM send has fired and succeeded in Production since. |
 | Production email scheduling (the underlying send guard/cron) | Implemented, not independently re-verified this round | `isRealEmailSendAllowed`'s fail-closed allowlist and the hourly `scheduled()` cron are both confirmed present in the deployed code; not independently re-tested this round. |
 | Backups + restore verification | **Verified working in Production** | Real, independently-confirmed GitHub Actions runs today (2026-11-01): nightly backup (run `41332059400`, success) immediately followed by a monthly restore-verification run (`41332148209`, success) that read-only evidence confirms genuinely used that exact new backup -- decrypt, restore into a scratch D1, integrity/foreign-key checks, schema comparison, and cleanup all succeeded, against the now-corrected Production baseline. |
 
-## Pre-deployment checklist (practical, not a framework)
+## Regression protection -- IMPLEMENTED 2026-11-01, wired into the real deploy process
 
-Run before every Production deployment, in addition to whatever that
-specific release's own task already requires:
+Both safeguards below are real, committed, tested code -- not proposals.
+Both are wired into `package.json`'s `deploy:*-independent` scripts
+themselves, so they run automatically, not as a separate manual step
+someone has to remember.
 
-1. **Ancestor check**: `git merge-base --is-ancestor <current-live-Production-commit> <commit-about-to-deploy>`. If this says the commit about to deploy is NOT a descendant of what's currently live, stop and ask explicitly -- this means some other line of work exists on Production that the new deploy doesn't know about, and deploying anyway will silently drop it, exactly as happened on 2026-10-25.
-2. **Feature fingerprint check** (see below): run it against the freshly built `dist/` before `wrangler deploy`, not after.
-3. **Diff review, not just the new feature**: `git diff <current-live-Production-commit>..<commit-about-to-deploy> --stat` and actually read the file list -- not just confirm the intended change is there, but notice anything conspicuously ABSENT that you'd expect to still be touched/present (e.g., a file you know exists on the live commit but doesn't appear anywhere in the new tree).
-4. Everything this project's deployment entries already do well and should keep doing: record the pre-deploy Worker version as the rollback target, confirm a fresh backup exists, re-run the full test suite and build at the exact commit immediately before deploying, verify live post-deploy.
+### A. `scripts/check-production-feature-fingerprints.mjs`
 
-## Recommended automated regression test (proposed, not yet created)
+Runs automatically as part of `pnpm run deploy:staging-independent` and
+`deploy:production-independent`, immediately after the build and
+`verify-build-manifest.mjs`, before `wrangler deploy`. Two layers, per
+explicit instruction not to rely on text search alone:
 
-**`scripts/check-production-feature-fingerprints.mjs`** -- a single,
-small script, run against a freshly built `dist/` directory:
+1. **Fingerprint check**: one short, distinctive string per feature
+   marked "Verified working" above (`AddToGoogleCalendarLink`, `Use
+   donor address`, `scheduleProspectMeeting`, `completeProspectMeeting`,
+   `runScheduledAgendaSend`), grepped across the freshly built `dist/`.
+   Catches "this code isn't in the bundle at all" -- the exact 2026-
+   10-25 failure mode.
+2. **Behavioral check**: actually RUNS a short list of this project's
+   own real test files (`tests/trip-calendar-link.test.mjs`,
+   `tests/trip-calendar-missing-table-regression.test.mjs`,
+   `tests/d1-restore-order.test.mjs`) as real subprocesses, not merely
+   checking they exist. Catches a fingerprint string surviving in
+   `dist/` while the actual behavior underneath it is broken, which a
+   text search alone cannot.
 
-- For each row in this document marked "Verified working in
-  Production," one short, distinctive source string that must appear
-  somewhere in the compiled bundle (client or server). Examples:
-  `AddToGoogleCalendarLink`, `googleCalendarTemplateUrl`,
-  `CalendarSyncBadge`, `scheduleProspectMeeting`,
-  `recordTripMeetingScheduled`, `D1_RESTORE_DATA_ORDER`,
-  `runScheduledAgendaSend`.
-- Exits non-zero and prints exactly which fingerprint(s) are missing
-  if even one is absent. Never silently passes on a partial match.
-- Wired into the deploy process as one line, immediately after the
-  production build and before `wrangler deploy` -- refuses to deploy
-  on any failure without an explicit, named override.
-- Deliberately NOT a new test framework, not a new CI system, not a
-  feature-flag service -- it reuses the exact manual `grep dist/`
-  technique this project's own deployment history already performs by
-  hand, every time, just made mandatory and automatic.
+Fails loudly and specifically (names exactly which fingerprint or
+which test failed) and refuses to deploy. Unit-tested itself
+(`tests/check-production-feature-fingerprints.test.mjs`, 5 cases
+including a real CLI spawn against a real temp `dist/`).
 
-Not implemented this round -- this is a recommendation awaiting
-approval, consistent with "investigation and documentation first."
+### B. `scripts/check-production-branch-ancestry.mjs`
+
+Runs automatically as part of `deploy:production-independent` (not
+Staging -- this one specifically targets the Production-deployment
+risk). Takes the current live Production commit as an explicit,
+required argument or `PRODUCTION_LIVE_COMMIT` environment variable
+(read from the live Worker's own Data Health page or `wrangler
+deployments list`, the same step every prior Production deployment
+in this project's history already performs by hand) and confirms the
+commit about to be deployed is a real git descendant of it
+(`git merge-base --is-ancestor`). If the two have diverged -- exactly
+what happened on 2026-10-25 -- it refuses to deploy and names both
+commits plus the exact `git diff`/`git log` commands to review what
+would be lost.
+
+**Proven against the real incident**: running this check with the
+actual 2026-10-25 commits (`354b889` as "current Production",
+`58a9c60e` as "candidate") correctly fails with "is NOT a descendant."
+Running it with a genuine descendant pair correctly passes. Unit-
+tested (`tests/check-production-branch-ancestry.test.mjs`, including
+a real CLI spawn against this repository's own real, known-diverged
+history).
+
+### Pre-deployment checklist (practical, not a framework)
+
+The two checks above now cover items 1-2 automatically. What's still a
+human judgment call before every Production deployment:
+
+1. **Diff review, not just the new feature**: `git diff <current-live-Production-commit>..<commit-about-to-deploy> --stat` and actually read the file list -- not just confirm the intended change is there, but notice anything conspicuously ABSENT that you'd expect to still be touched/present.
+2. Everything this project's deployment entries already do well and should keep doing: record the pre-deploy Worker version as the rollback target, confirm a fresh backup exists, re-run the full test suite and build at the exact commit immediately before deploying, verify live post-deploy.
+3. **Add a new fingerprint entry to this document and to `FEATURE_FINGERPRINTS` the same day a new feature is independently verified working** -- the check can only protect what it knows about.

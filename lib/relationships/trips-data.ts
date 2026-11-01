@@ -28,6 +28,7 @@ import {
   planTripMeetingScheduledIntent, reconcileTripMeetingCalendarLink, setCalendarSyncEnabledForUser as setCalendarSyncEnabledForUserRow,
   type CalendarConnectionStatus,
 } from "./trip-calendar-sync.ts";
+import { computeMeetingDurationMinutes } from "./trip-calendar-link.ts";
 import { logger } from "../logger.ts";
 
 // Integration safety (2026-10-19, second follow-up review): bounded
@@ -310,10 +311,24 @@ export type TripMeetingCalendarSummary = { status: "pending" | "synced" | "faile
 // harmless historical record).
 export type TripProspectRecord = {
   id: string; donorId: string | null; isLinked: boolean; donorDisplayName: string; donorCity: string | null; donorState: string | null; donorCode: string | null;
+  // "Use donor address" (restored 2026-11-01, originally commit
+  // `adb97c0`, 2026-10-19 -- see docs/AI-HANDOFF.md) -- the donor's own
+  // already-on-file street address and ZIP, read-only, never fetched or
+  // looked up anywhere new. Always null for an unlinked (manually
+  // added) prospect, which has no donor row at all.
+  donorAddressLine1: string | null; donorPostalCode: string | null;
   manualPhone: string | null; manualEmail: string | null; manualNotes: string | null; manualRegionLabel: string | null;
   addedMethod: AddedMethod; status: TripProspectStatus; selectedAt: number;
   suggestedReason: string | null; suggestedScore: number | null; suggestedGeneratedAt: number | null;
   manualRank: number | null; meetingAt: number | null; meetingLocation: string | null; nextAction: string | null; trip_notes: string | null;
+  // "Add to Google Calendar" (restored 2026-11-01) -- the REAL,
+  // already-saved meeting duration in minutes, derived from
+  // `interactions.end_at - meeting_at` for a linked prospect with a
+  // real scheduled interaction; null for an unlinked prospect (no
+  // interaction exists) or any meeting with no recorded end time, in
+  // which case the caller falls back to
+  // DEFAULT_GOOGLE_CALENDAR_DURATION_MINUTES (see trip-calendar-link.ts).
+  meetingDurationMinutes: number | null;
   linkedInteractionId: string | null; crossTripConflicts: CrossTripConflict[]; calendarSync: TripMeetingCalendarSummary;
 };
 
@@ -331,6 +346,7 @@ export async function listTripProspects(userId: string, tripId: string): Promise
   // donor join, since an unlinked row has no donor row to check against.
   const prospectRows = await env.DB.prepare(`SELECT tp.id, tp.donor_id, COALESCE(d.display_name, tp.manual_name) AS display_name,
         COALESCE(d.city, tp.manual_city) AS city, d.state AS donor_state, d.external_id, d.donor_code,
+        d.address_line_1 AS donor_address_line_1, d.postal_code AS donor_postal_code,
         tp.manual_region_id, tp.manual_phone, tp.manual_email, tp.manual_notes,
         tp.added_method, tp.status, tp.selected_at, tp.suggested_reason, tp.suggested_score, tp.suggested_generated_at, tp.manual_rank,
         tp.meeting_at, tp.meeting_location, tp.next_action, tp.trip_notes, tp.linked_interaction_id
@@ -341,7 +357,8 @@ export async function listTripProspects(userId: string, tripId: string): Promise
       ORDER BY (tp.manual_rank IS NULL), tp.manual_rank, tp.suggested_score IS NULL, tp.suggested_score DESC, display_name`)
     .bind(tripId, userId).all<{
       id: string; donor_id: string | null; display_name: string; city: string | null; donor_state: string | null;
-      external_id: string | null; donor_code: string | null; manual_region_id: string | null; manual_phone: string | null; manual_email: string | null; manual_notes: string | null;
+      external_id: string | null; donor_code: string | null; donor_address_line_1: string | null; donor_postal_code: string | null;
+      manual_region_id: string | null; manual_phone: string | null; manual_email: string | null; manual_notes: string | null;
       added_method: AddedMethod; status: TripProspectStatus; selected_at: number; suggested_reason: string | null; suggested_score: number | null; suggested_generated_at: number | null;
       manual_rank: number | null; meeting_at: number | null; meeting_location: string | null; next_action: string | null; trip_notes: string | null; linked_interaction_id: string | null;
     }>();
@@ -396,13 +413,31 @@ export async function listTripProspects(userId: string, tripId: string): Promise
     return { status, viewUrl };
   };
 
+  // "Add to Google Calendar" (restored 2026-11-01) -- the real, already-
+  // saved meeting end time for every linked interaction on this page,
+  // same "separate query, never a speculative JOIN" convention as
+  // crossTripConflicts/calendarSync above. An unlinked prospect has no
+  // interaction at all and is simply absent from this map -- its
+  // duration always falls back to the fixed default (see
+  // computeMeetingDurationMinutes in trip-calendar-link.ts).
+  const endAtByInteraction = new Map<string, number>();
+  if (interactionIds.length > 0) {
+    const interactionRows = await env.DB.prepare(`SELECT id, end_at FROM interactions WHERE id IN (${interactionIds.map(() => "?").join(",")})`)
+      .bind(...interactionIds).all<{ id: string; end_at: number | null }>();
+    for (const row of interactionRows.results) if (row.end_at !== null) endAtByInteraction.set(row.id, row.end_at);
+  }
+
   return prospectRows.results.map((row) => ({
     id: row.id, donorId: row.donor_id, isLinked: row.donor_id !== null,
     donorDisplayName: row.display_name, donorCity: row.city, donorState: row.donor_state, donorCode: row.external_id || row.donor_code,
+    donorAddressLine1: row.donor_address_line_1, donorPostalCode: row.donor_postal_code,
     manualPhone: row.donor_id === null ? row.manual_phone : null, manualEmail: row.donor_id === null ? row.manual_email : null, manualNotes: row.donor_id === null ? row.manual_notes : null,
     manualRegionLabel: row.donor_id === null ? (travelRegionById(row.manual_region_id)?.label ?? null) : null,
     addedMethod: row.added_method, status: row.status, selectedAt: row.selected_at, suggestedReason: row.suggested_reason, suggestedScore: row.suggested_score, suggestedGeneratedAt: row.suggested_generated_at,
     manualRank: row.manual_rank, meetingAt: row.meeting_at, meetingLocation: row.meeting_location, nextAction: row.next_action, trip_notes: row.trip_notes,
+    meetingDurationMinutes: row.linked_interaction_id && endAtByInteraction.has(row.linked_interaction_id) && row.meeting_at !== null
+      ? computeMeetingDurationMinutes(row.meeting_at, endAtByInteraction.get(row.linked_interaction_id)!)
+      : null,
     linkedInteractionId: row.linked_interaction_id, crossTripConflicts: row.donor_id !== null ? (conflictsByDonor.get(row.donor_id) ?? []) : [], calendarSync: calendarSyncFor(row.linked_interaction_id),
   }));
 }
