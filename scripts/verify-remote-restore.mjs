@@ -53,9 +53,8 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ACCOUNT_CONFIGURATION_TABLES, PRODUCTION_BASELINE_HASH, PRODUCTION_BASELINE_TABLES, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
+import { ACCOUNT_CONFIGURATION_TABLES, PRODUCTION_BASELINE_HASH, PRODUCTION_BASELINE_OBJECTS, PRODUCTION_BASELINE_TABLES, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
 import { STAGING_BASELINE_HASH, STAGING_BASELINE_OBJECTS, STAGING_BASELINE_TABLES } from "../lib/data-health/staging-baseline.ts";
-import { PRODUCTION_BASELINE_OBJECTS } from "../lib/data-health/production-baseline.ts";
 import { findInsertedRow, planD1Restore } from "../lib/operations/d1-restore-order.ts";
 
 // Baseline selection by DATABASE_NAME (2026-11-01, "both monthly restore-verify
