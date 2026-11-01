@@ -58513,3 +58513,137 @@ Nothing deployed, merged, or pushed. No Production or Staging database
 modified (every check above was read-only). No credential rotated. The
 UNAUTHORIZED stash remains untouched. The prepared branch is local-only,
 awaiting review.
+
+## Restore-Verification Baseline Split + Restore-Order Fix (2026-11-01) -- PREPARED, VERIFIED, NOT MERGED
+
+Completed Option A (separate Staging/Production restore-verify baselines)
+plus a second, more fundamental bug the user found by independently
+running Production's real restore-verification workflow (run
+41325557555). Both fixed on the same prepared branch, `main`-based,
+local-only: `fix/d1-restore-sync-0048-calendar-sync` (base `origin/main@
+f8e1581`), now 5 commits (`2e09a31`, `2c08d8d`, `b60676a`, `0ec992b`),
+worktree at `scratchpad/restore-sync-check/main-checkout`.
+
+1. **Restore-order crash, fixed.** Production's real restore-verify
+   failed with `planD1Restore found INSERT statements for table(s) not
+   present in the dependency order: trip_destination_regions` -- a hard
+   crash during restore PLANNING, before schema comparison even runs.
+   Root cause: `main`'s `lib/operations/staging-reset.ts` (last synced
+   2026-10-22, through migration 0053) entirely lacked
+   `trip_prospect_commitments` (0054) and `trip_destination_regions`
+   (0055), which didn't exist yet at that sync. Fixed by adding both at
+   the correct FK-respecting position (verified against the real,
+   already-live-proven ordering on `trip-planner-multi-region-manual-
+   prospects`'s own `staging-reset.ts`, and independently against real
+   `PRAGMA foreign_key_list` output from live Production):
+   `trip_prospect_commitments` -> `trip_financial_attributions` ->
+   `trip_prospects` -> `trip_destination_regions` -> `trips`.
+   `lib/operations/d1-restore-order.ts` needed no direct edit --
+   confirmed its `D1_RESTORE_DATA_ORDER` derives via a plain
+   `[...STAGING_RESET_TABLE_ORDER].reverse()`.
+2. **New finding, independently verified against live Production
+   (2026-11-01, read-only `sqlite_schema`/PRAGMA queries): Production
+   genuinely has migrations 0054 and 0055 live** (`trip_destination_
+   regions`, `trip_prospect_commitments`) -- a real, deliberate,
+   already-authorized and already-verified Production deployment from
+   earlier in this project's history (see this doc's own entries around
+   "Result: 12 statements, 48 rows changed ... success" for 0054's
+   application evidence and the matching 0055 backfill confirmation),
+   not a mistake, despite those two migration files' own header
+   comments ("STAGING ONLY -- not applied to Production as part of this
+   round") describing their state only as of when they were written.
+   Production still does NOT have migration 0048 (Google Calendar sync)
+   or anything 0049-related. This **overrides the earlier instruction to
+   preserve Production's manifest completely unchanged** -- `production-
+   baseline/schema-manifest.json`/`lib/data-health/production-
+   baseline.ts` were updated to add 0054+0055 (54 source migrations now,
+   up from 52; DDL for both new tables and their 4 indexes pulled
+   directly from live Production and independently re-verified here),
+   so Production's restore-verify can actually reach and pass its
+   schema-comparison step too, not just stop crashing at the planning
+   step. The automated patch generator correctly refuses this one too
+   (new tables, same reason as 0048) -- done by hand, same process.
+3. **Separate Staging baseline, built from real live data, not a
+   migration replay.** New `production-baseline/staging-schema-
+   manifest.json` + `lib/data-health/staging-baseline.ts`, mirroring
+   Production's shape but reusing its comparison machinery
+   (`compareSchemaObjects`/`stagingSchemaObjects`/`normalizeSchemaSql`
+   are shared, not duplicated). `ddlTopology` is the actual, independently
+   -verified live Staging schema (65 tables including the bootstrap
+   artifact, 99 indexes) -- not reconstructed by replaying `drizzle/`
+   files in-memory, per this round's explicit "do not assume every
+   migration on the feature branch has been applied" instruction. One
+   real finding from that rigor: migration 0048 turned out to be only
+   **partially** applied to Staging -- `calendar_event_links`/
+   `calendar_event_link_history` and the `interactions`/`users` column
+   additions are live, but `trip_prospects.all_day`/`all_day_date` are
+   not (migration 0054's later table-rebuild of `trip_prospects` didn't
+   carry those two columns forward -- confirmed directly against the
+   real live `trip_prospects` DDL, independently re-checked here).
+   0048 is deliberately left out of Staging's own `sourceMigrations`
+   list as a result (count: 52, same as Production's), since neither
+   "applied" nor "unapplied" would be an honest label -- the live
+   `ddlTopology` itself is unaffected by this and reflects reality
+   either way.
+4. **Baseline selection wired into `scripts/verify-remote-restore.mjs`**
+   by the existing `DATABASE_NAME` job-level env var both workflows
+   already set (`fundraising-os-staging-db` / `fundraising-os-
+   production-db`) -- fails loudly, never silently defaults, on any
+   other value. No workflow YAML change was needed.
+5. **Regression tests added**: (a) each environment's real baseline
+   matches itself cleanly; (b) Staging's real schema still correctly
+   reports the calendar-table differences against the PRODUCTION
+   baseline (proves the split isn't merely "the check was disabled");
+   (c) a genuine injected drift still fails against either baseline;
+   (d) every real table from both live databases is present in the
+   restore order (the exact class of bug that caused this round's real
+   crash, now covered so it can't silently recur).
+6. **Verified independently**, not just taken on the preparer's word:
+   re-ran `main`'s full test suite (164/164, up from 155 -- 9 new tests)
+   and build on the actual prepared branch; cross-checked the restore-
+   order diff, the `.reverse()` derivation claim, the exact DDL added to
+   Production's manifest (byte-for-byte against this round's own live
+   Production query), and the `trip_prospects.all_day` partial-
+   application finding, all directly against independently-run,
+   read-only live-database queries. Fixed one small cosmetic issue
+   found during review (a duplicated import in `verify-remote-restore.mjs`,
+   commit `0ec992b`) -- no behavior change, re-verified 164/164 + clean
+   build after.
+7. **`scripts/verify-remote-restore.mjs`'s scratch-database create/
+   delete `try`/`finally` protections were not touched** -- confirmed;
+   the bug was entirely in which table list gets passed to the planner,
+   never in scratch-database lifecycle management.
+8. **Missed-run detection: recommendation only, not implemented.**
+   `lib/data-health/model.ts`'s `restoreVerificationCheck()` already
+   has the needed freshness logic (40-day healthy / 60-day critical
+   thresholds); `lib/backup-alert/run.ts`'s existing hourly watchdog
+   already fetches the needed data. The only gap is that nobody gets
+   *emailed* about restore-verification staleness today -- it's
+   dashboard-only. Not implemented because it genuinely needs a new,
+   small D1 table (`backup_alert_state` is shaped for exactly one
+   incident kind already) -- i.e. its own migration, which crosses from
+   "reuse existing infrastructure" into "needs its own deploy," past
+   this round's scope. Recommended: a `restore_alert_state` table
+   (same shape) + a new `evaluateRestoreVerificationAlert()` pure
+   decision function mirroring `evaluateBackupAlert`'s shape, called
+   from the same existing hourly tick. A real, well-scoped small
+   feature for a future round, deliberately not built here.
+
+**Still open, needing your decision, not a default:** none -- the
+baseline-split architectural question from the prior entry is now
+resolved by this round's implementation (Option A, as instructed).
+
+**Not done (explicitly out of scope / blocked):** manually running
+Production's real restore-verification workflow from this session --
+no `gh` CLI or GitHub API token is available in this environment, and
+the `BACKUP_ENCRYPTION_PASSPHRASE_PRODUCTION` secret needed to replicate
+the decrypt+restore step locally is correctly not something this session
+has or should ask for. The user already ran it independently (run
+41325557555) and supplied its real failure, which is what this entry
+fixes.
+
+Nothing deployed, merged, or pushed. No Production or Staging database
+modified (every verification step above was read-only). No credential
+rotated or requested. No Staging migration promoted to Production. The
+UNAUTHORIZED stash remains untouched. The prepared branch and its
+worktree are local-only, awaiting review.
