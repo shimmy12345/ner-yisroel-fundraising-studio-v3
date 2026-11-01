@@ -58423,3 +58423,93 @@ recorded for reference only, since no issue was observed.
   application currently has (confirmed earlier: `STAGING_OWNER_EMAIL`/
   `TEAM_DOMAIN`/`POLICY_AUD` all scope to this one authorized owner).
   There is no other Production user to separately re-check.
+
+## Monthly Restore Verification Failure Investigation (2026-11-01) -- PARTIAL FIX PREPARED, NOT MERGED; ONE OPEN DECISION
+
+Investigated a real GitHub Actions failure (Staging's monthly restore
+verification, run 41322245940, fired ~6.5 hours late at 15:38 UTC on its
+first-ever scheduled-cron firing and failed in `scripts/check-migration-
+sync.mjs`, a cheap `main`-only preflight that runs before the real
+restore/decrypt steps). The failure reported two migrations "missing
+from main": `0048_google_calendar_sync.sql` and
+`0049_fix_calendar_schema_text_staging_repair.sql`. Root-caused both,
+independently verified (real read-only D1 queries, direct git history
+inspection, re-running the actual scripts), not just taken on faith from
+the CI log excerpt:
+
+1. **0049 was a false positive -- a real bug in `check-migration-
+   sync.mjs`, now fixed.** That file lives at `drizzle/pending-review/
+   0049_fix_calendar_schema_text_staging_repair.sql` -- a gated repair
+   migration applied to Staging only via an explicit, confirmation-
+   string-gated `workflow_dispatch` (`apply-0049-calendar-schema-repair-
+   staging` job), never part of the normal migration sequence.
+   `check-migration-sync.mjs`'s `canonicalMigrationFiles()` recursively
+   lists `drizzle/` and filters only by filename shape
+   (`/^\d{4}_.+\.sql$/`), so it wrongly swept this file in too, unlike
+   `check-main-restore-sync.mjs`'s own `generateBaseline()`, which
+   correctly excludes pending-review migrations. Fixed (one filter
+   clause excluding any path with a `pending-review` directory
+   component) on a new, **local-only, unpushed** branch
+   `fix/d1-restore-sync-0048-calendar-sync` (based on `origin/main@
+   f8e1581`, commit `2e09a31`), worktree at `scratchpad/restore-sync-
+   check/main-checkout`. Verified both via `main`'s own `npm test`
+   (155/155, unchanged) and `npm run build` (clean), and by independently
+   re-running `node scripts/check-migration-sync.mjs` on that branch:
+   drops from 2 missing migrations to exactly 1 (0048 only).
+2. **0048 is real, but NOT a bug -- it's an already-known, deliberately
+   accepted divergence from a prior round (`main` commit `f8e1581`,
+   2026-10-22, "...and correct a stale 0048 assumption"), re-confirmed
+   here independently against live Production D1.**
+   `production-baseline/schema-manifest.json` and `lib/data-health/
+   production-baseline.ts` on `main` are explicitly scoped to describe
+   **Production's** real, verified schema (not Staging's) -- by design,
+   per that commit's own extensive header comment. `scripts/verify-
+   remote-restore.mjs` (the one script both the Staging and Production
+   monthly restore-verify workflows call) always compares the restored
+   backup's live schema against this one shared manifest via
+   `compareSchemaObjects()`, with no branching by `DATABASE_NAME`. On
+   2026-10-22, live read-only Production queries confirmed 0048 (Google
+   Calendar sync: `calendar_event_links`/`calendar_event_link_history`,
+   plus new `interactions`/`users` columns) had reached Staging only, not
+   Production, so that round deliberately removed 0048 from the shared
+   manifest to keep Production's restore-verify correct -- explicitly
+   accepting, in writing, that Staging's own monthly restore-verify would
+   keep failing on 0048 until 0048 actually ships to Production. Nothing
+   has changed that tradeoff since; Production has since received
+   0050-0053 (confirmed already synced) but still not 0048.
+   **This is the one open item needing a decision, not an automated or
+   unilateral fix:** either (a) give Staging's restore-verify its own,
+   separate baseline file so both jobs can pass correctly on their own
+   real schemas going forward (a real architectural change -- more code,
+   a second manifest, `verify-remote-restore.mjs` picking one by
+   `DATABASE_NAME`), or (b) accept the status quo and let Staging's
+   monthly check stay red until 0048 reaches Production. Deliberately
+   not picked here, per this round's explicit "smallest safe change" /
+   "no unnecessary changes" scope -- flagging for your call rather than
+   guessing. Restore-order placement itself needs no change either way:
+   `calendar_event_links`/`calendar_event_link_history` are already
+   correctly positioned in `main`'s `staging-reset.ts`/`d1-restore-
+   order.ts` (after `trips`, before `interactions`), matching their real
+   FKs (`calendar_event_links.interaction_id -> interactions.id`,
+   `.user_id -> users.id`; `calendar_event_link_history.link_id ->
+   calendar_event_links.id`).
+3. **Production's own monthly restore-verification did not run at all on
+   2026-11-01**, despite its workflow file, cron (`20 9 1 * *`), and
+   default-branch presence on `main` all being correctly configured
+   (confirmed unchanged since 2026-10-11 -- not a late-arriving-file
+   issue). No attempt record exists for today at all (the status-publish
+   step runs `if: always()`, so a real run -- success or failure -- would
+   always have written one). Staging's equivalent job did fire, but
+   ~6.5 hours after its own scheduled time. Both point to GitHub Actions'
+   documented scheduled-workflow delay/drop behavior under load, not a
+   repository configuration bug -- nothing found on the repo side
+   explains a dropped firing, and GitHub's own internal scheduler/queue
+   state isn't something this investigation can see directly. Recommend
+   a manual `workflow_dispatch` of the Production workflow to get a
+   current result, and watching whether its cron fires reliably in
+   future months.
+
+Nothing deployed, merged, or pushed. No Production or Staging database
+modified (every check above was read-only). No credential rotated. The
+UNAUTHORIZED stash remains untouched. The prepared branch is local-only,
+awaiting review.
