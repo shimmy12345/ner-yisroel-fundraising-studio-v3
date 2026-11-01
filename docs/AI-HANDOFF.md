@@ -59058,3 +59058,126 @@ Every diagnostic and rehearsal this round ran read-only or purely
 in-memory. No migration applied, no Worker deployed, no database
 record modified, no credential rotated. The UNAUTHORIZED stash remains
 untouched.
+
+## Authorized Release EXECUTED: Migration 0048 Applied to Production + Both Baseline Fixes Merged (2026-11-01)
+
+Executed the approved release plan, steps 1-5 of 6 (step 6 is this
+entry). No Worker deployed (not authorized for this release).
+
+1. **Merged `fix/production-baseline-trip-prospects-0054-rebuild`**
+   (`ac1ce27934bb77a9ccce83dbf9962ab3b99fec04`) to `main` -- fast-
+   forward, zero conflicts, exactly the 2 reviewed files. 166/166
+   tests, build clean, fresh `npm install`.
+2. **Production readiness confirmed** before touching anything: exact
+   D1 identity verified live (`a51c6571-ae16-4614-aa9a-08f8e6be3ecd`,
+   62 tables); user independently triggered both the nightly backup
+   (run `41332059400`, success) and the monthly restore-verification
+   workflow (run `41332148209`, "D1 monthly restore verification
+   (Production)" #9, success, 4m17s) -- **independently re-confirmed
+   here**, not taken on word alone: the published, read-only
+   `restore-latest-success.json` status file shows
+   `verifiedBackupObjectKey` exactly matching the just-created backup's
+   own key (`daily/fundraising-os-production-db-20261101T173340Z.sql.gz.gpg`),
+   proving the restore-verify genuinely used the NEW backup, not a
+   stale one; `restore-latest-attempt.json` shows `attemptStatus:
+   "success"`; both GitHub Actions run pages independently fetched and
+   confirmed (commit `ac1ce27` on `main`, manual dispatch, matching
+   durations). Live schema re-checked immediately before the migration
+   -- zero drift from the rehearsed fixture; migration 0048 confirmed
+   not applied, not even partially (every one of its 7 new columns and
+   2 new tables individually re-verified absent).
+3. **Migration `drizzle/0048_google_calendar_sync.sql` applied,
+   completely unmodified, to real `fundraising-os-production-db`**:
+   `wrangler d1 execute ... --file=drizzle/0048_google_calendar_sync.sql`.
+   13 statements, 18.47ms, 17 rows written, `num_tables` 62 -> 64.
+   Verified immediately after: both new tables + all 4 new indexes
+   present; all 7 new columns present on `interactions`/
+   `trip_prospects`/`users`; `PRAGMA foreign_key_check` zero
+   violations (`PRAGMA integrity_check` cannot be run directly against
+   a live, non-scratch D1 database via this CLI path -- Cloudflare's
+   API returns `not authorized: SQLITE_AUTH` for that specific pragma
+   in this context; the real, full integrity_check proof is the
+   restore-verification workflow run, see below); row counts for
+   `donors`/`giving_activities`/`pledge_payment_plans`/`trips`/
+   `trip_prospects`/`interactions`/`users` all identical before/after
+   (297/5960/47/3/50/211/1); a financial fingerprint
+   (`SUM(paid_cents)`/`SUM(balance_cents)` across all 5960 giving rows:
+   403713493/34312882) identical before/after; every existing user's
+   `calendar_sync_enabled` confirmed `0` (the only real user: `0`, not
+   enabled).
+4. **Merged `fix/production-baseline-post-0048-migration`**
+   (`8df1229600de8fa15b9fbc0eafdb3572ec110156`) to `main` immediately
+   after -- fast-forward, 166/166 tests, build clean, fresh `npm
+   install`. Before pushing, independently regenerated the live
+   post-migration Production schema (162 objects) and diffed it
+   byte-for-byte against the merged manifest's own `ddlTopology`: exact
+   match, zero mismatches either direction.
+5. **Live Trip Planner workflows tested end to end against real
+   Production, using disposable test records, then fully cleaned up**:
+   created a throwaway trip ("TEST - Calendar Sync Verification -
+   DELETE ME"), added two REAL existing donors (Rabbi & Mrs. Yehuda
+   Fried; Mr. & Mrs. Mordechai Schwartz) as linked prospects (their own
+   donor/giving records were never touched -- only new, temporary
+   `trip_prospects`/`interactions`/`calendar_event_links` rows were
+   created, all later deleted). Via the live, authenticated browser
+   session against `https://shimmydonors.org`:
+   - **Scheduled** a meeting for Fried: `PATCH .../prospects/<id>` ->
+     200. Confirmed via direct DB read: `calendar_event_links` row
+     created, `desired_state: "present"`, `sync_status: "pending"`.
+   - **Rescheduled** it to a new time: second `PATCH` -> 200.
+     `desired_revision` advanced (1 -> 2), confirming the real intent
+     is re-decided, not cached.
+   - **Completed** it (after correctly hitting, then fixing, an
+     unrelated 422 -- the app correctly refused to mark a FUTURE
+     meeting completed, exactly as designed; retried with a past
+     timestamp): `PATCH` -> 200. `desired_revision` -> 3,
+     `trip_prospects.status: "meeting_completed"`.
+   - **Cancelled** a separately scheduled meeting for Schwartz (status
+     -> Declined): `PATCH` -> 200. Confirmed via direct DB read:
+     `calendar_event_links.desired_state: "absent"`,
+     `interactions.source` correctly prefixed `cancelled:`,
+     `trip_prospects.status: "declined"`.
+   - **Zero unintended Google Calendar network activity**: both test
+     links stayed `sync_status: "pending"` throughout (consistent with
+     `calendar_sync_enabled = 0`); `read_network_requests` filtered for
+     `google` returned zero matches across the whole session; zero
+     console errors.
+   - **Cleanup**: the browser tab became unresponsive partway through
+     manual cleanup (a tooling issue, not an application one -- the
+     Worker itself never errored) -- completed cleanup instead via
+     precise, scoped, read-verified SQL deletes against only the exact
+     test IDs created (`calendar_event_link_history` -> 3 rows,
+     `calendar_event_links` -> 2 rows, `trip_prospects` -> 2 rows,
+     `interactions` -> 2 rows, `trips` -> 1 row). Re-confirmed
+     afterward: every row count and the financial fingerprint above
+     are exactly back to their pre-release values -- real donor data
+     was never at risk at any point (only new, temporary rows existed
+     and were removed; nothing pre-existing was ever modified).
+6. **Automated tests/build re-run fresh, post-release**: application
+   branch 246/246 test files, `tsc` clean. `scripts/check-main-
+   restore-sync.mjs` (run from this branch) now reports main in sync
+   on migration COUNT (0048 is tracked), with one remaining, already-
+   documented, EXPECTED difference: `interactions`/`trip_prospects`
+   column definitions, because this branch's own naive replay assumes
+   Staging's shape (0048 fully intact) while main's baseline now
+   correctly reflects Production's real, freshly-migrated shape
+   (which, unlike Staging, does have `trip_prospects.all_day`/
+   `all_day_date` intact -- see the prior round's entry on that
+   asymmetry). Not a new problem; not addressed here.
+
+**Still needed to fully close this release (Step 6's two remaining
+items)**: a POST-migration run of the Production monthly restore-
+verification workflow has not yet happened -- the run referenced in
+step 2 above (`41332148209`) completed at 17:38 UTC, which was
+**before** the 17:52 UTC migration apply, so it proves the backup/
+restore mechanism itself works, not that it passes cleanly against
+the NEW post-migration schema. This assistant has no `gh` CLI or
+GitHub API token in this sandbox and cannot trigger that workflow
+itself -- same limitation disclosed earlier in this investigation.
+Asked the user to trigger it once more, post-migration, for the final,
+complete confirmation this release's Step 6 requires.
+
+No Worker deployed. No donor, financial, pledge, or trip record
+altered beyond the authorized migration and the disposable test
+records created and then fully removed. No credential rotated. The
+UNAUTHORIZED stash remains untouched.
