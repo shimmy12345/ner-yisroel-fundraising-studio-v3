@@ -58647,3 +58647,92 @@ modified (every verification step above was read-only). No credential
 rotated or requested. No Staging migration promoted to Production. The
 UNAUTHORIZED stash remains untouched. The prepared branch and its
 worktree are local-only, awaiting review.
+
+## Restore-Verification Fixes: Pushed for Review, Then Merged to Main (2026-11-01) -- RELEASED
+
+The branch above (`fix/d1-restore-sync-0048-calendar-sync`, final commit
+`0ec992b9909a8708e48b0709f50e075f950fd3ea`) was pushed to GitHub for
+independent review (pre-push check: confirmed exactly the 9 reviewed
+files, no secrets, and reverted one unrelated line-ending-only diff in
+`public/runtime-config.js` that a local `npm run build` run had produced
+as a side effect -- not part of the actual change). After review and
+explicit authorization, merged to `main`:
+
+- Confirmed the remote branch was still exactly at `0ec992b` (no drift
+  since the push) and still exactly the same 9 files, before merging.
+- Re-verified `npm test` (164/164) and `npm run build` clean, in a
+  **fresh worktree with a fresh `npm install`** (not just the
+  already-verified worktree) -- so this is a from-scratch confirmation
+  of a clean checkout of `main` plus this change, not a reuse of
+  already-warm state. Reverted the same `public/runtime-config.js`
+  build-artifact diff again before merging -- confirmed it is a build
+  side effect only (no content change, line-endings only), not anything
+  this change touches.
+- Fast-forward merge (`origin/main@f8e1581` -> `0ec992b`, no conflicts,
+  exactly the 9 expected files) -- pushed directly to `main`.
+- **`main` is now at `0ec992b9909a8708e48b0709f50e075f950fd3ea`.**
+  Confirmed both `.github/workflows/d1-restore-verify-monthly.yml` and
+  `d1-restore-verify-monthly-production.yml` on `main` already set
+  `DATABASE_NAME` as a job-level env var (`fundraising-os-staging-db` /
+  `fundraising-os-production-db` respectively) and both already call
+  `node scripts/verify-remote-restore.mjs -- latest.sql` -- the now-
+  updated script that reads that exact variable to select the right
+  baseline. No workflow YAML change was needed or made; both jobs will
+  pick up the fix automatically on their next run.
+
+**No Worker deployed, no migration applied, no live database modified,
+no credential rotated** -- this release only changed the `main`-only
+restore-verification "ops ledger" files (schema manifests, the restore
+planner's table-order list, the comparison script, and tests); it has
+no effect on, and did not touch, the actual Production or Staging
+Cloudflare Worker deployments or their D1 databases.
+
+### How to manually run both monthly restore-verification workflows now
+
+Via the GitHub web UI: **Actions** tab -> select **"D1 monthly restore
+verification"** (Staging) or **"D1 monthly restore verification
+(Production)"** in the left sidebar -> **Run workflow** -> branch
+`main` -> **Run workflow**. Each takes a few minutes; status/results
+appear as a normal Actions run, and each also publishes a status JSON
+to its own R2 status bucket (`restore-latest-attempt.json`/
+`restore-latest-success.json`) readable the same read-only way this
+investigation already did.
+
+Via `gh` CLI (if available in your own environment -- this assistant's
+sandbox has neither `gh` nor a GitHub API token, which is why every
+check in this investigation was read-only against R2/D1 directly
+instead):
+```
+gh workflow run d1-restore-verify-monthly.yml --ref main
+gh workflow run d1-restore-verify-monthly-production.yml --ref main
+```
+
+### Unresolved, deliberately NOT repaired in this release: `trip_prospects.all_day` / `all_day_date` missing on Staging
+
+Migration `0048_google_calendar_sync.sql` added `all_day`/`all_day_date`
+columns to both `interactions` and `trip_prospects`. A later migration,
+`0054_trip_manual_prospects.sql`, rebuilt `trip_prospects` (SQLite's
+standard pattern for dropping a `NOT NULL` constraint -- `CREATE
+__new_trip_prospects` / copy / drop / rename) with an explicit column
+list that did **not** include `all_day`/`all_day_date` -- so those two
+columns were silently dropped from `trip_prospects` on real Staging at
+that point, even though they remain present on `interactions`.
+Confirmed directly against live Staging's real `trip_prospects` DDL
+(read-only `sqlite_schema` query, 2026-11-01): the columns are genuinely
+absent today. This is a real, live schema inconsistency on
+`fundraising-os-staging-db` itself -- not a restore-verification
+tooling bug, and not something this release's baseline-split work
+fixes or should fix (the new Staging baseline correctly reflects this
+as the current ground truth, since its whole purpose is to describe
+Staging's *actual* schema, not an idealized one). **Left unrepaired by
+explicit instruction.** Any future round that wants to restore those
+columns on Staging needs its own authorized migration + verification
+round, separate from backup/restore tooling work -- first confirming
+whether anything on Staging actually still expects `trip_prospects.
+all_day`/`all_day_date` to exist (the Google Calendar sync feature's
+own code should be checked for any read/write of those two specific
+columns before deciding whether this needs a fix at all, or is simply
+dead schema from an abandoned design direction).
+
+Nothing else changed in this round. No Production or Staging data
+touched. The UNAUTHORIZED stash remains untouched.
