@@ -59181,3 +59181,160 @@ No Worker deployed. No donor, financial, pledge, or trip record
 altered beyond the authorized migration and the disposable test
 records created and then fully removed. No credential rotated. The
 UNAUTHORIZED stash remains untouched.
+
+## Investigation: "Missing" Meeting-Planning Features on Production (2026-11-01) -- NEITHER WAS EVER COMPLETED; NEITHER REGRESSED
+
+Investigated two reported-missing Trip Planner features: (1) selecting
+a donor's home address as the meeting location, (2) creating/syncing
+the meeting with Google Calendar. **Both were designed but never
+fully completed anywhere, on any environment -- not removed, not
+hidden, not disabled by a flag.** Read-only investigation only;
+nothing changed, nothing deployed.
+
+### Feature 1: "Fill in [Donor]'s address" meeting-location button -- never built
+
+`docs/GOOGLE-CALENDAR-INTEGRATION-DESIGN.md` section 9 explicitly
+specifies it as a proposed default: "Location: manual entry only, with
+an explicit, one-click 'Fill in [Donor]'s address' button the owner
+must actively press -- never auto-populated." A repo-wide search for
+any implementation (`Fill in.*address`, `fillDonorAddress`,
+`donorAddress`, or any button text close to it) across `app/` and
+`lib/` returns **zero matches**. The scheduling form
+(`TripDashboardExperience.tsx`) has only ever had a plain free-text
+"Location (optional)" field -- confirmed directly in today's own live
+Production testing. The data layer doesn't even plumb a donor's
+address to this component: the trip-prospect queries in
+`trips-data.ts` select `state` (for region-matching) but never
+`address_line_1`/`city`/`postal_code`/`country`. This was specified in
+the design doc and never implemented, on any branch, at any point --
+not a regression.
+
+### Feature 2: Google Calendar event creation/sync -- backend built, Production credentials never provisioned (by design, pending approval)
+
+The design doc's own "Next bounded phase" section (2026-10-18) laid
+out an explicit 5-step rollout: (1) D1 store adapter, (2) real Google
+HTTP client, (3) wire into the Trip Planning routes, (4) Settings UI,
+(5) "**Only then**: the Google Cloud/OAuth setup and a real,
+Staging-only, disposable-test-calendar live-verification pass --
+still gated behind a separate, explicit owner review and approval
+before any Production credential or deployment." Steps 1-4 were
+completed in commit `9016096` ("Trip Planning: wire confirmed, timed
+meetings to Google Calendar sync (narrowed first release)") -- whose
+own commit message states explicitly: "No credentials exist on any
+environment yet, so no live Google call has occurred." **Step 5 was
+never taken, on either environment**: confirmed via `wrangler secret
+list` against both `wrangler.production.jsonc` and `wrangler.
+staging.jsonc` -- each has only `GMAIL_OAUTH_CLIENT_ID`/`_SECRET`/
+`_REFRESH_TOKEN` (the separate, already-live Daily Agenda email
+feature); neither has `GOOGLE_CALENDAR_OAUTH_CLIENT_ID`/`_SECRET`/
+`_REFRESH_TOKEN` at all. Every existing automated proof of this
+feature (`tests/trip-calendar-sync-integration.test.mjs`) runs against
+a STATEFUL SIMULATED Google calendar, never a real Google API call --
+consistent with that deliberate, never-completed step 5.
+
+**Why it's "disabled" in Production, precisely**: `users.
+calendar_sync_enabled` defaults to `0`/false (migration 0048's own
+explicit design -- "calendar sync is opt-in, never active merely
+because credentials happen to exist"), and even if an owner wanted to
+turn it on, `calendarEnvCredentials()` (`trips-data.ts`) returns `null`
+without all three Google OAuth secrets present, which
+`isCalendarSyncAllowed` then correctly refuses regardless of the
+toggle. Confirmed live, read-only, on Production's real Settings page
+just now: "Not connected -- the one-time Google setup has not been
+completed yet," exactly matching this code path.
+
+**An important, now-resolved compounding factor, found during this
+investigation**: until this session's own authorized migration-0048
+release (completed earlier today, see the prior entry), **the entire
+`/settings` page on Production could not render at all** for
+anything calendar-related. `app/settings/page.tsx` calls
+`getCalendarConnectionStatusForUser` directly inside an un-guarded
+`Promise.all`, with no `try`/`catch`; that function's first step,
+`isCalendarSyncEnabledForUser`, runs `SELECT calendar_sync_enabled
+FROM users WHERE id = ?` -- a column that did not exist on Production
+before today's migration. This would have thrown an unhandled error
+on every Settings page load, likely well before today -- since
+migration 0048's own code was deployed to Production's Worker bundle
+in an earlier round's deployment (see the "Trip Planner calendar-sync
+error" investigation entry), independent of whether its *schema* had
+been applied. **Confirmed fixed as a side effect of today's migration
+apply**: navigated to Production's live `/settings` page (read-only,
+no changes submitted) and confirmed it now renders completely,
+including a working "Google Calendar sync" section with its toggle
+and the correct "Not connected" message. This was never a separate bug
+needing its own fix -- it is simply now resolved, since the same root
+cause (migration 0048 missing) already underlies both this and the
+Trip Planner scheduling error fixed earlier today.
+
+**What's required to enable Calendar sync safely in Production** (not
+done, needs your explicit authorization, per the design doc's own
+gate):
+1. Complete the one-time Google Cloud OAuth setup for the real
+   Production Google account (design doc §12) -- create/reuse a
+   Google Cloud project and OAuth client, obtain a refresh token.
+2. Set `GOOGLE_CALENDAR_OAUTH_CLIENT_ID`/`_CLIENT_SECRET`/
+   `_REFRESH_TOKEN` as Production Worker secrets.
+3. Per the design doc's own sequencing, do this on Staging FIRST, with
+   its own disposable test calendar (`CALENDAR_SYNC_STAGING_TEST_
+   CALENDAR_ID` -- "primary" is structurally refused on Staging by
+   `isCalendarSyncAllowed`, confirmed in the guard code, specifically
+   so a live Staging test can never touch a real personal calendar) --
+   a genuine, real-Google-API live-verification pass has never
+   happened on either environment; only the simulated/mocked
+   integration test has.
+4. Only then, with explicit owner approval, provision Production's own
+   credentials.
+5. Separately, explicitly opt in via the Settings checkbox -- never
+   automatic, even once credentials exist.
+6. **Worth flagging as a real, separate limitation, not a blocker**:
+   there is no background reconciliation sweep wired into `worker/
+   index.ts`'s `scheduled()` handler for calendar sync (only the Daily
+   Agenda and backup-alert checks run on a cron) -- today, a failed
+   best-effort sync attempt is only ever retried by the owner manually
+   clicking "Retry" in the Trip Planner UI (`CalendarSyncBadge`'s own
+   retry button, confirmed present and intact). This was always the
+   documented design ("isolated sync core... not wired" was this
+   feature's own original title), not something that broke.
+
+### Recent Trip Planner changes: nothing regressed
+
+Checked `git log --follow` on both `TripDashboardExperience.tsx` and
+`CalendarSyncSettings.tsx` across every commit that ever touched them.
+Every piece described in commit `9016096`'s own scope -- the duration
+field (default 30 min, stored in `interactions.end_at`), the
+collapsed Pending/Synced/Failed status badge, the "View on Google
+Calendar" link (shown once synced), the "Retry" button, and the
+Settings page's connection-status display and enable/disable toggle --
+is still present in the current code, confirmed by direct source
+inspection, matching exactly what today's own live browser testing of
+the Trip Planner already demonstrated working (scheduling showed
+"Calendar sync pending"; nothing was missing from that flow beyond the
+two items above, which were never built). No feature-flag system
+exists in this codebase at all (confirmed: no generic flag service
+anywhere) -- every gate here is an explicit, named, already-tested
+function (`isCalendarSyncAllowed`), not a flag someone could have
+flipped off.
+
+### Summary
+
+| Feature | Status | Cause |
+|---|---|---|
+| Donor-address-fill button | Never implemented | Designed (design doc §9.2), never built on any branch |
+| Google Calendar event creation/sync | Backend complete, inactive | Deliberately gated behind a Google OAuth setup + explicit approval step that was never taken, on either environment |
+| Settings page rendering calendar status at all | Was broken, now fixed | Side effect of today's migration-0048 fix -- not a separate issue |
+| Duration field, status badge, Retry, View-on-Google-Calendar link | Working, unchanged | Confirmed present in code and in live testing |
+
+**Recommendation, per "prioritize restoring existing functionality
+rather than rebuilding it":** there is no existing, working version of
+either reported-missing feature to restore -- both need to be newly
+completed. The donor-address-fill button is a small, self-contained,
+low-risk UI addition (display-only convenience, no schema change,
+already-available donor address columns). Enabling real Google
+Calendar sync is a larger, credential-and-approval-gated step with no
+code work remaining, only the Google Cloud setup and a genuine
+Staging live-verification pass the design doc has always required
+before Production. Neither is implemented in this entry -- this is
+investigation only, per your explicit instruction.
+
+No Production data modified. No Production calendar sync enabled. No
+deployment made. The UNAUTHORIZED stash remains untouched.
