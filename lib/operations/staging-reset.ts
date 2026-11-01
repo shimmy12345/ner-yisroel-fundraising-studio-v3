@@ -90,8 +90,30 @@ export const STAGING_RESET_TABLE_ORDER = [
   // Added by migration 0046 (Trip Fundraising Results Dashboard) on
   // feature/independent-cloudflare-sandbox, ported here 2026-10-15 -- see
   // docs/AI-HANDOFF.md.
+  // trip_prospect_commitments (Trip Fundraising Results -- Manual
+  // Prospect Commitments, migration 0054, see docs/AI-HANDOFF.md)
+  // references user_id (users.id, kept), trip_id (trips.id),
+  // prospect_id (trip_prospects.id), migrated_giving_activity_id
+  // (giving_activities.id, nullable), and migrated_attribution_id
+  // (trip_financial_attributions.id, nullable) -- deleted before all
+  // four fundraising-table targets, hence immediately before
+  // trip_financial_attributions here. Confirmed live on BOTH
+  // fundraising-os-staging-db and fundraising-os-production-db
+  // (2026-11-01, real read-only sqlite_schema queries -- see
+  // production-baseline/schema-manifest.json's own sourceMigrations
+  // for the matching Production-side sync), unlike calendar_event_
+  // links/calendar_event_link_history below, which stay Staging-only.
+  "trip_prospect_commitments",
   "trip_financial_attributions",
   "trip_prospects",
+  // trip_destination_regions (Trip Planner Multi-Region, migration 0055,
+  // see docs/AI-HANDOFF.md) references only trip_id (trips.id) -- no
+  // other fundraising table references it -- so it only needs to be
+  // deleted before trips itself, immediately below. Confirmed live on
+  // BOTH fundraising-os-staging-db and fundraising-os-production-db
+  // (2026-11-01, same real read-only queries as trip_prospect_
+  // commitments above).
+  "trip_destination_regions",
   "trips",
   // Google Calendar sync core (migration 0048, docs/GOOGLE-CALENDAR-
   // INTEGRATION-DESIGN.md) -- the tables exist on the real

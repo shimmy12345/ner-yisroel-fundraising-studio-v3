@@ -702,3 +702,69 @@ test('sanity: the real current PRODUCTION_BASELINE_OBJECTS manifest matches itse
   const comparison = compareSchemaObjects(stagingSchemaObjects(asLiveRows));
   assert.equal(comparison.matches, true, comparison.differences.join(' '));
 });
+
+// Regression test for the EXACT class of bug behind real GitHub Actions
+// run 41325557555 (2026-11-01): Production's own monthly restore-verify
+// crashed inside planD1Restore itself -- "found INSERT statements for
+// table(s) not present in the dependency order: trip_destination_regions"
+// -- a hard failure during restore PLANNING, before the schema-comparison
+// step (tested above) even runs. D1_RESTORE_DATA_ORDER/
+// D1_RESTORE_SKIP_DATA_TABLES had fallen behind the real, live schema (a
+// table existed in both real databases with no entry in either list at
+// all) -- a different failure mode than a schema-comparison mismatch, so
+// it needs its own, independent regression guard: given the REAL, live
+// table list from each environment (captured via direct read-only
+// sqlite_schema queries, 2026-11-01 -- not a migration replay, not any
+// git branch's assumed state), every single table must be covered by one
+// list or the other. This must never again be able to silently regress.
+const REAL_LIVE_PRODUCTION_TABLES = [
+  'activity_status_audits', 'agenda_manual_test_send_log', 'agenda_send_log', 'ask_changes', 'asks',
+  'backup_alert_state', 'data_health_repair_audits', 'data_imports', 'donation_import_rollback_audits',
+  'donor_contact_audits', 'donor_historical_context', 'donor_merge_audits', 'donor_rebbeim',
+  'donor_relationship_fact_changes', 'donor_relationship_facts', 'donor_research_finding_sources',
+  'donor_research_findings', 'donor_research_identity_candidates', 'donor_research_pending_evidence',
+  'donor_research_runs', 'donor_research_sources', 'donor_source_attributions', 'donor_views', 'donors',
+  'gift_acknowledgments', 'gifts', 'giving_activities', 'giving_activity_import_changes',
+  'giving_activity_management_audits', 'household_import_changes', 'household_import_rollback_audits',
+  'import_preview_session_chunks', 'import_preview_sessions', 'important_date_changes', 'important_dates',
+  'interactions', 'jl_payment_assignment_audits', 'jl_payment_assignments', 'jl_refresh_state',
+  'legacy_test_cleanup_audits', 'meeting_note_save_identities', 'onboarding_preferences',
+  'pledge_balance_corrections', 'pledge_payment_plan_changes', 'pledge_payment_plan_reviews',
+  'pledge_payment_plans', 'production_schema_baseline', 'rebbeim', 'recommendations',
+  'relationship_queue_dismissals', 'sample_cleanup_audits', 'shared_activities',
+  'shared_activity_recipient_audits', 'trip_destination_regions', 'trip_financial_attributions',
+  'trip_prospect_commitments', 'trip_prospects', 'trips', 'users', 'workspace_backup_audits',
+  'yahrtzeit_changes', 'yahrtzeits',
+];
+
+const REAL_LIVE_STAGING_TABLES = [
+  'activity_status_audits', 'agenda_manual_test_send_log', 'agenda_send_log', 'ask_changes', 'asks',
+  'backup_alert_state', 'calendar_event_link_history', 'calendar_event_links', 'data_health_repair_audits',
+  'data_imports', 'donation_import_rollback_audits', 'donor_contact_audits', 'donor_historical_context',
+  'donor_merge_audits', 'donor_rebbeim', 'donor_relationship_fact_changes', 'donor_relationship_facts',
+  'donor_research_finding_sources', 'donor_research_findings', 'donor_research_identity_candidates',
+  'donor_research_pending_evidence', 'donor_research_runs', 'donor_research_sources',
+  'donor_source_attributions', 'donor_views', 'donors', 'gift_acknowledgments', 'gifts',
+  'giving_activities', 'giving_activity_import_changes', 'giving_activity_management_audits',
+  'household_import_changes', 'household_import_rollback_audits', 'import_preview_session_chunks',
+  'import_preview_sessions', 'important_date_changes', 'important_dates', 'interactions',
+  'jl_payment_assignment_audits', 'jl_payment_assignments', 'jl_refresh_state',
+  'legacy_test_cleanup_audits', 'meeting_note_save_identities', 'onboarding_preferences',
+  'pledge_balance_corrections', 'pledge_payment_plan_changes', 'pledge_payment_plan_reviews',
+  'pledge_payment_plans', 'rebbeim', 'recommendations', 'relationship_queue_dismissals',
+  'sample_cleanup_audits', 'shared_activities', 'shared_activity_recipient_audits',
+  'trip_destination_regions', 'trip_financial_attributions', 'trip_prospect_commitments',
+  'trip_prospects', 'trips', 'users', 'workspace_backup_audits', 'yahrtzeit_changes', 'yahrtzeits',
+];
+
+test('D1_RESTORE_DATA_ORDER/D1_RESTORE_SKIP_DATA_TABLES cover every REAL live Production table (regression for run 41325557555)', () => {
+  const covered = new Set([...D1_RESTORE_DATA_ORDER, ...D1_RESTORE_SKIP_DATA_TABLES]);
+  const missing = REAL_LIVE_PRODUCTION_TABLES.filter((table) => !covered.has(table));
+  assert.deepEqual(missing, [], `tables present in real live Production but not covered by the restore order: ${missing.join(', ')}`);
+});
+
+test('D1_RESTORE_DATA_ORDER/D1_RESTORE_SKIP_DATA_TABLES cover every REAL live Staging table', () => {
+  const covered = new Set([...D1_RESTORE_DATA_ORDER, ...D1_RESTORE_SKIP_DATA_TABLES]);
+  const missing = REAL_LIVE_STAGING_TABLES.filter((table) => !covered.has(table));
+  assert.deepEqual(missing, [], `tables present in real live Staging but not covered by the restore order: ${missing.join(', ')}`);
+});

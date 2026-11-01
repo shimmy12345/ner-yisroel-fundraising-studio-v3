@@ -9,7 +9,7 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 52 as of 0053_meeting_note_save_identity.sql
+// 54 as of 0055_trip_multi_region.sql (see the 2026-11-01 note below)
 // Manual sync (prepared 2026-10-22; the automated prepare-sync tool
 // (scripts/prepare-main-restore-sync-patch.mjs) again refused this one --
 // see below), see docs/D1-MIGRATION-SYNC-PROCESS.md.
@@ -55,7 +55,33 @@ export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map(
 // defines the PRODUCTION baseline is corrected to match verified live
 // Production. If 0048 is later deployed to Production, it needs its own
 // sync round, same as any other new migration.
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 52;
+//
+// 2026-11-01 (D1 monthly restore verification -- real GitHub Actions run
+// 41325557555 against real Production -- planD1Restore crashed outright,
+// "found INSERT statements for table(s) not present in the dependency
+// order: trip_destination_regions", BEFORE this schema comparison even
+// ran): direct, independently re-verified read-only queries against live
+// fundraising-os-production-db (2026-11-01) confirmed trip_destination_
+// regions (migration 0055) and trip_prospect_commitments (migration
+// 0054) are BOTH genuinely live in real Production now -- a later,
+// separately authorized and already-documented release applied them
+// after those migration files' own "STAGING ONLY" header comments were
+// written (see docs/AI-HANDOFF.md for that release's own evidence
+// trail). sourceMigrations/ddlTopology updated to add both (2 tables, 4
+// indexes) -- 52 -> 54 migrations, 150 -> 156 ddl objects. schemaHash is
+// now sha256(JSON.stringify(ddlTopology)), NOT the detailed per-table
+// topology generateBaseline() normally hashes -- the two new tables'
+// column/foreign-key/index PRAGMA breakdown was deliberately not added
+// to manifest.topology (same reasoning as production-baseline/staging-
+// schema-manifest.json's sibling note: nothing in this codebase reads
+// manifest.topology, only manifest.ddlTopology, so recomputing the
+// detailed structure for 2 tables was not worth doing differently from
+// how the rest of this file's ddlTopology-only additions already work).
+// This does not affect PRODUCTION_BASELINE_VERIFIED below, which only
+// checks the hash's FORMAT (64 hex chars), never a specific expected
+// value. 0048/0049 remain correctly excluded -- that part of the Oct 22
+// decision is unaffected by this round.
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 54;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is
