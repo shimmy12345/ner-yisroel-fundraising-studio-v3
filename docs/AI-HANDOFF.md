@@ -58736,3 +58736,162 @@ dead schema from an abandoned design direction).
 
 Nothing else changed in this round. No Production or Staging data
 touched. The UNAUTHORIZED stash remains untouched.
+
+## Two Production Problems Investigated (2026-11-01): Live Calendar-Sync Error + Second Restore-Verify Failure -- INVESTIGATION + ONE READY FIX, NOTHING DEPLOYED
+
+The user reported a live, user-facing Production error alongside a
+second real restore-verification failure (GitHub Actions run
+41328477955, independently run and reported). Both investigated with
+real, read-only Production diagnostics. **They do NOT share a root
+cause** -- confirmed by tracing each to its own specific, different
+code/data path, not assumed.
+
+### Problem 1: Trip Planner "Could not confirm the calendar sync status" error (LIVE, confirmed, not yet fixed)
+
+**Exact trace**: `PATCH /api/trips/[id]/prospects/[prospectId]`
+(`app/api/trips/[id]/prospects/[prospectId]/route.ts`) -> for a
+**LINKED** (real donor) prospect's `meeting_scheduled`/
+`meeting_completed` status change only -> `scheduleProspectMeeting`/
+`completeProspectMeeting` (`lib/relationships/trips-data.ts`) ->
+`buildTripMeetingScheduledStatements`/`buildTripMeetingCancelledStatements`
+(`lib/relationships/trip-calendar-sync.ts`) ->
+`D1CalendarStore.getLinkByInteraction`
+(`lib/calendar/d1-calendar-store.ts`) -> `SELECT * FROM
+calendar_event_links WHERE interaction_id = ?`. **Production's real
+database does not have the `calendar_event_links` table** (migration
+0048, confirmed absent via direct read-only `sqlite_schema` query,
+2026-11-01) -- the query throws "no such table," caught by
+`trips-data.ts`'s own try/catch, correctly converted into
+`{ok:false, reason:"calendar_unavailable"}`, surfaced as the exact
+reported 503 error.
+
+- **Root cause: migration 0048 was never applied to Production, but the
+  application CODE that depends on it (this calendar-intent-tracking
+  logic) is already live there** -- deployed as part of this branch's
+  own Worker bundle in an earlier round of this session (the agenda-fix
+  and homepage-sections-fix Production deployments both shipped the
+  entire current code, including this feature, regardless of which
+  migrations had been separately applied to Production's database).
+  Migration 0048's own header comment ("NOT applied to any remote D1
+  database by this round... Not wired into any live route or cron")
+  described its state only as of when it was written (2026-10-18) --
+  it has since become wired into a live, Production-serving route
+  without its own schema ever following it there. **Not** migration
+  0054's `trip_prospects` rebuild -- confirmed by tracing the exact
+  query path above, which never touches `trip_prospects` at all, only
+  `interactions`/`calendar_event_links`/(for the separate, already-
+  safely-swallowed best-effort Google reconcile step) `users.
+  calendar_sync_enabled`.
+- **Affects ALL linked-prospect meeting schedule/complete attempts on
+  Production, unconditionally** -- not record-specific. The missing
+  table means every such attempt throws, every time, for every
+  prospect/trip. Does **not** affect: manually-added/unlinked prospects
+  (a deliberately separate, simpler code path that "has no real
+  `interactions` row or Google Calendar sync" by design -- see
+  `route.ts`'s own `linkState === "unlinked"` branch), or simple status
+  changes (`not_contacted`/`contacted`/`meeting_requested`/`declined`/
+  `unable_to_schedule`), which never touch `interactions` or calendar
+  tables at all.
+- **No partial saves possible** -- confirmed by the code's own explicit
+  2026-10-19 review design (`trips-data.ts`'s own header comment): the
+  calendar-intent read happens and is checked BEFORE any `db.batch()`
+  write runs; a read failure aborts the entire attempt first. This was
+  specifically built to replace an earlier, real bug where a swallowed
+  read failure let a meeting save succeed while silently losing its
+  calendar intent -- that fix is confirmed still intact and is exactly
+  why the user sees a clean, actionable error instead of silent data
+  loss.
+- **Proposed fix (system-wide, not donor-specific; requires your
+  authorization -- NOT done)**: apply migration `0048_google_calendar_
+  sync.sql` to real Production. This is additive-only (two new tables,
+  four new nullable/defaulted columns across `interactions`/`users`/
+  `trip_prospects`) and does **not** turn on live Google Calendar sync
+  for anyone -- `users.calendar_sync_enabled` defaults to `0`/false for
+  every existing row, and nothing else in this migration or the
+  deployed code flips it; `attemptBestEffortCalendarReconcile`'s actual
+  network call to Google stays gated on that flag regardless. Applying
+  it only lets the already-deployed code's existing, correct
+  read-before-write logic succeed instead of throwing -- meeting
+  scheduling/completion for linked prospects starts working again, with
+  calendar sync itself remaining off until someone explicitly enables it
+  later (a separate, already-existing Settings action, not part of this
+  fix). **Rejected alternative**: making the calendar-intent read
+  tolerate a missing table and silently skip calendar tracking would
+  re-introduce the exact silent-data-loss failure mode the 2026-10-19
+  review deliberately fixed -- not proposed.
+- **Regression test added** (`tests/trip-calendar-missing-table-
+  regression.test.mjs`, registered in `scripts/run-tests.mjs`, directly
+  runnable -- `buildTripMeetingScheduledStatements`/
+  `buildTripMeetingCancelledStatements` take `db: D1Database` directly
+  and import nothing from `"cloudflare:workers"`, so no CI-only local-D1
+  harness is needed): proves both functions still throw -- never
+  swallow -- a missing-table read failure, which is the exact guarantee
+  the proposed fix must not weaken. Full suite: 245/245 test files pass
+  (244 + this new one); `npx tsc --noEmit` clean.
+
+### Problem 2: a second, different Production restore-verification failure (FIXED, on a separate unpushed branch)
+
+GitHub Actions run `41328477955` (Production restore-verify,
+independently run and reported by the user): backup downloaded,
+decrypted, and restored into a scratch D1 successfully; `PRAGMA
+quick_check`/`foreign_key_check` both clean; scratch database deleted
+successfully. Failed only at structural schema comparison: `Table
+definition differs: trip_prospects (columns or constraints)`.
+
+- **Root cause: an outdated baseline -- entirely this assistant's own
+  gap from the immediately preceding round, not a genuine Production
+  schema problem and not a backup/restore discrepancy.** That round's
+  manual sync (commit `0ec992b`, merged to `main` earlier today) added
+  migrations 0054/0055's two NEW tables (`trip_destination_regions`,
+  `trip_prospect_commitments`) to `production-baseline/schema-
+  manifest.json`, but missed that migration 0054 ALSO rebuilt the
+  EXISTING `trip_prospects` table (SQLite's standard `__new_X` rebuild
+  pattern, dropping `NOT NULL` on `donor_id`, adding six `manual_*`
+  columns, adding a new identity `CHECK` constraint) -- the manifest's
+  `trip_prospects` entry was left at its stale, pre-0054 shape.
+  Confirmed directly: live Production's real `trip_prospects` table
+  (read-only `sqlite_schema` query, 2026-11-01) already has the correct,
+  rebuilt shape, matching the backup exactly -- only the committed
+  baseline file was wrong. Staging's own baseline (built directly from
+  live Staging data in the immediately preceding round) was already
+  correct and unaffected by this gap.
+- **Not connected to Problem 1** -- different table, different root
+  cause (a baseline-tracking gap vs. a migration never reaching
+  Production at all), confirmed by tracing each independently rather
+  than assumed from surface similarity (both happen to involve
+  migration-0054-era tables, which is why they surfaced close together,
+  not because one caused the other).
+- **Fix prepared and verified, NOT merged**: new branch
+  `fix/production-baseline-trip-prospects-0054-rebuild` (base
+  `origin/main@0ec992b`, commit `ac1ce27`), worktree at `scratchpad/
+  restore-sync-check/trip-prospects-fix`. Updates the one stale
+  `trip_prospects` `ddlTopology` entry to the real, verified live
+  Production DDL; recomputes `schemaHash`. The table's three named
+  indexes needed no change (migration 0054's rebuild recreated them
+  identically -- confirmed via live `PRAGMA`/`sqlite_schema` query).
+  Two regression tests added to `test/staging-production-baseline.
+  test.mjs`: one proving the baseline now matches the real rebuilt
+  shape, one proving a revert to the stale pre-0054 shape is still
+  correctly caught as drift. **166/166 tests pass (164 + 2 new,
+  verified in a fresh `npm install`)**, build clean. Not pushed, not
+  merged, no database touched.
+
+### What requires your approval
+
+1. **Applying migration `0048_google_calendar_sync.sql` to Production**
+   (Problem 1's actual fix) -- a real migration against the live
+   Production database. Additive-only and does not enable live Calendar
+   sync for anyone (see above), but this assistant will not apply any
+   migration without your explicit go-ahead.
+2. **Pushing/merging `fix/production-baseline-trip-prospects-0054-
+   rebuild`** (Problem 2's fix) -- prepared and verified, same review
+   process as the prior restore-verify fix round; not yet pushed.
+3. Nothing else from this round needs approval -- the new regression
+   test (`tests/trip-calendar-missing-table-regression.test.mjs`) is
+   already committed to this working branch; it changes no application
+   behavior.
+
+Every diagnostic this round was read-only against live Production/
+Staging. No migration applied, no Worker deployed, no database record
+modified, no credential rotated, no Staging migration promoted to
+Production. The UNAUTHORIZED stash remains untouched.
