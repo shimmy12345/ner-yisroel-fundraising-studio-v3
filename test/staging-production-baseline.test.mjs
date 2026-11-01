@@ -64,6 +64,37 @@ test('a dropped index still fails verification against the STAGING baseline (leg
   assert.ok(result.differences.some((d) => d.includes('calendar_event_links_sync_status_idx')), 'expected the removed index to be flagged as missing');
 });
 
+// Regression coverage for the 2026-11-01 "Production restore-verify
+// run 41328477955" discrepancy: the prior round's manual sync added
+// migrations 0054/0055's two NEW tables (trip_destination_regions,
+// trip_prospect_commitments) to Production's baseline, but missed that
+// migration 0054 ALSO rebuilt an EXISTING table, trip_prospects --
+// dropping NOT NULL on donor_id and adding six manual_* columns plus a
+// new CHECK constraint. The baseline's trip_prospects entry was left at
+// its pre-0054 shape, so every real Production restore-verify run
+// failed structural comparison even though Production's actual schema
+// was always correct. These two tests prove the baseline now matches
+// the real, live, migration-0054-rebuilt shape, and that reverting to
+// the old (pre-rebuild) shape is still correctly caught as drift.
+test('PRODUCTION baseline\'s trip_prospects reflects migration 0054\'s rebuild (nullable donor_id, manual_* columns, the identity CHECK)', () => {
+  const tripProspects = PRODUCTION_BASELINE_OBJECTS.find((object) => object.type === 'table' && object.name === 'trip_prospects');
+  assert.ok(tripProspects, 'trip_prospects must be present in the Production baseline');
+  assert.match(tripProspects.sql, /`manual_name` text/, 'migration 0054 added manual_name -- must be present post-rebuild');
+  assert.doesNotMatch(tripProspects.sql, /`donor_id` text NOT NULL/, 'migration 0054 dropped the NOT NULL on donor_id -- must not still require it');
+  assert.match(tripProspects.sql, /CHECK \(`donor_id` IS NOT NULL OR/, 'migration 0054\'s identity CHECK constraint must be present');
+});
+
+test('reverting trip_prospects to its PRE-0054 (stale) shape is still caught as real drift, not silently accepted', () => {
+  const preRebuildTripProspects = {
+    type: 'table', name: 'trip_prospects',
+    sql: 'CREATE TABLE `trip_prospects` ( `id` text PRIMARY KEY NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `added_method` text NOT NULL CHECK (`added_method` IN (\'auto_region\',\'manual\')), `status` text NOT NULL DEFAULT \'not_contacted\' CHECK (`status` IN (\'not_contacted\',\'contacted\',\'meeting_requested\',\'meeting_scheduled\',\'meeting_completed\',\'declined\',\'unable_to_schedule\')), `suggested_reason` text, `suggested_score` real, `suggested_generated_at` integer, `manual_rank` integer, `meeting_at` integer, `meeting_location` text, `next_action` text, `trip_notes` text, `linked_interaction_id` text, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `selected_at` integer, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`linked_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action )',
+  };
+  const live = PRODUCTION_BASELINE_OBJECTS.map((object) => (object.type === 'table' && object.name === 'trip_prospects' ? preRebuildTripProspects : object));
+  const result = compareSchemaObjects(live, PRODUCTION_BASELINE_OBJECTS);
+  assert.equal(result.matches, false);
+  assert.ok(result.differences.some((d) => d.includes('trip_prospects')), 'the real, live, rebuilt trip_prospects must still be flagged as different from a stale baseline');
+});
+
 test('an unexpected new table still fails verification against EITHER baseline', () => {
   const injected = { type: 'table', name: 'definitely_not_a_real_table', sql: 'CREATE TABLE `definitely_not_a_real_table` (`id` text PRIMARY KEY NOT NULL)' };
   const prodResult = compareSchemaObjects([...PRODUCTION_BASELINE_OBJECTS, injected], PRODUCTION_BASELINE_OBJECTS);

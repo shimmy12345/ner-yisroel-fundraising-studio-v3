@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "01760d7d0c804e1b96a543ce68fe1a1cd233bf9e6029ba63e458d734ac2c2c3a",
+  "schemaHash": "fa13a26c3b74342c1793ae32d72f7c8ef64a0b531398be296ffdd7486d166888",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -7509,7 +7509,7 @@
     {
       "type": "table",
       "name": "trip_prospects",
-      "sql": "CREATE TABLE `trip_prospects` ( `id` text PRIMARY KEY NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `added_method` text NOT NULL CHECK (`added_method` IN ('auto_region','manual')), `status` text NOT NULL DEFAULT 'not_contacted' CHECK (`status` IN ('not_contacted','contacted','meeting_requested','meeting_scheduled','meeting_completed','declined','unable_to_schedule')), `suggested_reason` text, `suggested_score` real, `suggested_generated_at` integer, `manual_rank` integer, `meeting_at` integer, `meeting_location` text, `next_action` text, `trip_notes` text, `linked_interaction_id` text, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `selected_at` integer, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`linked_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action )"
+      "sql": "CREATE TABLE \"trip_prospects\" ( `id` text PRIMARY KEY NOT NULL, `trip_id` text NOT NULL, `donor_id` text, `manual_name` text, `manual_city` text, `manual_region_id` text, `manual_phone` text, `manual_email` text, `manual_notes` text, `added_method` text NOT NULL CHECK (`added_method` IN ('auto_region','manual')), `status` text NOT NULL DEFAULT 'not_contacted' CHECK (`status` IN ('not_contacted','contacted','meeting_requested','meeting_scheduled','meeting_completed','declined','unable_to_schedule')), `suggested_reason` text, `suggested_score` real, `suggested_generated_at` integer, `manual_rank` integer, `meeting_at` integer, `meeting_location` text, `next_action` text, `trip_notes` text, `linked_interaction_id` text, `selected_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, CHECK (`donor_id` IS NOT NULL OR (`manual_name` IS NOT NULL AND trim(`manual_name`) != '')), FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`linked_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",
