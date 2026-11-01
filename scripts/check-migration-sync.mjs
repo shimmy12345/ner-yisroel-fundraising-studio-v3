@@ -45,7 +45,26 @@ function canonicalMigrationFiles() {
     }
   })();
   const listing = git(["ls-tree", "-r", "--name-only", ref, "--", "drizzle/"]);
-  return listing.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => path.basename(line)).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
+  return listing
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    // drizzle/pending-review/ holds gated, not-yet-promoted repair
+    // migrations (e.g. 0049_fix_calendar_schema_text_staging_repair.sql --
+    // applied to Staging only via an explicit, separately-confirmed
+    // workflow_dispatch input, never part of the normal migration
+    // sequence) -- excluded here by directory component, not just
+    // basename shape, so this cheap preflight matches
+    // scripts/check-main-restore-sync.mjs's own generateBaseline(),
+    // which also never includes a pending-review migration in
+    // sourceMigrations. Real GitHub Actions run 41322245940 (2026-11-01)
+    // wrongly flagged 0049 as "missing from main" because this filter
+    // previously matched on basename alone, which matches a pending-
+    // review file's name too.
+    .filter((line) => !line.split("/").includes("pending-review"))
+    .map((line) => path.basename(line))
+    .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+    .sort();
 }
 
 function mainMigrationFiles() {
