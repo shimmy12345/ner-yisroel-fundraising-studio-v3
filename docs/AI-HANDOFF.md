@@ -58895,3 +58895,166 @@ Every diagnostic this round was read-only against live Production/
 Staging. No migration applied, no Worker deployed, no database record
 modified, no credential rotated, no Staging migration promoted to
 Production. The UNAUTHORIZED stash remains untouched.
+
+## Release Plan: Calendar-Sync Migration + Restore-Verify Baselines (2026-11-01) -- ALL PREPARED AND VERIFIED, NOTHING EXECUTED
+
+### 1. The exact Production-compatible calendar migration
+
+**No rewrite needed -- the original, unmodified `drizzle/0048_google_
+calendar_sync.sql` is safe to apply to Production exactly as written.**
+Proved this directly rather than reasoning about it in the abstract:
+
+- Pulled live Production's EXACT current schema (read-only, 157 DDL
+  statements, checked into `tests/fixtures/production-schema-2026-11-01.sql`).
+- Replayed it into an isolated in-memory `node:sqlite` database, then
+  applied migration 0048 unchanged on top: **zero errors, zero
+  conflicts.** `PRAGMA integrity_check` -> `ok`. `PRAGMA foreign_key_check`
+  -> zero violations.
+- Specifically confirmed the one thing this round worried about --
+  migration 0054's rebuild of `trip_prospects` -- causes no collision:
+  0048's changes to that table are plain `ALTER TABLE ADD COLUMN`
+  statements (`all_day`, `all_day_date`), which apply to whatever
+  columns a table currently has regardless of its rebuild history.
+  Confirmed by direct `PRAGMA table_info` query that Production's real
+  `trip_prospects` has neither column today, so there is nothing to
+  collide with. Same confirmation for `interactions` (4 new columns)
+  and `users` (`calendar_sync_enabled`) -- none exist on Production
+  today.
+- Confirmed structurally, not just by inspection, that `users.
+  calendar_sync_enabled` defaults to `0 NOT NULL` -- applying this
+  migration cannot turn on live Google Calendar sync for any existing
+  user; that stays a separate, already-existing, explicit Settings
+  action.
+- Functional proof, against the same rehearsal database: imported the
+  REAL `buildTripMeetingScheduledStatements`/
+  `buildTripMeetingCancelledStatements`/`isCalendarSyncEnabledForUser`
+  (the exact functions that are throwing on Production today) and
+  exercised scheduling, rescheduling, and cancelling a linked-prospect
+  meeting end to end -- all three succeed, `desiredRevision` advances
+  correctly (1 -> 2 -> 3), `desiredState` transitions present ->
+  present -> absent correctly, and `calendar_sync_enabled` stays `false`
+  for the test user throughout (no network call attempted). Formalized
+  as a committed regression test, `tests/trip-calendar-migration-0048-
+  production-rehearsal.test.mjs` (registered in `scripts/run-tests.mjs`).
+
+### 2. The baseline correction, and whether it needs updating again after the migration
+
+**Yes -- and the follow-up update is already prepared, not just
+anticipated.** Two separate, independently reviewable branches, both
+pushed (not merged):
+
+- `fix/production-baseline-trip-prospects-0054-rebuild` (commit `ac1ce27`,
+  previously reported) -- fixes TODAY's real restore-verify failure
+  (the stale `trip_prospects` entry). **Independent of the calendar
+  migration; safe to merge right now, regardless of when or whether
+  0048 is ever applied.** Re-confirmed byte-for-byte against live
+  Production's real `trip_prospects` DDL again just now (exact match).
+- `fix/production-baseline-post-0048-migration` (commit `8df1229`,
+  stacked on top of the branch above) -- adds `calendar_event_links`/
+  `calendar_event_link_history` (2 tables, 4 indexes) to Production's
+  baseline; `sourceMigrations` 54 -> 55. **This one must land in the
+  SAME release as the migration itself -- not before (it would make
+  restore-verify wrongly fail against Production's current,
+  pre-migration schema) and not skipped afterward (restore-verify would
+  immediately fail again, on the opposite complaint: "Unexpected table:
+  calendar_event_links").** Verified by actually regenerating this
+  topology from the real rehearsal database above, confirming nothing
+  existing is lost and exactly the 6 new objects migration 0048
+  introduces are added.
+- One side effect worth knowing, not a problem to fix in this release:
+  once 0048 lands on Production, Production's `trip_prospects` will
+  actually gain `all_day`/`all_day_date` (added fresh by 0048 against
+  Production's already-0054-rebuilt table), while Staging's
+  `trip_prospects` still lacks them (migration 0054's rebuild already
+  dropped them there, before 0048 ever reached Staging -- see the
+  prior round's "unresolved, deliberately not repaired" entry). Staging
+  and Production's `trip_prospects` would then differ in the OPPOSITE
+  direction from today. Confirmed via `compareSchemaObjects(STAGING_
+  BASELINE_OBJECTS, <post-0048 PRODUCTION_BASELINE_OBJECTS>)`: still
+  correctly reports real differences on `calendar_event_links`/
+  `calendar_event_link_history` (migration 0049's Staging-only text
+  repair) and `interactions`/`trip_prospects` -- expected, pre-existing,
+  not newly introduced by this release.
+
+### 3. Test results and remaining risks
+
+- Both `main`-side branches: 166/166 tests pass each (164 + regression
+  tests), build clean, verified in a fresh `npm install` each time.
+- Application-side (this working branch): 246/246 test files pass
+  (245 + the new migration-0048 rehearsal test), `npx tsc --noEmit`
+  clean. The one persistent, pre-existing, EXPECTED non-pass in the
+  overall `pnpm test` command is `scripts/check-main-restore-sync.mjs`
+  reporting migration 0048 as drift against `main` -- correct and
+  unchanged by this round (it will resolve itself once both the
+  migration and `fix/production-baseline-post-0048-migration` actually
+  land).
+- **Remaining risk, named plainly**: this rehearsal uses a schema
+  snapshot and a `node:sqlite` engine, not a live D1 execution of the
+  actual migration file against the actual Production database. D1's
+  own SQL engine is SQLite-compatible but not byte-identical in every
+  edge case; the real `wrangler d1 execute --file=` run is still the
+  final, authoritative test, same as every `0050`-`0055` migration
+  before it. This rehearsal makes that run low-risk and well-understood
+  in advance, not risk-free.
+- No weakening of anything: the missing-table regression test from the
+  prior round (`tests/trip-calendar-missing-table-regression.test.mjs`)
+  is untouched and still passes -- the calendar-intent read still
+  throws, never swallows, a genuine failure; this round only makes that
+  specific failure mode stop occurring on Production, it does not
+  change how any failure is handled. Schema verification was not
+  loosened anywhere -- the baseline updates make it MORE accurate, not
+  less strict (the 166/166 regression suite specifically proves
+  injected drift still fails after every one of these changes).
+
+### 4. Safest order of operations
+
+1. **Merge `fix/production-baseline-trip-prospects-0054-rebuild` now.**
+   Fixes today's real restore-verify failure immediately, with zero
+   dependency on the calendar migration decision. (Needs your
+   go-ahead to merge -- prepared and pushed, not merged.)
+2. Separately and independently, **decide whether/when to authorize
+   applying migration 0048 to Production.** Not time-pressured by step
+   1 in either direction.
+3. If/when authorized: in the same change window, (a) take/confirm a
+   fresh Production backup, (b) apply `drizzle/0048_google_calendar_
+   sync.sql` unchanged via `wrangler d1 execute fundraising-os-
+   production-db --remote --config wrangler.production.jsonc
+   --file=drizzle/0048_google_calendar_sync.sql` (the same command
+   pattern already used for migrations 0054/0055), (c) merge
+   `fix/production-baseline-post-0048-migration` immediately alongside
+   it, (d) verify live (read-only query confirming the 2 new
+   tables/4 new columns exist, plus a manual Trip Planner smoke test
+   scheduling/completing/cancelling a real linked-prospect meeting),
+   (e) manually dispatch the Production monthly restore-verification
+   workflow to confirm it now passes cleanly end to end.
+4. Recovery plan if step 3(b) fails partway through: every statement in
+   migration 0048 is purely additive (`CREATE TABLE`/`ALTER TABLE ADD
+   COLUMN`) and independently safe -- a partial application leaves
+   Production in a still-valid, just-incomplete intermediate state,
+   never a corrupted one. Recovery is simply re-running only the
+   specific statements that did not yet apply (not blindly re-running
+   the whole file -- `CREATE TABLE`/`ADD COLUMN` are not idempotent and
+   will error "already exists" against anything that did succeed). The
+   existing nightly encrypted Production backup plus the already-
+   proven `verify-remote-restore.mjs` scratch-database technique remain
+   the fallback if a real restore is ever needed; this migration does
+   not change that mechanism at all.
+
+### 5. Exactly what requires your authorization
+
+1. **Merging `fix/production-baseline-trip-prospects-0054-rebuild`**
+   (commit `ac1ce27`) -- ready now, independent of everything else.
+2. **Applying migration `0048_google_calendar_sync.sql` to real
+   Production** -- the actual database change. Rehearsed and verified
+   safe above; not executed.
+3. **Merging `fix/production-baseline-post-0048-migration`** (commit
+   `8df1229`) -- only meaningful once/if #2 happens, and must land in
+   the same release as #2, not independently.
+4. Nothing else needs approval -- the new regression test and schema
+   fixture on this working branch change no application behavior and
+   are already committed.
+
+Every diagnostic and rehearsal this round ran read-only or purely
+in-memory. No migration applied, no Worker deployed, no database
+record modified, no credential rotated. The UNAUTHORIZED stash remains
+untouched.
