@@ -60622,3 +60622,199 @@ live-Staging level, and documented. Not yet added to
 same rule as the original Archive/Delete entry. Ready for a Production
 deployment (including applying migration 0056, still not yet applied
 to Production) once authorized.
+
+## Authorized Production Deployment of Trip Archive/Delete (2026-11-02) -- DEPLOYED AND VERIFIED LIVE
+
+Owner authorized deployment of commit `8ef3f1771257414ff59043886794de1c4d146735`
+(the Trip Archive/Delete feature, including the strengthened deletion
+safeguards) to Production, read-only verification only for destructive
+workflows -- the completed Staging tests stand as evidence for those.
+
+### Pre-deployment checks -- all passed, each with live or fresh evidence
+
+1. **Current Production Worker version and source commit, confirmed
+   two independent ways**: `wrangler deployments status` showed the
+   live Worker version (`ad68bdc5-0f92-4c44-8788-b6d92ab35456`, created
+   `2026-11-02T00:57:54.279Z`) exactly matching the version recorded
+   from the prior deployment (source commit `01dbd8d`); the live
+   `/health` page's own "Deployed version" readout independently
+   confirmed `01dbd8d` as well.
+2. **Branch ancestry, run for real**:
+   `node scripts/check-production-branch-ancestry.mjs
+   01dbd8d961c6051657185d037cbc27a8ea39715f
+   8ef3f1771257414ff59043886794de1c4d146735` -- confirmed the candidate
+   commit is a real descendant of the live Production commit.
+3. **No unrelated changes or migrations**: `git log 01dbd8d..8ef3f17`
+   and `git diff --stat` showed exactly the Trip Archive/Delete feature
+   (two commits), its tightened safety fix, and the previously-reviewed
+   `97d1b0d` doc/fingerprint-maintenance commit (never itself deployed,
+   since it only touched dev-tooling/docs -- see that round's own
+   entry) -- nothing else. Exactly one new migration,
+   `0056_trip_archive_delete.sql`.
+4. **254/254 test files passed**, fresh, at the exact
+   commit about to deploy, on a clean working tree; `tsc --noEmit` and
+   `build:production-independent` both clean; the feature-fingerprint
+   safeguard found all 7 fingerprints and passed all 5 behavioral
+   checks against the freshly-built dist/.
+5. **Fresh, successful Production backup identified and confirmed
+   usable**, via the live `/health` page (re-run live, not a stale
+   cached report): "Automated backup -- Completed successfully
+   2026-11-01T18:28:14Z (object:
+   `daily/fundraising-os-production-db-20261101T182809Z.sql.gz.gpg`)"
+   -- the real, current time was independently confirmed
+   (`date -u` -> 2026-11-02T03:04 UTC) to be under 9 hours after this
+   backup, i.e. the most recent nightly cycle, not a stale one.
+   "Monthly restore test -- Successfully restored and verified the
+   Nov 1, 2026 backup" confirms this exact artifact is usable under the
+   established restore-verification process, with real evidence (an
+   actual restore into a scratch database), not merely that the backup
+   file exists.
+6. **Rollback target recorded**: `ad68bdc5-0f92-4c44-8788-b6d92ab35456`
+   (the Worker version live immediately before this deployment).
+7. **Baseline Production record counts recorded** (read-only, before
+   any change): `donors` 297, `giving_activities` 5960 (`pledges`
+   93 [`open_pledge`/`partially_paid_pledge`], `payments_gifts` 5863
+   [`completed_gift`]), `trips` 5, `trip_prospects` 51,
+   `trip_financial_attributions` 5, `trip_prospect_commitments` 0,
+   `interactions` 214. (Note: `trips` grew from 3 to 5 since the prior
+   round's own baseline -- real, independent owner usage of Production
+   between rounds, not a concern for this deployment.)
+8. **Migration state confirmed**: `trips.archived_at` did NOT yet
+   exist on Production (`pragma_table_info('trips')` showed 0 matching
+   rows) -- migration 0056 genuinely required, not already applied.
+
+The one pre-existing, unrelated condition noted (not a new issue, not
+a blocker): the live `/health` page's own "Production ↔ baseline
+schema" check shows "2 differences" (`interactions`, `trip_prospects`
+table definitions) -- this is the exact same, already-documented
+legacy `main`-branch baseline drift this project has carried, and
+explicitly deferred, since migration 0048 (see
+`docs/D1-MIGRATION-SYNC-PROCESS.md`); `scripts/check-main-restore-sync.mjs`
+reports the identical condition in every round's own test output.
+Entirely unrelated to the Archive/Delete feature or migration 0056,
+and out of this deployment's explicit scope.
+
+### Migration and deployment
+
+Confirmed migration 0056 not yet applied (above), then applied it
+directly: `wrangler d1 execute fundraising-os-production-db --remote
+--file drizzle/0056_trip_archive_delete.sql` -- purely additive (one
+nullable column, one index; no UPDATE/DELETE statements at all).
+Verified immediately after: `trips.archived_at` now exists; `trips`
+row count unchanged at 5; all 5 existing trips show `archived_at IS
+NULL` (none retroactively archived). No database reset, recreation, or
+unrelated schema change.
+
+Deployed via the established safeguard chain:
+`PRODUCTION_LIVE_COMMIT=01dbd8d961c6051657185d037cbc27a8ea39715f pnpm
+run deploy:production-independent` -- build -> verify-build-manifest
+OK -> fingerprint check 7/7 found + 5 behavioral checks passed ->
+ancestry check passed -> `wrangler deploy` succeeded. **New Production
+Worker version: `a9c3b266-8894-40b4-bd69-b23e06463e5d`**, created
+`2026-11-02T03:06:58.539Z`, confirmed live at 100% via a follow-up
+`wrangler deployments status`.
+
+### Production verification -- read-only wherever possible, per explicit instruction
+
+- **Deployed commit confirmed**: the live `/health` page's "Deployed
+  version" now reads `8ef3f17`, matching the authorized commit exactly.
+- **Archived filter and Trip options menu**: `/travel-planning` shows
+  all 5 real existing trips (Shimmy Goldstein/Cancelled, Shimmy
+  Goldstein/Planning, Teaneck/Planning/4 prospects, NYC/Planning/4
+  regions/0 prospects, Teaneck-10/20/26/Completed/11 prospects) with
+  their original statuses, regions, and prospect counts completely
+  unchanged, plus a new "Archived" filter tab (0, correctly empty).
+  Opening Teaneck-10/20/26 and its "Trip options" menu confirmed
+  "Archive Trip" and "Delete Trip" both render correctly -- neither was
+  clicked through to an actual action, per the explicit "do not
+  create, delete, archive, or modify real Production trips... merely
+  to test" instruction.
+- **Existing trips, prospects, meetings, fundraising totals intact**:
+  Teaneck-10/20/26 still shows $17,500 raised of a $15,000 goal (117%),
+  11 selected prospects, 5 meeting scheduled, 1 declined, 3 unable to
+  schedule, 2 needing outreach -- byte-identical to every prior round's
+  recorded figures.
+- **Donor profiles, giving history, pledges, payments, financial
+  balances unchanged**: confirmed via the before/after row-count
+  comparison below (identical in every column).
+- **Deletion-prevention backend logic**: not exercised live against a
+  real Production trip (would require an actual delete attempt, which
+  the owner's instructions explicitly prohibit for testing). The real
+  write path (`deleteTrip()`) deployed is byte-identical to the code
+  already proven, on Staging, to correctly refuse deletion of a trip
+  with a recorded meeting and of a trip with only historical/reconciled
+  financial activity (see the prior "Final Safety Fix" entry) -- that
+  Staging evidence is the proof for this item, per the owner's own
+  explicit instruction.
+- **Archiving preserves status and records**: not exercised against a
+  real trip for the same reason; proven on Staging (archiving
+  Chicago-region and multi-region test trips preserved their `status`,
+  name, and every other field, confirmed via direct D1 reads both
+  times this feature was tested).
+- **Existing Trip Planner features confirmed working**: multi-region
+  display intact (NYC trip's 4 regions render correctly on the list
+  card); "Add to Google Calendar" present and byte-identical on all 5
+  real scheduled meetings (Bashevkin's href re-read and matches every
+  prior round's recorded value exactly); "✦ AI meeting notes" links
+  present and reachable on all 5; "Use donor address" functional,
+  verified without creating any real data (opened Kopstick's real
+  scheduling panel, clicked the button, confirmed the field filled with
+  his real address, clicked Cancel -- never Confirm -- and a direct D1
+  re-check confirmed his record, `status: not_contacted`/
+  `meeting_location: null`, was never touched). No real, currently
+  manually-added (unlinked) prospect exists on Production to inspect
+  live, but that code path is unchanged by this deployment and was
+  independently verified on Staging.
+- **Zero Google Calendar network activity and zero console errors**
+  throughout the entire verification session.
+
+### Before/after Production record counts (read-only, identical)
+
+| | Before | After |
+|---|---|---|
+| `donors` | 297 | 297 |
+| `giving_activities` | 5960 | 5960 |
+| &nbsp;&nbsp;-- pledges (`open_pledge`/`partially_paid_pledge`) | 93 | 93 |
+| &nbsp;&nbsp;-- payments/gifts (`completed_gift`) | 5863 | 5863 |
+| `trips` | 5 | 5 |
+| `trip_prospects` | 51 | 51 |
+| `trip_financial_attributions` | 5 | 5 |
+| `trip_prospect_commitments` | 0 | 0 |
+| `interactions` | 214 | 214 |
+
+### Final report
+
+1. **Deployed commit**: `8ef3f1771257414ff59043886794de1c4d146735`.
+   **New Production Worker version**:
+   `a9c3b266-8894-40b4-bd69-b23e06463e5d`.
+2. **Production backup artifact**:
+   `daily/fundraising-os-production-db-20261101T182809Z.sql.gz.gpg`
+   (completed `2026-11-01T18:28:14Z`), independently restore-verified
+   (`Successfully restored and verified the Nov 1, 2026 backup`).
+3. **Migration 0056**: confirmed not yet applied, applied directly,
+   verified to add only `trips.archived_at` (nullable) + its index,
+   with the `trips` row count and every existing trip's data unchanged.
+4. **Test/safeguard results**: 254/254 test files passed; `tsc`/build
+   clean; ancestry check and feature-fingerprint check (7/7 + 5
+   behavioral) both passed as part of the real deploy chain.
+5. **Before/after Production record counts**: identical in every
+   column (table above) -- `donors` 297, `giving_activities` 5960,
+   `trips` 5, `trip_prospects` 51, `trip_financial_attributions` 5,
+   `trip_prospect_commitments` 0, `interactions` 214.
+6. **Existing features preserved**: multi-region display, manual
+   prospects (code path unchanged, Staging-verified), AI Meeting Notes
+   links, "Use donor address," and "Add to Google Calendar" all
+   confirmed working exactly as before, with zero Google network
+   activity and zero console errors.
+7. **Unresolved issues**: none. One pre-existing, unrelated condition
+   noted above (the legacy `main`-branch schema-drift signal on
+   `interactions`/`trip_prospects`) -- already tracked separately,
+   unaffected by and unrelated to this deployment.
+
+Previous Worker version `ad68bdc5-0f92-4c44-8788-b6d92ab35456` recorded
+as the rollback target. No Production donor record, pledge, payment,
+or trip's existing data was modified. No database reset or
+recreation. No unrelated schema change. No real trip was created,
+archived, or deleted to test this feature -- the completed Staging
+tests are the evidence for those destructive workflows, per explicit
+instruction.
