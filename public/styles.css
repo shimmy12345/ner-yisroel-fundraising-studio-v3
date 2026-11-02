@@ -56,7 +56,8 @@ button:disabled{cursor:not-allowed;opacity:.55}.donor-actions{justify-content:fl
 .donor-profile-household{margin:5px 0 0;color:#506079}
 .donor-profile-code{margin:7px 0 0;color:var(--muted);font-size:.78rem}
 .donor-profile-code strong{color:var(--ink);text-transform:uppercase;letter-spacing:.04em;font-size:.68rem}
-.donor-profile-actions{flex-shrink:0}
+.donor-profile-actions{flex-shrink:0;flex-wrap:wrap;justify-content:flex-end}
+.donor-profile-actions button{white-space:nowrap}
 .donor-profile-actions .danger{margin-right:0}
 .donor-profile-grid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(280px,.75fr);gap:14px;align-items:start}
 .donor-profile-section{min-width:0;background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px 20px;box-shadow:0 7px 22px rgba(16,36,63,.045)}
@@ -73,6 +74,33 @@ button:disabled{cursor:not-allowed;opacity:.55}.donor-actions{justify-content:fl
 .donor-profile-empty{margin:0;color:var(--muted);font-style:italic}
 @media(max-width:800px){.donor-profile-grid{grid-template-columns:1fr}.donor-profile-notes{grid-column:auto}.donor-profile-heading{align-items:flex-start}.donor-profile-actions{flex-direction:column;align-items:stretch}.donor-profile-actions button{width:100%}}
 @media(max-width:520px){.donor-profile-heading{display:block;padding:16px}.donor-profile-title-row h2{font-size:1.35rem}.donor-profile-actions{display:grid;margin-top:16px}.donor-profile-section{padding:16px}.donor-profile-summary{grid-template-columns:1fr}.donor-profile-summary .profile-next-action{grid-column:auto}}
+
+.donor-overview-section,.donor-unified-timeline-section{margin-bottom:14px}
+.donor-overview-section{margin-top:14px}
+.donor-profile-360-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-bottom:14px}
+.donor-overview-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+.donor-overview-grid div:nth-child(6){grid-column:span 2}
+.donor-profile-section-heading{align-items:flex-start;margin-bottom:12px}
+.donor-profile-section-heading h3{margin-bottom:4px}
+.donor-profile-section-heading p{margin:0;color:var(--muted);font-size:.76rem;line-height:1.45}
+.profile-section-note{max-width:260px;color:var(--muted);font-size:.64rem;line-height:1.35;text-align:right}
+.follow-up-warning{margin:0 0 12px;padding:9px 11px;border:1px solid #e3aaaa;border-radius:9px;color:var(--danger);background:#fff6f6;font-size:.76rem;font-weight:800}
+.timeline-filter{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.timeline-filter-button{border:1px solid var(--line);border-radius:8px;background:#fff;color:#536174;padding:6px 8px;font-size:.68rem;font-weight:800;cursor:pointer}
+.timeline-filter-button[aria-pressed=true]{border-color:var(--navy);background:var(--navy);color:#fff}
+.unified-timeline-list{display:grid;gap:9px}
+.unified-timeline-item{display:grid;grid-template-columns:82px minmax(0,1fr);gap:12px;align-items:start;padding:11px;border:1px solid #e8ecf1;border-radius:11px;background:#fbfcfd}
+.unified-timeline-type{display:inline-flex;align-items:center;justify-content:center;min-height:24px;border-radius:7px;background:#eef2f7;color:#43526a;font-size:.62rem;font-weight:900}
+.unified-timeline-item.gift .unified-timeline-type{background:#e9f7f0;color:#247453}
+.unified-timeline-item.campaign .unified-timeline-type{background:#fff4df;color:#805b17}
+.unified-timeline-item.note .unified-timeline-type{background:#f1effb;color:#5d4a8d}
+.unified-timeline-heading{align-items:flex-start;gap:10px}
+.unified-timeline-heading strong{font-size:.82rem}
+.unified-timeline-heading time{color:var(--muted);font-size:.68rem;white-space:nowrap}
+.unified-timeline-item p{margin:4px 0;color:#344054;font-size:.8rem;line-height:1.45;overflow-wrap:anywhere}
+.unified-timeline-item small{display:block;color:var(--muted);font-size:.68rem;line-height:1.35}
+@media(max-width:900px){.donor-profile-360-grid,.donor-overview-grid{grid-template-columns:1fr}.donor-overview-grid div:nth-child(6){grid-column:auto}.profile-section-note{text-align:left}.donor-profile-section-heading{display:block}.timeline-filter{justify-content:flex-start;margin-top:10px}}
+@media(max-width:520px){.unified-timeline-item{grid-template-columns:1fr}.unified-timeline-type{width:max-content}.unified-timeline-heading{display:block}.unified-timeline-heading time{display:block;margin-top:4px}}
 
 /* Donor activity timeline */
 .donor-activity-section{grid-column:1/-1}
