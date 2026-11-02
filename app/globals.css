@@ -1453,6 +1453,22 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .travel-planning-status-badge.status-active { background:#e4f0e8; color:#1f6a44; }
 .travel-planning-status-badge.status-completed { background:#e9edf3; color:#394f7a; }
 .travel-planning-status-badge.status-cancelled { background:#f3e8e6; color:#8a4940; }
+.travel-planning-archived-badge { display:inline-block; padding:3px 9px; border-radius:20px; font-size:11px; font-weight:700; background:#f1ede4; color:#8a7140; }
+
+/* Add Archive and Delete Options to Trip Planner -- 2026-11-02, see
+   docs/AI-HANDOFF.md. */
+.travel-planning-header-controls { display:flex; flex-direction:column; align-items:flex-end; gap:8px; }
+.travel-planning-trip-menu { position:relative; }
+.travel-planning-trip-menu-toggle { min-height:40px; padding:0 14px; border:1px solid #d9ddd8; border-radius:8px; background:#fff; color:#405c4e; font-size:13px; font-weight:650; cursor:pointer; }
+.travel-planning-trip-menu-toggle:hover { background:#f7faf8; }
+.travel-planning-trip-menu-list { position:absolute; z-index:10; top:calc(100% + 6px); right:0; display:grid; min-width:180px; padding:6px; border:1px solid #d8dfda; border-radius:10px; background:#fff; box-shadow:0 16px 38px rgba(31,54,45,.16); }
+.travel-planning-trip-menu-list button { min-height:44px; padding:0 12px; border:0; border-radius:7px; background:#fff; color:var(--ink); font-size:13px; font-weight:650; text-align:left; cursor:pointer; }
+.travel-planning-trip-menu-list button:hover { background:#f2f6f3; }
+.travel-planning-trip-menu-delete { color:#8a4940 !important; }
+.travel-planning-trip-menu-delete:hover { background:#fbf0ee !important; }
+.travel-planning-trip-action-confirm { max-width:480px; }
+.travel-planning-trip-action-confirm p { margin:0; color:#3a463f; font-size:13px; line-height:1.6; }
+.travel-planning-delete-warning { color:#7a4a3f !important; }
 
 .travel-planning-toolbar { display:flex; justify-content:space-between; align-items:flex-start; gap:14px; flex-wrap:wrap; }
 .travel-planning-new-trip { min-height:40px; padding:0 16px; border:0; border-radius:9px; background:var(--green); color:#fff; font-size:13px; font-weight:700; cursor:pointer; }
@@ -1502,6 +1518,7 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .travel-planning-trip-card:hover { border-color:#c6d6cc; background:#f8faf8; }
 .travel-planning-trip-card-heading { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px; }
 .travel-planning-trip-card-heading strong { font-size:16px; }
+.travel-planning-trip-card-badge-group { display:flex; align-items:center; gap:6px; flex:none; }
 .travel-planning-trip-card-meta { margin:0 0 4px; color:#56665e; font-size:13px; }
 .travel-planning-trip-card-count { margin:0; color:var(--muted); font-size:12px; }
 .travel-planning-empty, .travel-planning-empty-inline { padding:36px 24px; border:1px dashed #ccd5cf; border-radius:14px; text-align:center; background:#fff; color:var(--muted); }

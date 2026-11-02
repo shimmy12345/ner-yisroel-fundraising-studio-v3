@@ -7,25 +7,39 @@ import { DestinationRegionFieldset } from "./DestinationRegionFieldset";
 
 type RegionOption = { id: string; label: string };
 
-const STATUS_FILTERS: ReadonlyArray<{ id: TripStatus | "all"; label: string }> = [
+// Archive Trip (2026-11-02, see docs/AI-HANDOFF.md's "Add Archive and
+// Delete Options to Trip Planner" entry) -- "Archived" is a UI-level
+// filter here, not a real TripStatus: an archived trip keeps whatever
+// real status it already had (see trips-data.ts's updateTrip). "All"
+// and every status tab below show only NON-archived trips, matching
+// the owner's own "remove the trip from the default active trip list"
+// requirement; archived trips are visible only via this dedicated tab.
+type TripFilter = TripStatus | "all" | "archived";
+const STATUS_FILTERS: ReadonlyArray<{ id: TripFilter; label: string }> = [
   { id: "all", label: "All" },
   { id: "planning", label: "Planning" },
   { id: "active", label: "Active" },
   { id: "completed", label: "Completed" },
   { id: "cancelled", label: "Cancelled" },
+  { id: "archived", label: "Archived" },
 ];
 
 const dateLabel = (epoch: number) => new Date(epoch * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
 const toEpoch = (value: string) => Math.floor(new Date(`${value}T00:00:00Z`).getTime() / 1000);
 
 export function TravelPlanningExperience({ trips, regions }: { trips: TripListItem[]; regions: RegionOption[] }) {
-  const [filter, setFilter] = useState<TripStatus | "all">("all");
+  const [filter, setFilter] = useState<TripFilter>("all");
   const [showForm, setShowForm] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const counts = useMemo(() => new Map(STATUS_FILTERS.map((option) => [option.id, option.id === "all" ? trips.length : trips.filter((trip) => trip.status === option.id).length])), [trips]);
-  const visible = filter === "all" ? trips : trips.filter((trip) => trip.status === filter);
+  const activeTrips = useMemo(() => trips.filter((trip) => trip.archivedAt === null), [trips]);
+  const archivedTrips = useMemo(() => trips.filter((trip) => trip.archivedAt !== null), [trips]);
+  const counts = useMemo(() => new Map(STATUS_FILTERS.map((option) => [
+    option.id,
+    option.id === "all" ? activeTrips.length : option.id === "archived" ? archivedTrips.length : activeTrips.filter((trip) => trip.status === option.id).length,
+  ])), [activeTrips, archivedTrips]);
+  const visible = filter === "all" ? activeTrips : filter === "archived" ? archivedTrips : activeTrips.filter((trip) => trip.status === filter);
 
   // Multi-Region Trip Destination (2026-10-26, see docs/AI-HANDOFF.md) --
   // "Destination Travel Region" accepts any combination of regions, not
@@ -101,11 +115,14 @@ export function TravelPlanningExperience({ trips, regions }: { trips: TripListIt
       {visible.map((trip) => <a className="travel-planning-trip-card" href={`/travel-planning/${encodeURIComponent(trip.id)}`} key={trip.id}>
         <div className="travel-planning-trip-card-heading">
           <strong>{trip.name}</strong>
-          <span className={`travel-planning-status-badge status-${trip.status}`}>{trip.status}</span>
+          <span className="travel-planning-trip-card-badge-group">
+            {trip.archivedAt !== null && <span className="travel-planning-archived-badge">Archived</span>}
+            <span className={`travel-planning-status-badge status-${trip.status}`}>{trip.status}</span>
+          </span>
         </div>
         <p className="travel-planning-trip-card-meta">{trip.destinationRegionLabels.length > 0 ? trip.destinationRegionLabels.join(", ") : "No region selected"} &middot; {dateLabel(trip.startDate)} &ndash; {dateLabel(trip.endDate)}</p>
         <p className="travel-planning-trip-card-count">{trip.prospectCount} prospect{trip.prospectCount === 1 ? "" : "s"}</p>
       </a>)}
-    </section> : <div className="travel-planning-empty"><strong>No trips {filter === "all" ? "yet" : `in ${filter}`}.</strong><p>Create a trip to start identifying donors worth meeting in a city you&rsquo;re planning to visit.</p></div>}
+    </section> : <div className="travel-planning-empty"><strong>No trips {filter === "all" ? "yet" : filter === "archived" ? "archived" : `in ${filter}`}.</strong><p>{filter === "archived" ? "Archived trips stay here, fully preserved, until you restore or delete them." : "Create a trip to start identifying donors worth meeting in a city you’re planning to visit."}</p></div>}
   </>;
 }

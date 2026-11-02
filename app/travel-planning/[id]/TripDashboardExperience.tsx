@@ -264,13 +264,19 @@ export function TripDashboardExperience({
   return <>
     <header className="page-header travel-planning-header">
       <div>
-        <p className="eyebrow">{trip.destinationRegionLabels.length > 0 ? trip.destinationRegionLabels.join(", ") : "No region selected"} &middot; <span className={`travel-planning-status-badge status-${trip.status}`}>{trip.status}</span></p>
+        <p className="eyebrow">{trip.destinationRegionLabels.length > 0 ? trip.destinationRegionLabels.join(", ") : "No region selected"} &middot; <span className={`travel-planning-status-badge status-${trip.status}`}>{trip.status}</span>{trip.archivedAt !== null && <> &middot; <span className="travel-planning-archived-badge">Archived</span></>}</p>
         <h1>{trip.name}</h1>
         <p className="subhead">{dateLabel(trip.startDate)} &ndash; {dateLabel(trip.endDate)}{trip.goalCents != null ? ` · Goal: ${new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(trip.goalCents / 100)}` : ""}</p>
         {trip.notes && <p className="travel-planning-trip-notes">{trip.notes}</p>}
         <EditTripRegionsControl tripId={trip.id} destinationRegionIds={trip.destinationRegionIds} onChanged={handleTripRegionsChanged} />
       </div>
-      <TripStatusControl tripId={trip.id} currentStatus={trip.status} onChanged={refresh} />
+      <div className="travel-planning-header-controls">
+        <TripStatusControl tripId={trip.id} currentStatus={trip.status} onChanged={refresh} />
+        <TripManagementMenu
+          tripId={trip.id} tripName={trip.name} archivedAt={trip.archivedAt}
+          onArchiveChanged={refresh} onDeleted={() => router.push("/travel-planning")}
+        />
+      </div>
     </header>
 
     {error && <p className="travel-planning-error" role="alert">{error}</p>}
@@ -322,6 +328,120 @@ function TripStatusControl({ tripId, currentStatus, onChanged }: { tripId: strin
     <option value="completed">Completed</option>
     <option value="cancelled">Cancelled</option>
   </select>;
+}
+
+// Archive/Delete Trip (2026-11-02, see docs/AI-HANDOFF.md's "Add
+// Archive and Delete Options to Trip Planner" entry). Archiving is a
+// plain, always-reversible timestamp toggle -- it never touches a
+// prospect, meeting, note, pledge, or donation (see trips-data.ts's
+// updateTrip). Deleting is a real, permanent removal of the trip's own
+// prospect/region rows, refused outright (never forced) when real
+// financial activity is linked (see deleteTrip()'s own header
+// comment). Both use an inline confirm panel -- the same established
+// `.travel-planning-confirm-panel` pattern EditTripRegionsControl
+// already uses -- rather than a native `window.confirm()`, so the
+// warning text can actually explain what is and isn't affected, per
+// the owner's own "show a clear warning explaining what will be
+// removed" requirement.
+function TripManagementMenu({ tripId, tripName, archivedAt, onArchiveChanged, onDeleted }: {
+  tripId: string; tripName: string; archivedAt: number | null; onArchiveChanged: () => void; onDeleted: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [confirming, setConfirming] = useState<"archive" | "restore" | "delete" | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [blocked, setBlocked] = useState<string | null>(null);
+
+  function startConfirm(action: "archive" | "restore" | "delete") {
+    setOpen(false);
+    setError(null);
+    setBlocked(null);
+    setConfirming(action);
+  }
+  function cancel() {
+    setConfirming(null);
+    setError(null);
+    setBlocked(null);
+  }
+
+  async function submitArchiveChange(archived: boolean) {
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/trips/${encodeURIComponent(tripId)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ archived }) });
+      if (!response.ok) { const payload = await response.json().catch(() => ({})) as { error?: string }; throw new Error(payload.error ?? "Could not update this trip."); }
+      setConfirming(null);
+      onArchiveChanged();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update this trip.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitDelete() {
+    setBusy(true);
+    setError(null);
+    setBlocked(null);
+    try {
+      const response = await fetch(`/api/trips/${encodeURIComponent(tripId)}`, { method: "DELETE" });
+      const payload = await response.json().catch(() => ({})) as { error?: string; blocked?: boolean };
+      if (!response.ok) {
+        if (payload.blocked) { setBlocked(payload.error ?? "This trip cannot be permanently deleted."); return; }
+        throw new Error(payload.error ?? "This trip could not be deleted.");
+      }
+      onDeleted();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "This trip could not be deleted.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (confirming === "archive") return <div className="travel-planning-confirm-panel travel-planning-trip-action-confirm" role="alertdialog" aria-label="Archive trip">
+    <p>Archive &ldquo;{tripName}&rdquo;? It will be hidden from your active trip list, but every meeting, prospect, note, pledge, and donation is kept exactly as it is. You can restore it to active at any time.</p>
+    {error && <p className="travel-planning-error" role="alert">{error}</p>}
+    <div className="travel-planning-confirm-actions">
+      <button type="button" onClick={() => submitArchiveChange(true)} disabled={busy}>{busy ? "Archiving…" : "Archive Trip"}</button>
+      <button type="button" onClick={cancel} disabled={busy}>Cancel</button>
+    </div>
+  </div>;
+
+  if (confirming === "restore") return <div className="travel-planning-confirm-panel travel-planning-trip-action-confirm" role="alertdialog" aria-label="Restore trip">
+    <p>Restore &ldquo;{tripName}&rdquo; to your active trip list? Nothing about the trip has changed while it was archived.</p>
+    {error && <p className="travel-planning-error" role="alert">{error}</p>}
+    <div className="travel-planning-confirm-actions">
+      <button type="button" onClick={() => submitArchiveChange(false)} disabled={busy}>{busy ? "Restoring…" : "Restore Trip"}</button>
+      <button type="button" onClick={cancel} disabled={busy}>Cancel</button>
+    </div>
+  </div>;
+
+  if (confirming === "delete") return <div className="travel-planning-confirm-panel travel-planning-trip-action-confirm travel-planning-delete-confirm" role="alertdialog" aria-label="Delete trip">
+    {blocked ? <>
+      <p className="travel-planning-delete-warning">{blocked}</p>
+      <div className="travel-planning-confirm-actions">
+        <button type="button" onClick={() => { setConfirming("archive"); setBlocked(null); }}>Archive Trip instead</button>
+        <button type="button" onClick={cancel}>Cancel</button>
+      </div>
+    </> : <>
+      <p className="travel-planning-delete-warning">Permanently delete &ldquo;{tripName}&rdquo;? This removes the trip itself, its destination regions, and its prospect list (including manually-added prospects). It does <strong>not</strong> delete any donor profile, meeting record, AI meeting note, pledge, or donation -- those stay on the donor&rsquo;s own permanent record. This cannot be undone.</p>
+      {error && <p className="travel-planning-error" role="alert">{error}</p>}
+      <div className="travel-planning-confirm-actions">
+        <button type="button" onClick={submitDelete} disabled={busy}>{busy ? "Deleting…" : "Permanently Delete"}</button>
+        <button type="button" onClick={cancel} disabled={busy}>Cancel</button>
+      </div>
+    </>}
+  </div>;
+
+  return <div className="travel-planning-trip-menu">
+    <button type="button" className="travel-planning-trip-menu-toggle" onClick={() => setOpen((current) => !current)} aria-expanded={open} aria-haspopup="true">Trip options &#8943;</button>
+    {open && <div className="travel-planning-trip-menu-list" role="menu">
+      {archivedAt === null
+        ? <button type="button" role="menuitem" onClick={() => startConfirm("archive")}>Archive Trip</button>
+        : <button type="button" role="menuitem" onClick={() => startConfirm("restore")}>Restore Trip</button>}
+      <button type="button" role="menuitem" className="travel-planning-trip-menu-delete" onClick={() => startConfirm("delete")}>Delete Trip</button>
+    </div>}
+  </div>;
 }
 
 // Multi-Region Trip Destination (2026-10-26, see docs/AI-HANDOFF.md) --

@@ -857,7 +857,7 @@ CREATE TABLE `trips` (
 	`notes` text,
 	`status` text NOT NULL DEFAULT 'planning' CHECK (`status` IN ('planning','active','completed','cancelled')),
 	`created_at` integer NOT NULL,
-	`updated_at` integer NOT NULL,
+	`updated_at` integer NOT NULL, `archived_at` integer,
 	FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 
@@ -1102,6 +1102,8 @@ CREATE UNIQUE INDEX `trip_prospects_trip_donor_idx` ON `trip_prospects` (`trip_i
 
 CREATE INDEX `trip_prospects_trip_selected_idx` ON `trip_prospects` (`trip_id`,`selected_at`);
 
+CREATE INDEX `trips_owner_archived_idx` ON `trips` (`owner_user_id`,`archived_at`);
+
 CREATE INDEX `trips_owner_status_idx` ON `trips` (`owner_user_id`,`status`);
 
 CREATE UNIQUE INDEX `users_email_unique` ON `users` (`email`);
@@ -1121,5 +1123,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','41bef0849e2bd5e9e4b260c885e4f0cf17a253e2b474838c7ae91182e37ceac7',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','560e0ea52df216de6e2a03409457329ed837b90f58f0e56c3ed196435ee913c8',1785944072);
 PRAGMA optimize;

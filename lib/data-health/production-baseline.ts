@@ -34,7 +34,12 @@ export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map(
 // 2026-10-26, see docs/AI-HANDOFF.md) -- one new table
 // (trip_destination_regions), same STAGING ONLY carve-out as 0054 and
 // every other migration in this trip-planning feature so far.
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 55;
+//
+// 56 as of 0056_trip_archive_delete.sql (Add Archive and Delete
+// Options to Trip Planner, 2026-11-02, see docs/AI-HANDOFF.md) -- one
+// new column (trips.archived_at) and its index, same STAGING ONLY
+// carve-out.
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 56;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is

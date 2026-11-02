@@ -1,0 +1,21 @@
+-- Add Archive and Delete Options to Trip Planner (2026-11-02, see
+-- docs/AI-HANDOFF.md). STAGING ONLY -- not applied to Production as
+-- part of this round, same carve-out as drizzle/0046, 0047, 0050,
+-- 0051, 0054, 0055.
+--
+-- Archiving is a separate, orthogonal flag from `status`
+-- (planning/active/completed/cancelled), not a 5th status value --
+-- overloading the status enum would lose whatever real workflow state
+-- the trip was in at the moment it got archived, and restoring it
+-- would have nowhere to recover that state from. This follows the
+-- exact same convention `donors.archived_at` already uses (db/
+-- schema.ts) rather than inventing a second archiving mechanism.
+--
+-- NULL = active (the default -- every existing trip is completely
+-- unaffected). A timestamp = archived: hidden from the default trip
+-- list, fully preserved, and trivially restorable by clearing this one
+-- column back to NULL -- no other row anywhere is touched by
+-- archiving or restoring a trip.
+ALTER TABLE `trips` ADD COLUMN `archived_at` integer;
+--> statement-breakpoint
+CREATE INDEX `trips_owner_archived_idx` ON `trips` (`owner_user_id`,`archived_at`);

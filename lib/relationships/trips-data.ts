@@ -214,7 +214,7 @@ function toDonorSearchRecord(row: DonorSearchRow): DonorSearchRecord & { city: s
   };
 }
 
-export type TripListItem = { id: string; name: string; destinationRegionLabels: string[]; startDate: number; endDate: number; status: TripStatus; prospectCount: number };
+export type TripListItem = { id: string; name: string; destinationRegionLabels: string[]; startDate: number; endDate: number; status: TripStatus; prospectCount: number; archivedAt: number | null };
 
 // Multi-Region Trip Destination (2026-10-26, see docs/AI-HANDOFF.md) --
 // every destination region id this owner's trips are tagged with, in
@@ -242,11 +242,11 @@ export async function listTrips(userId: string): Promise<TripListItem[]> {
   // Selection, 2026-10-18) -- a regional candidate the owner hasn't
   // acted on yet was never a real outreach target, so it must never
   // inflate this trip card's own count.
-  const result = await env.DB.prepare(`SELECT t.id, t.name, t.start_date, t.end_date, t.status,
+  const result = await env.DB.prepare(`SELECT t.id, t.name, t.start_date, t.end_date, t.status, t.archived_at,
       (SELECT COUNT(*) FROM trip_prospects WHERE trip_id = t.id AND selected_at IS NOT NULL) AS prospect_count
-    FROM trips t WHERE t.owner_user_id = ? ORDER BY t.start_date DESC`).bind(userId).all<{ id: string; name: string; start_date: number; end_date: number; status: TripStatus; prospect_count: number }>();
+    FROM trips t WHERE t.owner_user_id = ? ORDER BY t.start_date DESC`).bind(userId).all<{ id: string; name: string; start_date: number; end_date: number; status: TripStatus; archived_at: number | null; prospect_count: number }>();
   const regionsByTrip = await destinationRegionIdsByTrip(result.results.map((row) => row.id));
-  return result.results.map((row) => ({ id: row.id, name: row.name, destinationRegionLabels: regionLabelsFor(regionsByTrip.get(row.id) ?? []), startDate: row.start_date, endDate: row.end_date, status: row.status, prospectCount: row.prospect_count }));
+  return result.results.map((row) => ({ id: row.id, name: row.name, destinationRegionLabels: regionLabelsFor(regionsByTrip.get(row.id) ?? []), startDate: row.start_date, endDate: row.end_date, status: row.status, prospectCount: row.prospect_count, archivedAt: row.archived_at }));
 }
 
 export type CreateTripInput = { name: string; destinationRegionIds: readonly TravelRegionId[]; startDate: number; endDate: number; goalCents: number | null; notes: string | null };
@@ -277,16 +277,16 @@ export async function createTrip(userId: string, input: CreateTripInput, now: nu
   return { tripId };
 }
 
-export type TripRecord = { id: string; name: string; destinationRegionIds: TravelRegionId[]; destinationRegionLabels: string[]; startDate: number; endDate: number; goalCents: number | null; notes: string | null; status: TripStatus; createdAt: number; updatedAt: number };
+export type TripRecord = { id: string; name: string; destinationRegionIds: TravelRegionId[]; destinationRegionLabels: string[]; startDate: number; endDate: number; goalCents: number | null; notes: string | null; status: TripStatus; archivedAt: number | null; createdAt: number; updatedAt: number };
 
 export async function getTrip(userId: string, tripId: string): Promise<TripRecord | null> {
-  const row = await env.DB.prepare(`SELECT id, name, start_date, end_date, fundraising_goal_cents, notes, status, created_at, updated_at
+  const row = await env.DB.prepare(`SELECT id, name, start_date, end_date, fundraising_goal_cents, notes, status, archived_at, created_at, updated_at
       FROM trips WHERE id = ? AND owner_user_id = ?`).bind(tripId, userId)
-    .first<{ id: string; name: string; start_date: number; end_date: number; fundraising_goal_cents: number | null; notes: string | null; status: TripStatus; created_at: number; updated_at: number }>();
+    .first<{ id: string; name: string; start_date: number; end_date: number; fundraising_goal_cents: number | null; notes: string | null; status: TripStatus; archived_at: number | null; created_at: number; updated_at: number }>();
   if (!row) return null;
   const regionsByTrip = await destinationRegionIdsByTrip([row.id]);
   const destinationRegionIds = regionsByTrip.get(row.id) ?? [];
-  return { id: row.id, name: row.name, destinationRegionIds, destinationRegionLabels: regionLabelsFor(destinationRegionIds), startDate: row.start_date, endDate: row.end_date, goalCents: row.fundraising_goal_cents, notes: row.notes, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at };
+  return { id: row.id, name: row.name, destinationRegionIds, destinationRegionLabels: regionLabelsFor(destinationRegionIds), startDate: row.start_date, endDate: row.end_date, goalCents: row.fundraising_goal_cents, notes: row.notes, status: row.status, archivedAt: row.archived_at, createdAt: row.created_at, updatedAt: row.updated_at };
 }
 
 // Collapsed, display-only summary of the full SyncStatus union (Minimal
@@ -1070,7 +1070,7 @@ export async function updateProspectFields(userId: string, tripId: string, prosp
   return true;
 }
 
-export async function updateTrip(userId: string, tripId: string, update: { name?: string; status?: TripStatus; goalCents?: number | null; notes?: string | null; startDate?: number; endDate?: number; destinationRegionIds?: readonly TravelRegionId[] }, now: number): Promise<boolean> {
+export async function updateTrip(userId: string, tripId: string, update: { name?: string; status?: TripStatus; goalCents?: number | null; notes?: string | null; startDate?: number; endDate?: number; destinationRegionIds?: readonly TravelRegionId[]; archived?: boolean }, now: number): Promise<boolean> {
   const existing = await getTrip(userId, tripId);
   if (!existing) return false;
   const sets: string[] = [];
@@ -1081,6 +1081,13 @@ export async function updateTrip(userId: string, tripId: string, update: { name?
   if (update.notes !== undefined) { sets.push("notes = ?"); values.push(update.notes); }
   if (update.startDate !== undefined) { sets.push("start_date = ?"); values.push(update.startDate); }
   if (update.endDate !== undefined) { sets.push("end_date = ?"); values.push(update.endDate); }
+  // Archive/Restore Trip (2026-11-02, see docs/AI-HANDOFF.md) -- a plain
+  // timestamp toggle, orthogonal to `status` (see drizzle/0056's own
+  // header comment for why this is a separate column, not a 5th status
+  // value). Archiving/restoring never touches any other row -- every
+  // meeting, prospect, note, pledge, and donation under this trip is
+  // completely unaffected either way.
+  if (update.archived !== undefined) { sets.push("archived_at = ?"); values.push(update.archived ? now : null); }
 
   const statements: D1PreparedStatement[] = [];
   if (sets.length > 0) {
@@ -1105,6 +1112,73 @@ export async function updateTrip(userId: string, tripId: string, update: { name?
   if (statements.length === 0) return true;
   await env.DB.batch(statements);
   return true;
+}
+
+export type DeleteTripResult = { ok: true } | { ok: false; reason: "not_found" } | { ok: false; reason: "has_financial_activity"; detail: string };
+
+// Delete Trip (2026-11-02, see docs/AI-HANDOFF.md's "Add Archive and
+// Delete Options to Trip Planner" entry). A real, permanent hard
+// delete -- but ONLY of this trip's own thin workflow rows
+// (trip_prospects, trip_destination_regions, and this trip's own
+// trip_financial_attributions/trip_prospect_commitments LINK rows).
+// Exactly the same "never cascade into real CRM/financial history"
+// discipline removeProspect() already follows for a single prospect
+// (above): `interactions` (the real meeting record, and its AI Meeting
+// Notes, which live in interactions.summary -- see
+// app/api/trips/[id]/prospects/[prospectId]/meeting-notes/route.ts),
+// `recommendations` (follow-ups), `giving_activities` (every real
+// pledge/gift), and the donor record itself are NEVER touched here --
+// deleting a trip only ever removes the TRIP's own wrapper around
+// them, never the underlying CRM facts.
+//
+// Blocked outright -- never silently drops or orphans real money --
+// if this trip has any ACTIVE (not already soft-removed, and for a
+// commitment, not already migrated into a real giving_activities row)
+// financial link: a real trip_financial_attributions row pointing at
+// an actual pledge/gift, or a real trip_prospect_commitments row for
+// an unlinked prospect's own reported pledge/gift. The owner's own
+// "prevent permanent deletion of trips with linked financial
+// activity" + "prefer a conservative deletion policy over a
+// complicated system that risks financial data" instructions are both
+// satisfied by refusing outright rather than attempting any kind of
+// automatic reattribution -- Archive Trip is the always-safe
+// alternative here, since it deletes nothing at all.
+//
+// D1 enforces every foreign key unconditionally, with no way to
+// disable it (confirmed against real D1 in this project's own prior
+// review -- see drizzle/pending-review/0049's header comment), so
+// every child row referencing this trip must be deleted BEFORE the
+// `trips` row itself, in exactly this children-before-parents order,
+// as one atomic batch (every row gone, or none): a
+// trip_prospect_commitments row can reference BOTH trip_prospects AND
+// trip_financial_attributions (via migrated_attribution_id), so it
+// must go first; trip_financial_attributions and trip_prospects can
+// then both be deleted safely; trip_destination_regions and finally
+// `trips` itself follow.
+export async function deleteTrip(userId: string, tripId: string): Promise<DeleteTripResult> {
+  const trip = await env.DB.prepare(`SELECT id FROM trips WHERE id = ? AND owner_user_id = ?`).bind(tripId, userId).first<{ id: string }>();
+  if (!trip) return { ok: false, reason: "not_found" };
+
+  const activity = await env.DB.prepare(`SELECT
+      EXISTS (SELECT 1 FROM trip_financial_attributions WHERE trip_id = ? AND removed_at IS NULL) AS has_attribution,
+      EXISTS (SELECT 1 FROM trip_prospect_commitments WHERE trip_id = ? AND removed_at IS NULL AND migrated_at IS NULL) AS has_commitment`)
+    .bind(tripId, tripId).first<{ has_attribution: number; has_commitment: number }>();
+  if (activity?.has_attribution || activity?.has_commitment) {
+    return {
+      ok: false,
+      reason: "has_financial_activity",
+      detail: "This trip has real pledges or donations attributed to it and cannot be permanently deleted -- deleting it would risk losing or orphaning that financial record. Archive it instead to hide it from your active trip list while preserving every pledge, donation, and donor record exactly as it is.",
+    };
+  }
+
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM trip_prospect_commitments WHERE trip_id = ?`).bind(tripId),
+    env.DB.prepare(`DELETE FROM trip_financial_attributions WHERE trip_id = ?`).bind(tripId),
+    env.DB.prepare(`DELETE FROM trip_prospects WHERE trip_id = ?`).bind(tripId),
+    env.DB.prepare(`DELETE FROM trip_destination_regions WHERE trip_id = ?`).bind(tripId),
+    env.DB.prepare(`DELETE FROM trips WHERE id = ? AND owner_user_id = ?`).bind(tripId, userId),
+  ]);
+  return { ok: true };
 }
 
 // Trip Fundraising Results Dashboard (2026-10-16, see docs/AI-HANDOFF.md).

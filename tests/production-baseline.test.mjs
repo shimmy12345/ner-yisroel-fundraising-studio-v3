@@ -525,13 +525,12 @@ test("baseline picks up the schema-adding 0054 trip manual prospects migration",
 test("baseline picks up the schema-adding 0055 trip multi-region migration", () => {
   // 0055_trip_multi_region.sql (Multi-Region Trip Destination,
   // 2026-10-26, see docs/AI-HANDOFF.md) adds one new table,
-  // trip_destination_regions -- the current LATEST migration as of
-  // this round, so the schema hash must change again.
+  // trip_destination_regions, so the schema hash must change again.
+  // No longer the latest migration (0056 is, see the test below).
   //
   // STAGING ONLY as of this round -- NOT applied to Production (same
   // carve-out as 0046/0047/0050/0051/0054).
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0055_trip_multi_region.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 55, "exactly 55 real, applied-order migrations -- the 0049 draft in drizzle/pending-review/ is never counted");
+  assert.ok(manifest.sourceMigrations.includes("0055_trip_multi_region.sql"));
   assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
   assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
   const destinationRegionsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trip_destination_regions");
@@ -540,4 +539,24 @@ test("baseline picks up the schema-adding 0055 trip multi-region migration", () 
   const uniqueIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "trip_destination_regions_trip_region_idx");
   assert.ok(uniqueIndex, "the trip+region uniqueness guard must be captured in the baseline");
   assert.match(uniqueIndex.sql, /UNIQUE/i);
+});
+
+test("baseline picks up the schema-adding 0056 trip archive/delete migration", () => {
+  // 0056_trip_archive_delete.sql (Add Archive and Delete Options to
+  // Trip Planner, 2026-11-02, see docs/AI-HANDOFF.md) adds one new
+  // column, trips.archived_at, plus its own index -- the current
+  // LATEST migration as of this round, so the schema hash must change
+  // again.
+  //
+  // STAGING ONLY as of this round -- NOT applied to Production (same
+  // carve-out as 0046/0047/0050/0051/0054/0055).
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0056_trip_archive_delete.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 56, "exactly 56 real, applied-order migrations -- the 0049 draft in drizzle/pending-review/ is never counted");
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  const tripsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trips");
+  assert.ok(tripsTable, "trips must still be a real table in the baseline topology");
+  assert.match(tripsTable.sql, /archived_at/, "archived_at must be captured in the baseline");
+  const archivedIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "trips_owner_archived_idx");
+  assert.ok(archivedIndex, "the owner+archived_at index must be captured in the baseline");
 });

@@ -1,6 +1,6 @@
 import { getChatGPTUser } from "../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
-import { getTrip, listTripProspects, listDonorsForTripSearch, updateTrip } from "../../../../lib/relationships/trips-data";
+import { getTrip, listTripProspects, listDonorsForTripSearch, updateTrip, deleteTrip } from "../../../../lib/relationships/trips-data";
 import { validateTripName, validateTripDates, validateFundraisingGoalCents, validateNotes, isValidTripStatus, validateDestinationRegionIds } from "../../../../lib/relationships/trip-model";
 import { isValidTravelRegionId } from "../../../../lib/relationships/travel-regions";
 import { logger } from "../../../../lib/logger";
@@ -29,6 +29,7 @@ type UpdateTripBody = {
   startDate?: number;
   endDate?: number;
   destinationRegionIds?: string[];
+  archived?: boolean;
 };
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -80,6 +81,13 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     if (!regionsResult.ok) return Response.json({ error: "Choose valid travel regions" }, { status: 422 });
     update.destinationRegionIds = regionsResult.regionIds;
   }
+  // Archive/Restore Trip (2026-11-02, see docs/AI-HANDOFF.md) -- a plain
+  // boolean toggle, never anything else; see trips-data.ts's updateTrip
+  // for why this is a separate column from `status`.
+  if (body.archived !== undefined) {
+    if (typeof body.archived !== "boolean") return Response.json({ error: "archived must be true or false" }, { status: 422 });
+    update.archived = body.archived;
+  }
 
   const now = Math.floor(Date.now() / 1000);
   try {
@@ -90,4 +98,25 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   }
   const trip = await getTrip(profile.id, id);
   return Response.json({ trip });
+}
+
+// Delete Trip (2026-11-02, see docs/AI-HANDOFF.md's "Add Archive and
+// Delete Options to Trip Planner" entry). See deleteTrip() in
+// trips-data.ts for exactly what is and is not removed, and why a
+// trip with real linked financial activity is refused outright (409)
+// rather than deleted -- the UI's own response to that status offers
+// Archive Trip instead, never a forced/overridable delete.
+export async function DELETE(_request: Request, { params }: { params: Promise<{ id: string }> }) {
+  const user = await getChatGPTUser();
+  if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
+  const profile = await ensureUserProfile(user);
+  const { id } = await params;
+
+  const result = await deleteTrip(profile.id, id);
+  if (!result.ok) {
+    if (result.reason === "not_found") return Response.json({ error: "Trip not found" }, { status: 404 });
+    return Response.json({ error: result.detail, blocked: true }, { status: 409 });
+  }
+  logger.info("trip_deleted", { userId: profile.id, tripId: id });
+  return Response.json({ ok: true });
 }

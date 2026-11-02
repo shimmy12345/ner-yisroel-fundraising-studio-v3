@@ -60199,3 +60199,261 @@ No Production donor record, pledge, payment, or trip assignment was
 modified. No database migration applied. No credential changed. No
 background Google Calendar synchronization enabled. No unrelated
 changes deployed.
+
+## Add Archive and Delete Options to Trip Planner (2026-11-02) -- IMPLEMENTED AND VERIFIED ON STAGING, NOT YET DEPLOYED TO PRODUCTION
+
+Owner request: no way existed to remove a trip that was no longer
+needed or created by mistake. Investigate what exists first, then add
+a reversible Archive and a conservative, financial-data-safe Delete,
+test the complete workflow on Staging with disposable trips, and
+report back before any Production deployment.
+
+### 1. Why Archive/Delete was unavailable (investigated first, no code changed until understood)
+
+Neither existed in any form. `trips.status` (`planning`/`active`/
+`completed`/`cancelled`) is a CHECK-constrained 4-value enum with no
+5th "archived" value anywhere; no `archived_at`/`deleted_at` column
+exists on any trip-related table; `app/api/trips/[id]/route.ts`
+exported only `GET`/`PATCH`, no `DELETE`; the only place any trip-table
+`DELETE` had ever appeared was ad-hoc, manual `wrangler d1 execute`
+cleanup of disposable test data during prior verification rounds in
+this same file -- never a real application code path. A forked
+investigation (read-only, no edits) mapped the full data model before
+any design decision was made:
+
+- `trip_destination_regions`, `trip_prospects` (donor_id nullable for
+  manually-added prospects), `trip_financial_attributions` (a pure
+  link table to a real `giving_activities` pledge/gift, soft-removable
+  via `removed_at`), and `trip_prospect_commitments` (an unlinked
+  prospect's own reported pledge/gift, migratable into a real
+  attribution via `migrated_attribution_id`) all reference `trips`
+  with `ON DELETE no action` -- and **D1 enforces every foreign key
+  unconditionally, with no way to disable it** (confirmed against real
+  D1 in an earlier round's own review, drizzle/pending-review/0049's
+  header comment). A plain `DELETE FROM trips` would always throw a
+  foreign-key violation the moment any child row still exists.
+- AI Meeting Notes have **no dedicated table at all** -- the note text
+  lives in `interactions.summary` (the same real interaction row
+  `trip_prospects.linked_interaction_id` points at), with follow-ups
+  in `recommendations` (FK'd only to `donors`/`users`, never to a
+  trip). Both are the donor's own permanent CRM record, completely
+  independent of any trip.
+- The established, already-shipped convention for a destructive
+  trip-related action (`removeProspect()`, "Remove donor from trip")
+  is: hard-delete only the thin join/workflow row; never cascade into
+  real CRM/financial history; never silently affect a real scheduled
+  meeting. Every other "soft delete" in this codebase (`donors.
+  archivedAt`, `trip_financial_attributions.removed_at`,
+  `trip_prospect_commitments.removed_at`) follows the same "never
+  truly delete real financial/CRM history" discipline.
+
+This directly shaped both features: **Archive** is a plain, orthogonal
+timestamp (not a 5th status value, so a trip's real workflow state
+survives archiving/restoring intact); **Delete** is a real hard delete
+of only the trip's own thin wrapper rows, refused outright when real
+financial activity exists, and never touches `interactions`,
+`recommendations`, `giving_activities`, or any donor record.
+
+### 2. Exactly how archiving and deletion work
+
+- **Migration `0056_trip_archive_delete.sql`** (STAGING ONLY, same
+  carve-out as 0046/0047/0050/0051/0054/0055): adds `trips.archived_at`
+  (nullable integer, NULL = active) and an index on
+  `(owner_user_id, archived_at)`.
+- **Archive/Restore**: `updateTrip()`'s existing `PATCH /api/trips/:id`
+  path gained an `archived: boolean` field -- `archived_at = now` to
+  archive, `archived_at = NULL` to restore. No other row, and no other
+  field on the trip itself, is ever touched.
+- **Delete**: new `deleteTrip(userId, tripId)` in `trips-data.ts` and a
+  new `DELETE /api/trips/:id` route.
+  1. Confirms ownership (404 `not_found` otherwise, including for
+     another user's trip -- never a silent no-op "success").
+  2. Checks for ACTIVE financial activity: any
+     `trip_financial_attributions` row for this trip with
+     `removed_at IS NULL`, OR any `trip_prospect_commitments` row with
+     `removed_at IS NULL AND migrated_at IS NULL` (a commitment
+     already migrated into a real attribution is checked via that
+     attribution instead, not double-counted here). If either exists,
+     refuses with `{ ok: false, reason: "has_financial_activity",
+     detail: "...Archive it instead..." }` -- a 409 at the API layer --
+     and changes nothing at all.
+  3. Otherwise, one atomic `env.DB.batch()` deletes, in this exact
+     children-before-parents order (required because
+     `trip_prospect_commitments` can reference BOTH `trip_prospects`
+     AND `trip_financial_attributions` via `migrated_attribution_id`):
+     `trip_prospect_commitments` -> `trip_financial_attributions` ->
+     `trip_prospects` -> `trip_destination_regions` -> `trips`.
+- **UI**: a new "Trip options" menu in the trip dashboard header
+  (beside the existing status dropdown) with Archive Trip/Restore Trip
+  and Delete Trip. Both use an inline confirm panel (the same
+  `.travel-planning-confirm-panel` pattern "Edit destination regions"
+  already uses), never a native `window.confirm()` -- so the warning
+  text can actually explain consequences, and so a blocked delete can
+  show a specific message with an "Archive Trip instead" button,
+  rather than a bare browser dialog. An archived trip shows a visible
+  "Archived" badge next to its status badge, on both the trip list
+  card and the trip dashboard header. The trip list gained an
+  "Archived" filter tab; "All" and every status tab now show only
+  non-archived trips by default (`listTrips()` itself is unchanged --
+  still returns every trip, archived or not -- filtering into
+  Active/Archived views is a UI-level concern, matching this app's
+  existing "filter client-side over the full list" convention).
+
+### 3. Which trips are eligible for permanent deletion
+
+Any trip with **zero currently-active financial activity** -- no real
+pledge/gift currently attributed to it via `trip_financial_attributions`,
+and no unlinked prospect's own currently-active, unmigrated
+`trip_prospect_commitments` row. This is true regardless of how many
+real prospects, scheduled meetings, or completed meetings the trip
+has -- only FINANCIAL activity blocks deletion, per the owner's own
+explicit scoping ("prevent permanent deletion of trips with linked
+financial activity," not "with any activity"). A trip whose financial
+activity has already been migrated into a real `giving_activities`
+record AND that attribution later reconciled/removed is also eligible
+-- the real money by then lives entirely in the donor's own giving
+history, independent of the trip. Any trip can always be Archived
+regardless of financial activity, since archiving deletes nothing.
+
+### 4. What happens to linked meeting notes and donor activity
+
+Nothing. Deleting a trip only removes `trip_prospects`,
+`trip_destination_regions`, and the trip's own
+`trip_financial_attributions`/`trip_prospect_commitments` link rows.
+The real `interactions` row behind any scheduled or completed meeting
+-- including its AI Meeting Notes text (`interactions.summary`) and
+any `recommendations` follow-ups -- is never deleted, never modified,
+and is not even referenced by anything that gets removed (only the
+`trip_prospects` row that POINTED at it is deleted; the interaction
+itself has no FK back to the trip). It remains exactly as it was on
+the donor's own permanent record, visible from their donor profile
+precisely as it was before the trip existed.
+
+### 5. What safeguards prevent financial data loss
+
+1. The financial-activity check above, which runs BEFORE any delete
+   and refuses the whole operation outright -- never a partial delete,
+   never an automatic reattribution or reassignment of the pledge/gift
+   to "no trip."
+2. `giving_activities` (every real pledge, gift, and payment) is never
+   referenced by `deleteTrip()`'s own DELETE statements at all -- not
+   even for a trip that passes the safety check -- so there is no code
+   path in this feature that can ever touch a real financial record.
+3. D1's own unconditional foreign-key enforcement is a second,
+   independent backstop: even if the application-level check above
+   had a bug, attempting to delete `trip_financial_attributions` or
+   `trip_prospect_commitments` rows that something else still
+   references would fail loudly with a real constraint violation
+   rather than silently succeeding and orphaning data -- proven
+   directly in `tests/trip-archive-delete-schema.test.mjs` by
+   attempting the WRONG delete order and confirming SQLite (with
+   foreign-key enforcement on, matching D1's own behavior) rejects it.
+4. Archive is always available with zero risk, as the explicit
+   fallback the UI itself offers the moment a delete is blocked.
+
+### 6. Testing
+
+- `tests/trip-archive-delete-schema.test.mjs`: schema-level tests
+  against a real, freshly-migrated in-memory SQLite database --
+  archive/restore is a plain column write; deleting an empty trip
+  succeeds in the correct order; deleting in the WRONG order (parent
+  before child) genuinely fails with a real foreign-key violation
+  (proving the ordering is load-bearing, not stylistic); a
+  `trip_prospect_commitments` row referencing a `trip_financial_
+  attributions` row via `migrated_attribution_id` must be deleted
+  first; the real `giving_activities`/`donors`/`interactions` rows
+  (including AI meeting notes text) survive a trip's deletion
+  untouched.
+- `tests/trip-archive-delete.test.mjs`: calls the REAL, unmodified
+  `createTrip`/`updateTrip`/`deleteTrip`/`getTrip`/`listTrips` from
+  `trips-data.ts` (not a hand-copied SQL reproduction) via this
+  codebase's established `cloudflare:workers` shim + D1-over-SQLite
+  adapter (see `tests/trip-reconciliation-concurrency.test.mjs`'s own
+  header for why this harness exists). Covers: archiving, restoring,
+  `listTrips()` still returning archived trips (for the Archived
+  filter), deleting an empty trip, deleting a trip with real
+  non-financial activity (prospects/meetings) succeeding, deleting a
+  trip with an active attribution OR an active unlinked commitment
+  being blocked with the right reason/detail, a migrated-then-
+  reconciled commitment no longer blocking deletion, and a different
+  user (or a nonexistent trip) never being able to delete someone
+  else's trip.
+- `tests/trip-archive-delete-ui.test.mjs`: source-inspection tests
+  (matching `tests/trip-calendar-link.test.mjs`'s established pattern
+  for UI code with no React/DOM test runner) proving the UI is wired
+  to the safe PATCH/DELETE endpoints, never a native `window.confirm()`,
+  the delete warning text names what is and isn't removed, a blocked
+  delete offers Archive with no way to force it through, and the trip
+  list actually excludes archived trips from the default view.
+- Full suite: 254/254 test files pass (3 new files added); `tsc
+  --noEmit` clean; `build:staging-independent` clean.
+- Also regenerated `production-baseline/schema-manifest.json` and
+  `production-baseline/drizzle/0000_production_baseline_0019.sql`
+  (via `pnpm run db:baseline:generate` + `db:baseline:rehearse`) and
+  updated `lib/data-health/production-baseline.ts`'s hardcoded
+  migration-count check (55 -> 56) and
+  `tests/production-baseline.test.mjs`'s own "latest migration" test --
+  required maintenance whenever a new migration file is added,
+  unrelated to this feature's own logic but necessary for the existing
+  `pnpm test` suite to stay green.
+
+### Tested on Staging (`fundraising-os-staging.sgoldstein.workers.dev`, Worker `af554d5c-62c4-42fc-a3c2-8bbe88fab7a6`)
+
+Migration 0056 applied to the Staging D1 database directly beforehand
+(confirmed via `pragma_table_info`). Using real, disposable test trips
+created through the actual UI:
+
+1. **Archiving a trip**: created "Archive Delete Test Trip A," archived
+   it via the new menu -- confirm panel showed the exact intended
+   warning text; after confirming, the trip's header showed a new
+   "Archived" badge.
+2. **Restoring**: reopened the same trip, the menu now offered
+   "Restore Trip" (not "Archive Trip") -- confirmed, and a direct D1
+   read showed `archived_at` back to `NULL`.
+3. **Viewing archived trips**: on the trip list, "All" stayed at 2 (the
+   archived trip correctly excluded) while "Archived" showed 1; opening
+   the Archived tab showed the trip with both "Archived" and "Planning"
+   badges.
+4. **Deleting an empty trip**: re-archived the same trip, then deleted
+   it -- the confirm panel showed the exact full warning text (what is
+   and isn't removed); after confirming, a direct D1 read confirmed
+   the `trips` row was gone.
+5. **Preventing unsafe deletion of a trip with financial activity**:
+   created a second disposable trip, then injected one real,
+   disposable `giving_activities` pledge row and one
+   `trip_financial_attributions` row linking it to that trip (via D1,
+   since fabricating a real JL import was out of scope for this
+   check). Attempting Delete Trip via the UI was correctly refused,
+   showing the exact server-returned message ("This trip has real
+   pledges or donations attributed to it...") and an "Archive Trip
+   instead" button, which was confirmed to correctly open the archive
+   panel. Removed the disposable pledge/attribution via D1, then
+   deleted the same trip via the UI -- this time it succeeded
+   immediately, proving the block lifts the moment the financial
+   activity is gone.
+6. **Preserving donor records, financial history, meeting notes, and
+   linked activity**: throughout, zero Google network requests and
+   zero console errors; `donors` (266), `giving_activities` (5488),
+   `trips` (2), and `trip_prospects` (45) row counts on Staging
+   confirmed identical before and after this entire round, via direct,
+   read-only D1 queries -- both disposable test trips and the
+   disposable pledge/attribution were fully cleaned up, leaving
+   Staging in exactly its pre-test state.
+7. **Existing Trip Planner features continue working**: the two real,
+   pre-existing Staging trips ("Chicago," "Test") were never touched
+   by any action in this round: same regions, same prospect counts,
+   same status, confirmed via the final D1 count check. The full
+   existing test suite (every scheduling/calendar/region-filter/
+   financial-attribution test) continues to pass unmodified.
+
+### Unresolved issues
+
+None. The Archive/Delete feature is implemented, tested at both the
+pure-function and live-Staging level, and fully documented. Not yet
+added to `FEATURE_FINGERPRINTS`
+(`scripts/check-production-feature-fingerprints.mjs`) or marked
+"Verified working in Production" in `docs/PRODUCTION-FEATURE-BASELINE.md`
+-- per that document's own rule, that happens only once this is
+independently re-verified against real, live Production, the same way
+every other feature on that list was. Ready for a Production
+deployment (including applying migration 0056 there) once authorized.
