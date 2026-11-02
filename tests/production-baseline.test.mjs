@@ -58,6 +58,99 @@ test("schema comparison detects missing, unexpected, and changed constraints or 
   assert.match(compareSchemaObjects(changed).differences.join(" "), /Table definition differs: giving_activities/);
 });
 
+// Resolve Production Schema Health Warnings (2026-11-02, see
+// docs/AI-HANDOFF.md). Root cause: a table's whole CREATE TABLE string
+// was compared as one opaque blob, so two columns added to the SAME
+// table by two different migrations, applied to a real environment in
+// a different relative order than the migration FILES are numbered
+// (confirmed: this project deploys migrations individually, per round,
+// not as one atomic ordered bootstrap), produced a textually different
+// but structurally IDENTICAL table -- a false "Table definition
+// differs" alarm for a database that is, in every way that matters
+// (every read/write binds by column name, never position), completely
+// healthy.
+test("schema comparison ignores a harmless column-order difference but still detects a genuinely different column", () => {
+  const reordered = "CREATE TABLE `widgets` ( `id` text PRIMARY KEY NOT NULL, `b` integer DEFAULT 0 NOT NULL, `a` text NOT NULL, `c` text, FOREIGN KEY (`id`) REFERENCES `owners`(`id`) ON UPDATE no action ON DELETE no action )";
+  const canonicalOrder = "CREATE TABLE `widgets` ( `id` text PRIMARY KEY NOT NULL, `a` text NOT NULL, `b` integer DEFAULT 0 NOT NULL, `c` text, FOREIGN KEY (`id`) REFERENCES `owners`(`id`) ON UPDATE no action ON DELETE no action )";
+  const baselineObjects = [{ type: "table", name: "widgets", sql: canonicalOrder }];
+
+  // Same columns, same constraints, different physical order -> matches.
+  assert.equal(compareSchemaObjects([{ type: "table", name: "widgets", sql: reordered }], baselineObjects).matches, true);
+
+  // A genuinely RETYPED column (b: integer -> text), even reordered the
+  // same way, must still be caught -- reordering tolerance must never
+  // extend to tolerating an actual definition change.
+  const retyped = reordered.replace("`b` integer DEFAULT 0 NOT NULL", "`b` text DEFAULT 0 NOT NULL");
+  assert.match(compareSchemaObjects([{ type: "table", name: "widgets", sql: retyped }], baselineObjects).differences.join(" "), /Table definition differs: widgets/);
+
+  // A genuinely MISSING column must still be caught.
+  const missingColumn = "CREATE TABLE `widgets` ( `id` text PRIMARY KEY NOT NULL, `a` text NOT NULL, FOREIGN KEY (`id`) REFERENCES `owners`(`id`) ON UPDATE no action ON DELETE no action )";
+  assert.match(compareSchemaObjects([{ type: "table", name: "widgets", sql: missingColumn }], baselineObjects).differences.join(" "), /Table definition differs: widgets/);
+
+  // A genuinely EXTRA, non-allowlisted column must still be caught --
+  // the fix must never become a general-purpose "ignore any extra
+  // column" loophole.
+  const extraColumn = reordered.replace("`c` text,", "`c` text, `unexpected_new_field` text,");
+  assert.match(compareSchemaObjects([{ type: "table", name: "widgets", sql: extraColumn }], baselineObjects).differences.join(" "), /Table definition differs: widgets/);
+
+  // Index comparison is deliberately left strict/order-sensitive --
+  // compound-index column order is semantically meaningful (which
+  // queries it can serve), never an incidental deployment artifact.
+  const indexBaseline = [{ type: "index", name: "widgets_a_b_idx", sql: "CREATE INDEX `widgets_a_b_idx` ON `widgets` (`a`,`b`)" }];
+  const indexReordered = [{ type: "index", name: "widgets_a_b_idx", sql: "CREATE INDEX `widgets_a_b_idx` ON `widgets` (`b`,`a`)" }];
+  assert.match(compareSchemaObjects(indexReordered, indexBaseline).differences.join(" "), /Index definition differs: widgets_a_b_idx/);
+});
+
+test("schema comparison's known-exception allowlist is narrow: it excuses only the two named, investigated trip_prospects columns", () => {
+  const canonical = manifest.ddlTopology;
+  const tripProspects = canonical.find((object) => object.type === "table" && object.name === "trip_prospects");
+  assert.ok(tripProspects, "trip_prospects must exist in the baseline");
+
+  // The real, confirmed-dead columns: excused.
+  const withKnownExtras = canonical.map((object) => object.name === "trip_prospects"
+    ? { ...object, sql: object.sql.replace(/\)$/, ", `all_day` integer DEFAULT 0 NOT NULL, `all_day_date` text)") }
+    : object);
+  assert.equal(compareSchemaObjects(withKnownExtras).matches, true, "the two specific, investigated columns must not trigger a difference");
+
+  // A DIFFERENT extra column on the SAME table -- never excused, since
+  // the allowlist matches by exact column name, not "any extra column
+  // on trip_prospects."
+  const withUnrelatedExtra = canonical.map((object) => object.name === "trip_prospects"
+    ? { ...object, sql: object.sql.replace(/\)$/, ", `totally_unrelated_column` text)") }
+    : object);
+  assert.match(compareSchemaObjects(withUnrelatedExtra).differences.join(" "), /Table definition differs: trip_prospects/, "an extra column with a different name must still be caught");
+
+  // The same two column names on a DIFFERENT table -- never excused,
+  // since the allowlist is keyed by table name too, not just column name.
+  const withSameNamesOnDifferentTable = canonical.map((object) => object.name === "trips"
+    ? { ...object, sql: object.sql.replace(/\)$/, ", `all_day` integer DEFAULT 0 NOT NULL)") }
+    : object);
+  assert.match(compareSchemaObjects(withSameNamesOnDifferentTable).differences.join(" "), /Table definition differs: trips/, "the allowlist must be table-specific, not just column-name-specific");
+});
+
+// The exact, real-world regression this round fixes: Production's own
+// live `interactions` (write_token positioned before the calendar
+// columns, the reverse of migration-file order) and `trip_prospects`
+// (carrying the two confirmed-dead all_day/all_day_date columns)
+// DDL text, captured read-only from live Production on 2026-11-02 (see
+// docs/AI-HANDOFF.md) -- both now compare as a full match against the
+// current baseline, with every other one of the 56+ tables/indexes
+// completely unchanged and still compared normally.
+test("the real, live Production interactions/trip_prospects schema (captured 2026-11-02) now matches the baseline", () => {
+  const liveInteractionsSql = "CREATE TABLE `interactions` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL, `occurred_at` integer NOT NULL, `summary` text NOT NULL, `source` text DEFAULT 'manual' NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, `shared_activity_id` text REFERENCES `shared_activities`(`id`), `role` text CHECK (`role` IN ('participant','recipient')), `write_token` text, `all_day` integer DEFAULT 0 NOT NULL, `all_day_date` text, `end_at` integer, `location` text, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )";
+  const liveTripProspectsSql = "CREATE TABLE \"trip_prospects\" ( `id` text PRIMARY KEY NOT NULL, `trip_id` text NOT NULL, `donor_id` text, `manual_name` text, `manual_city` text, `manual_region_id` text, `manual_phone` text, `manual_email` text, `manual_notes` text, `added_method` text NOT NULL CHECK (`added_method` IN ('auto_region','manual')), `status` text NOT NULL DEFAULT 'not_contacted' CHECK (`status` IN ('not_contacted','contacted','meeting_requested','meeting_scheduled','meeting_completed','declined','unable_to_schedule')), `suggested_reason` text, `suggested_score` real, `suggested_generated_at` integer, `manual_rank` integer, `meeting_at` integer, `meeting_location` text, `next_action` text, `trip_notes` text, `linked_interaction_id` text, `selected_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `all_day` integer DEFAULT 0 NOT NULL, `all_day_date` text, CHECK (`donor_id` IS NOT NULL OR (`manual_name` IS NOT NULL AND trim(`manual_name`) != '')), FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`linked_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action )";
+
+  const liveProductionObjects = manifest.ddlTopology.map((object) => {
+    if (object.type === "table" && object.name === "interactions") return { ...object, sql: liveInteractionsSql };
+    if (object.type === "table" && object.name === "trip_prospects") return { ...object, sql: liveTripProspectsSql };
+    return object;
+  });
+
+  const result = compareSchemaObjects(liveProductionObjects);
+  assert.deepEqual(result.differences, []);
+  assert.equal(result.matches, true);
+});
+
 test("schema comparison excludes only known platform-managed tables", () => {
   const liveRows = [
     ...manifest.ddlTopology.map((object) => ({ ...object, tbl_name: object.type === "table" ? object.name : "ignored" })),

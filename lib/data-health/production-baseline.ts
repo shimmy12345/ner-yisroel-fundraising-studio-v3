@@ -84,14 +84,130 @@ export const PLATFORM_MANAGED_SCHEMA_OBJECTS = new Set([
 
 export const normalizeSchemaSql = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
 
+// Resolve Production Schema Health Warnings (2026-11-02, see
+// docs/AI-HANDOFF.md's investigation and this entry). Root cause: the
+// previous comparison treated a table's whole `CREATE TABLE` string as
+// one opaque blob, so two columns added by two different migrations to
+// the SAME table, applied to an environment in a different relative
+// order than the migration files are numbered, produced a textually
+// different but STRUCTURALLY IDENTICAL table -- SQLite's own `ALTER
+// TABLE ADD COLUMN` always appends to the table's current end, so
+// whichever of two such migrations physically ran first ends up
+// positioned earlier. This is a real, reproducible property of how
+// this project actually deploys (individual, per-round `wrangler d1
+// execute --file` runs, not one atomic ordered bootstrap per
+// environment) -- confirmed for `interactions` (migration 0052's
+// `write_token` landed before 0048's calendar columns on Production,
+// the reverse of file order) -- never a sign of a genuine
+// incompatibility, since every read/write in this codebase binds by
+// column NAME, never position.
+//
+// `splitTopLevelClauses`/`tableColumnClauseSet` parse a table's column/
+// constraint list into an ORDER-INDEPENDENT set of clauses (splitting
+// on top-level commas only -- respecting parens, so a `CHECK (...)` or
+// `REFERENCES x(y)` clause's own internal commas never get split) so a
+// pure reordering of otherwise-identical clauses compares as a match,
+// while a genuinely added, removed, retyped, or reconstrained column
+// still produces a different clause set and still correctly fails.
+// Index comparison is deliberately left untouched (exact text, order-
+// sensitive): a compound index's own column order is semantically
+// meaningful (which queries it can serve), never an incidental
+// deployment-order artifact the way a table's own column list is.
+function splitTopLevelClauses(body: string): string[] {
+  const clauses: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const char of body) {
+    if (char === "(") depth++;
+    else if (char === ")") depth--;
+    if (char === "," && depth === 0) {
+      clauses.push(current.trim());
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  if (current.trim()) clauses.push(current.trim());
+  return clauses;
+}
+
+// Returns null (never an empty set) when the statement cannot be
+// confidently parsed (no balanced top-level parens found) -- the
+// caller must then fall back to the strict, pre-existing whole-string
+// comparison rather than silently treat an unparseable statement as a
+// match. A real, well-formed `CREATE TABLE ... (...)` always parses.
+function tableColumnClauseSet(sql: string): Set<string> | null {
+  const normalized = normalizeSchemaSql(sql);
+  const openIndex = normalized.indexOf("(");
+  const closeIndex = normalized.lastIndexOf(")");
+  if (openIndex === -1 || closeIndex === -1 || closeIndex <= openIndex) return null;
+  return new Set(splitTopLevelClauses(normalized.slice(openIndex + 1, closeIndex)));
+}
+
+function clauseColumnName(clause: string): string | null {
+  const match = clause.match(/^`(\w+)`/);
+  return match ? match[1] : null;
+}
+
+// Known, accepted, already-investigated historical drift -- NOT a
+// general-purpose escape hatch. Confirmed (docs/AI-HANDOFF.md, this
+// round): `trip_prospects.all_day`/`all_day_date` are genuinely dead --
+// zero application code anywhere references them, and every one of
+// Production's real rows holds exactly the column's own unchanged
+// default (never a real value). Root cause: migration
+// `0054_trip_manual_prospects.sql` rebuilds `trip_prospects` with an
+// explicit, named column list that never re-declares these two columns
+// (added one migration earlier by `0048_google_calendar_sync.sql`), so
+// any FRESH bootstrap or migration replay -- what Staging and the
+// packaged baseline both reflect -- ends up without them, while
+// Production's own real, incremental deployment history happened to
+// apply 0054's rebuild before 0048's trip_prospects columns existed
+// there, so Production alone still has them. Removing them from
+// Production would require an unnecessary, risky full-table rebuild of
+// a heavily-referenced table (many FKs point at it) for zero
+// functional benefit; adding them to Staging via a new migration would
+// be a schema change with no application or data justification --
+// "fixing the dashboard" is never sufficient justification on its own
+// for either. This allowlist is intentionally narrow: it excuses ONLY
+// these two exact, named columns on this one exact table from the
+// "unexpected extra column" check; it can never mask a different
+// extra column, a missing column, or a genuinely changed one (a
+// redefinition of either column would still correctly surface as a
+// difference -- see tests/production-baseline.test.mjs). If a future
+// feature starts genuinely using either column, add it to a real
+// migration and the baseline, and remove its entry here -- this
+// exception describes today's confirmed-unused state only, not a
+// permanent exemption.
+const ACCEPTED_EXTRA_LIVE_COLUMNS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["trip_prospects", new Set(["all_day", "all_day_date"])],
+]);
+
 export function compareSchemaObjects(liveObjects: readonly SchemaObject[], baselineObjects: readonly SchemaObject[] = PRODUCTION_BASELINE_OBJECTS): SchemaComparison {
   const live = new Map(liveObjects.map((object) => [`${object.type}:${object.name}`, object]));
   const baseline = new Map(baselineObjects.map((object) => [`${object.type}:${object.name}`, object]));
   const differences: string[] = [];
   for (const [key, expected] of baseline) {
     const actual = live.get(key);
-    if (!actual) differences.push(`Missing ${expected.type}: ${expected.name}.`);
-    else if (normalizeSchemaSql(actual.sql) !== normalizeSchemaSql(expected.sql)) differences.push(`${expected.type === "table" ? "Table" : "Index"} definition differs: ${expected.name}${expected.type === "table" ? " (columns or constraints)" : ""}.`);
+    if (!actual) { differences.push(`Missing ${expected.type}: ${expected.name}.`); continue; }
+    if (expected.type === "index") {
+      if (normalizeSchemaSql(actual.sql) !== normalizeSchemaSql(expected.sql)) differences.push(`Index definition differs: ${expected.name}.`);
+      continue;
+    }
+    const actualClauses = tableColumnClauseSet(actual.sql);
+    const expectedClauses = tableColumnClauseSet(expected.sql);
+    if (!actualClauses || !expectedClauses) {
+      // Could not confidently parse either side -- fall back to the
+      // original strict comparison rather than silently pass.
+      if (normalizeSchemaSql(actual.sql) !== normalizeSchemaSql(expected.sql)) differences.push(`Table definition differs: ${expected.name} (columns or constraints).`);
+      continue;
+    }
+    const missingClauses = [...expectedClauses].filter((clause) => !actualClauses.has(clause));
+    const extraClauses = [...actualClauses].filter((clause) => !expectedClauses.has(clause));
+    const unexplainedExtraClauses = extraClauses.filter((clause) => {
+      const columnName = clauseColumnName(clause);
+      return !(columnName && ACCEPTED_EXTRA_LIVE_COLUMNS.get(expected.name)?.has(columnName));
+    });
+    if (missingClauses.length > 0 || unexplainedExtraClauses.length > 0) differences.push(`Table definition differs: ${expected.name} (columns or constraints).`);
   }
   for (const [key, actual] of live) if (!baseline.has(key) && actual.name !== "production_schema_baseline") differences.push(`Unexpected ${actual.type}: ${actual.name}.`);
   return { matches: differences.length === 0, differences };

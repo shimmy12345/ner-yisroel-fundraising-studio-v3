@@ -61136,3 +61136,259 @@ Stopping here, per explicit instruction. No Production data, Staging
 data, migration, or application code was modified during this
 investigation. Both recommended corrections above are proposals only,
 awaiting separate authorization before implementation.
+
+## Resolve Production Schema Health Warnings: `interactions` + `trip_prospects` Fixed on Staging, `calendar_event_links`/`calendar_event_link_history` Found Separate and Pre-Existing (2026-11-02) -- STAGING FIX DEPLOYED AND VERIFIED, NOT YET DEPLOYED TO PRODUCTION
+
+Builds directly on the investigation above (commit `1b9ea84`). Per
+explicit instruction, this round implemented and tested the
+application-side Health check correction, deployed it to Staging only,
+and did **not** modify Production tables, run Production migrations,
+or deploy to Production.
+
+### 1. Root cause of each discrepancy (confirmed, not assumed)
+
+**`interactions`**: pure column-order drift, zero structural
+difference. Migration `0052_interaction_write_proof_token.sql` (`ADD
+COLUMN write_token`) was applied to Production before
+`0048_google_calendar_sync.sql`'s own `interactions` column additions
+(`all_day`/`all_day_date`/`end_at`/`location`) -- the reverse of the
+files' numeric order. SQLite's `ALTER TABLE ADD COLUMN` always appends
+to the table's current end, so `write_token` landed earlier in
+Production's real column order than a strict-order replay (the
+baseline, which always replays `drizzle/*.sql` in ascending filename
+order via `generate-production-baseline.mjs`) would place it. The
+column set is byte-for-byte identical: 17 columns on both sides.
+
+**`trip_prospects`**: Production has two extra columns the baseline
+lacks, confirmed genuinely obsolete. Migration
+`0054_trip_manual_prospects.sql` rebuilds the table with an explicit,
+named column list that never mentions `all_day`/`all_day_date` --
+columns added one migration earlier by `0048_google_calendar_sync.sql`.
+A strict-order replay (0048 before 0054, the baseline's order) would
+have 0054's rebuild silently drop them -- confirmed empirically:
+Staging's real, live `trip_prospects` is genuinely missing both
+columns, matching the baseline. Production has both (positioned last)
+only because, on Production specifically, 0054's rebuild ran before
+0048's `trip_prospects`-specific `ALTER TABLE ADD COLUMN` statements,
+which were applied afterward directly onto the already-rebuilt table.
+This exact ordering is independently corroborated by a pre-existing
+test, `tests/trip-calendar-migration-0048-production-rehearsal.test.mjs`
+(an earlier, unrelated round, 2026-11-01), which documents and asserts
+the same root cause.
+
+### 2. Obsolete or required: verified, not assumed
+
+`trip_prospects.all_day`/`all_day_date` are confirmed dead:
+
+- **Data**: direct D1 query against Production's real 51 rows --
+  `all_day` is non-null on every row (its own `NOT NULL` default,
+  never set to 1 on any row); `all_day_date` is `NULL` on every row.
+  Zero meaningful data in either column.
+- **Code**: exhaustive repo-wide search (`all_day`/`allDay`, 23 files)
+  confirmed the only real application usage is against
+  `interactions.all_day`/`all_day_date`
+  (`lib/relationships/trip-calendar-sync.ts`'s `loadTripMeetingFields()`
+  selects `i.all_day, i.all_day_date` from `interactions`, aliased
+  `i`, never from `trip_prospects`). Targeted greps across
+  `lib/calendar/`, `lib/relationships/trips-data.ts`, `app/`, and
+  `worker/` found zero references to `trip_prospects.all_day`/
+  `all_day_date` anywhere.
+- **Backup/restore**: `.github/workflows/d1-backup-nightly-production.yml`
+  uses `wrangler d1 export --remote`, a full literal schema+data dump,
+  not a migration replay -- a disaster-recovery restore reproduces
+  Production's live state exactly and is unaffected by either
+  discrepancy either way. Only a fresh migration-replay bootstrap (a
+  new environment, or Staging reset from scratch) would end up missing
+  these two columns on `trip_prospects` -- which is Staging's current
+  real, live state today, and has zero functional consequence given
+  the above.
+
+Conclusion: `interactions`' difference is purely cosmetic (column
+order only, same column set) and must never produce a warning on its
+own. `trip_prospects`' two extra columns are genuinely obsolete
+historical drift with no live data and no code reference anywhere --
+per instruction, they are not being backfilled onto Staging, and no
+migration is being introduced to delete them from Production. The
+smallest safe correction is entirely in the Health check itself.
+
+### 3. Change implemented: order-independent, clause-set schema comparison
+
+`lib/data-health/production-baseline.ts`'s `compareSchemaObjects()` --
+the single, shared function driving both the Staging and Production
+"schema comparison" cards -- previously compared each table's whole
+`CREATE TABLE` string as one opaque, whitespace-normalized blob, so
+any column-order difference registered as a full "differs,"
+indistinguishable from a real structural change.
+
+Rewritten for tables only (indexes remain strict, whole-string,
+order-sensitive comparisons -- a deliberate, unchanged design choice,
+since compound-index column order is semantically meaningful) to:
+
+1. Split each table's column/constraint list into top-level clauses
+   (comma-separated, parenthesis-depth-aware, so commas inside a
+   clause's own parens -- e.g. a `CHECK (... IN (...))` -- never
+   split it).
+2. Compare the two tables as sets of clauses rather than as ordered
+   strings. A clause present on both sides, regardless of position,
+   is not a difference. A clause missing from live, or an unexplained
+   extra clause on live, still is.
+3. A narrow, explicit, table-name-and-column-name-scoped allowlist
+   (`ACCEPTED_EXTRA_LIVE_COLUMNS`) excuses exactly
+   `trip_prospects.all_day` and `trip_prospects.all_day_date` as a
+   documented historical exception -- matched by exact table AND
+   column name, never a general "ignore any extra column" loophole.
+   Any other extra column, on this table or any other, still fails.
+4. No new field was added to the public `SchemaComparison`/
+   `DataHealthFacts` shape -- kept deliberately minimal, per the
+   explicit "keep this narrowly scoped" instruction.
+
+Missing columns, retyped/reconstrained columns, extra non-allowlisted
+columns, and any index reordering all remain detected exactly as
+before -- verified by 3 new regression tests added to
+`tests/production-baseline.test.mjs` (now 44/44 passing):
+
+- A synthetic table proves harmless reordering passes while
+  retyping, a missing column, an extra non-allowlisted column, and
+  index-column reordering (`(a,b)` vs `(b,a)`) all still fail.
+- The allowlist is proven narrow: the exact two named columns pass on
+  `trip_prospects`; a different extra column name fails; the same two
+  column names on a different table (`trips`) fail.
+- A permanent regression pin substitutes the real, captured
+  Production DDL (2026-11-02) for `interactions`/`trip_prospects` into
+  the baseline's own object list and asserts zero differences --
+  pinning the exact real-world scenario this round fixed.
+
+### 4. Testing performed
+
+- `tsc --noEmit`: 0 errors.
+- `pnpm run test`: 254/254 test files passing (the only failure in any
+  run this round is the pre-existing, already-documented, unrelated
+  `check-main-restore-sync.mjs` git-branch-drift check -- confirmed via
+  direct grep to use a wholly separate function,
+  `compareCrossBranchRestoreState` in
+  `lib/operations/restore-drift-guard.ts`, never
+  `compareSchemaObjects`, so it cannot be affected by this change
+  either way).
+- `tests/production-baseline.test.mjs`: 44/44 passing, including the
+  3 new regression tests above.
+- `node scripts/check-production-feature-fingerprints.mjs`: 7/7
+  fingerprints, 5/5 behavioral checks, clean.
+- `pnpm run build:staging-independent`: clean.
+- `pnpm run deploy:staging-independent`: succeeded, new Staging Worker
+  version `0ee62518-34a9-451d-8ae9-82d12e05e9bb`.
+- Live-verified on Staging's real `/health` page (a fresh "Run health
+  check," not a cached read): the `interactions` and `trip_prospects`
+  differences are confirmed gone from the live dashboard -- the fix
+  works end-to-end through the real page, not only in isolated unit
+  tests.
+- Donor records, meetings, AI Meeting Notes, trip planning, pledges,
+  and payments: untouched by this change (the change is confined to
+  `lib/data-health/production-baseline.ts`'s comparison function and
+  its own test file; no other file was modified).
+
+### 5. New, separate finding surfaced by this fix -- not caused by it, not in scope, not fixed
+
+After the two target differences cleared, Staging's `/health` page
+still reported "2 differences" -- now for `calendar_event_links` and
+`calendar_event_link_history`. This is a different, already-known,
+pre-existing issue from an earlier, unrelated round of this project
+(dated 2026-10-19 in its own draft, well before this round), not
+something this fix introduced or could have introduced:
+
+- Live Staging's stored `CREATE TABLE` text for both tables contains
+  inline `--` SQL comments placed inside the column list (e.g. before
+  `next_retry_at`, inside the `sync_status` CHECK). The baseline's
+  expected DDL for the same two tables has no such comments at all.
+- The reason: an earlier "issue 2" review round added these
+  explanatory comments to `drizzle/0048_google_calendar_sync.sql`
+  inside the column lists, then a later commit (`d153259`) moved them
+  to before the whole `CREATE TABLE` statement (the migration's own
+  documented convention). Editing the migration file has no
+  retroactive effect on a table SQLite already created from the old
+  text -- Staging's real tables were created before that correction
+  and still carry the old, comment-contaminated stored text; a fresh
+  replay of the now-corrected file (what the baseline does) produces
+  clean, comment-free text.
+- A fully worked, rehearsed, already-reviewed-seven-times draft fix
+  already exists at
+  `drizzle/pending-review/0049_fix_calendar_schema_text_staging_repair.sql`,
+  deliberately placed outside `drizzle/` so it is never picked up by
+  baseline generation or any other migration-globbing tool, with its
+  own extensive revision history documenting real D1 foreign-key and
+  quoting-style pitfalls already worked through. Its own header is
+  explicit: "NOT applied anywhere by this round... adding it to the
+  real migration sequence... is the owner's own decision to make, not
+  performed here."
+- Both the old (whole-string) and new (clause-set) comparison logic
+  agree this is a genuine difference -- not a parsing artifact of the
+  new comma-splitting logic. (Checked directly: the comment text's own
+  internal commas could in principle confuse a naive top-level-comma
+  split, but since the same deterministic split is applied to both
+  sides, and the sides are genuinely different in content either way,
+  the net verdict -- "differs" -- is correct under both the old and
+  new comparison method.) This confirms the new comparison logic has
+  not introduced a new false positive; it is correctly surfacing a
+  real, separately-documented, deliberately-deferred condition.
+
+Per the explicit "keep this narrowly scoped" instruction, this finding
+is reported here for visibility and not fixed as part of this task.
+Whether to apply the existing draft migration is a separate decision
+for the owner.
+
+### 6. Answers to the requested final-report items
+
+1. **Root cause of each discrepancy**: see section 1 above.
+2. **Obsolete or required**: both `trip_prospects` columns are
+   confirmed obsolete (see section 2); not backfilled onto Staging,
+   and no migration was introduced against Production.
+3. **Changes implemented and tests passed**: see sections 3-4 (order-
+   independent table-clause comparison + narrow allowlist; 44/44
+   `production-baseline.test.mjs`, 254/254 overall test files,
+   `tsc --noEmit` clean, Staging build/deploy/fingerprint checks
+   clean).
+4. **Does Staging's Health check now report accurately?** Yes, for
+   the two in-scope differences -- both are confirmed resolved live.
+   Staging's dashboard now additionally, correctly surfaces one
+   separate, pre-existing, already-documented issue
+   (`calendar_event_links`/`calendar_event_link_history`, section 5)
+   that was always genuinely present but had not previously been
+   checked against Staging's own dashboard in any prior round.
+5. **Can a Production deployment alone resolve the two original
+   warnings?** Yes -- this is a pure application-code change (the
+   comparison function only); no database migration, backup, or data
+   change is required or proposed. Deploying this code to Production
+   is sufficient to clear both warnings there, once authorized.
+6. **Remaining migration or restore-replay concerns**: none introduced
+   by this change. The separate `calendar_event_links`/
+   `calendar_event_link_history` stored-text divergence (section 5)
+   remains open on both Staging and (unverified, not checked this
+   round) possibly Production, with its own already-prepared,
+   already-reviewed draft fix awaiting a separate authorization
+   decision -- out of scope here.
+
+### Verified facts vs. assumptions
+
+**Verified this round, directly**: exact root cause and column-set
+identity for `interactions`; exact root cause and obsolete status
+(zero live data, zero code references) for `trip_prospects`'s two
+extra columns; the backup mechanism is a full dump, not a replay;
+`check-main-restore-sync.mjs` uses a separate, unaffected comparison
+function; the fix resolves both target differences live on Staging;
+254/254 test files and 44/44 schema tests pass; the
+`calendar_event_links`/`calendar_event_link_history` divergence is
+pre-existing, already documented from an earlier round, and has a
+prepared-but-undeployed draft fix.
+
+**Not verified this round**: whether Production's real
+`calendar_event_links`/`calendar_event_link_history` tables carry the
+same comment-placement divergence as Staging's (plausible, since both
+environments were built from the same pre-fix migration text, but not
+directly queried this round -- genuinely out of scope for this task).
+
+---
+
+Stopping here, per explicit instruction. This fix is implemented,
+tested, and deployed to Staging only. No Production tables, Production
+migrations, or Production deployment were touched. Committing and
+pushing now, then stopping for review before any Production
+deployment.
