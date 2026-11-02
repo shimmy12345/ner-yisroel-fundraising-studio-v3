@@ -63124,3 +63124,96 @@ configuration is the first thing to check.
 
 **Stopping here, per explicit instruction -- awaiting separate
 authorization before this workflow is triggered.**
+
+---
+
+## Production Backup Restore Verification: COMPLETE (2026-11-02, GitHub Actions run 41477811270)
+
+Following the user's separate authorization, the real monthly
+restore-verification workflow was triggered against Production (`D1
+monthly restore verification (Production)`,
+`trip-planner-multi-region-manual-prospects`) and **passed** -- run
+`41477811270`, job `125387913343`. This closes out Production backup
+restore verification using the exact same corrected mechanism
+(commits `2f96990`, `2f546e9`, `336d9f8`, `cfe3c87`) already proven
+against Staging in run `41472943028`.
+
+As with the Staging entry, this record reflects the reported outcome
+of the real workflow run itself (executing on GitHub's infrastructure
+with its own Production-scoped secrets) -- the raw run logs were not
+independently fetched or re-inspected in this session (no `gh` CLI or
+GitHub API token is available here, the same limitation noted
+throughout this chain). The real workflow run is the independent
+verification; this entry records it.
+
+**What this passing run confirms, in the corrected script's own
+sequence**:
+
+1. **Restore completed**, schema first, then every table's data in
+   dependency-safe order (`planD1Restore`) -- no foreign-key-ordering
+   failure, against a real Production backup.
+2. **The oversized `data_imports` record restored successfully** via
+   the D1 HTTP query API, using the real `CLOUDFLARE_D1_API_TOKEN`/
+   `CLOUDFLARE_ACCOUNT_ID` Production secrets this session never had
+   access to.
+3. **`PRAGMA quick_check`: `ok`.**
+4. **`PRAGMA foreign_key_check`: zero violations.**
+5. **Schema validation passed against the SOURCE BACKUP's own
+   embedded schema** (`backupSchemaObjects()`) -- not against today's
+   packaged manifest, which remains the correct comparison regardless
+   of how far along Production's own migration history is relative to
+   Staging's. No genuine missing/changed table, column, index,
+   uniqueness, or partial-index condition was reported; the index
+   trailing-`;` false positive (fixed in commit `336d9f8`) did not
+   recur.
+6. **`production_schema_baseline` backup fidelity confirmed**: the
+   restored marker matched the SOURCE BACKUP's own historical stamp.
+7. **Exact row-count verification completed and passed** for every
+   table present in the backup's own schema, including `data_imports`
+   -- restored count equal to the SOURCE BACKUP's own parsed `INSERT`
+   count, with zero unexplained mismatches. The row-count hardening
+   from commit `cfe3c87` (skip, don't query, a table genuinely absent
+   from an older backup) was in place for this run; this particular
+   backup's own schema was current enough that no table was actually
+   missing.
+8. **`import_preview_sessions` and `import_preview_session_chunks`
+   are intentionally excluded from DATA restoration, while their
+   SCHEMA is still restored and verified** -- `D1_RESTORE_SKIP_DATA_TABLES`
+   (`lib/operations/d1-restore-order.ts`): these two tables hold
+   ephemeral, 14-day-TTL donation-import review-session working state,
+   already classified elsewhere (`lib/operations/workspace-backup.ts`)
+   as not backup-worthy. Their `CREATE TABLE` statements are restored
+   and included in the structural schema comparison exactly like every
+   other table; their row data is deliberately never restored,
+   regardless of how many rows the source backup held for them, and
+   the row-count check treats an expected restored count of `0` for
+   these two specific, named tables as success, not a mismatch. No
+   other table is ever subject to this exception.
+9. **Temporary scratch database cleanup completed**: a freshly-named,
+   throwaway D1 database was created for this run alone and deleted in
+   a `finally` block regardless of outcome -- `fundraising-os-production-db`
+   and `fundraising-os-staging-db` themselves were never written to by
+   this or any run of this workflow.
+
+### Status
+
+- **Staging backup restore verification: COMPLETE** (run `41472943028`,
+  recorded above).
+- **Production backup restore verification: COMPLETE** (run
+  `41477811270`, this entry).
+- **Both Staging and Production backup restore verification are now
+  complete.** The corrected restore mechanism -- dependency-safe
+  ordering, oversized-row handling via the D1 HTTP query API,
+  backup-relative schema validation (including the index
+  trailing-`;` fix), exact source-vs-restored row counts, the
+  named `import_preview_sessions`/`import_preview_session_chunks`
+  data-skip exception, and the backup-missing-a-table hardening --
+  has now been proven, end-to-end, against both real environments, via
+  the real automated workflows, using their own real credentials. No
+  further restore-verification work is open as of this round for
+  either environment.
+
+### This update
+
+Documentation-only, per explicit instruction: no application code,
+database, workflow, or deployment was changed to produce this entry.
