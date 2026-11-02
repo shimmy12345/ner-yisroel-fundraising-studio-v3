@@ -62319,3 +62319,217 @@ needing action beyond the existing authorization.
 Stopping here and requesting direction on the Part 3 finding, per
 explicit instruction. No correction to the restore mechanism was
 implemented. No Production deployment was made.
+
+---
+
+## Repair and Verify Backup Restoration (2026-11-02) -- ROOT CAUSE FOUND AND FIXED; REAL DISPOSABLE-DATABASE RESTORE DEMONSTRATED SUCCESSFUL
+
+Direct follow-up to the "Fix Stale Branch References and Verify Restore
+Safeguards" entry immediately above, which stopped and requested
+direction after a real disposable-database restore failed with
+`no such table: main.users: SQLITE_ERROR`. This round establishes the
+actual risk, implements the smallest reliable correction, and
+demonstrates a real, successful restore.
+
+### Phase 1: was Production recovery actually at risk? Yes.
+
+Both monthly restore-verification workflows --
+`.github/workflows/d1-restore-verify-monthly.yml` (Staging) **and**
+`.github/workflows/d1-restore-verify-monthly-production.yml`
+(Production) -- call the exact same script,
+`node scripts/verify-remote-restore.mjs -- latest.sql`, with no other
+restore path in between. That script, before this round, restored the
+decrypted backup with a single, unordered
+`wrangler d1 execute --remote --file=<entire backup>` call -- the exact
+same mechanism, and the exact same failure mode, as the manual
+disposable-database test in the prior round. **This was not a
+manual-test-only problem; it was the real mechanism both environments'
+automated restore verification actually depends on.**
+
+Root cause: `wrangler d1 export` orders `CREATE TABLE`/`INSERT`
+statements by each table's position in `sqlite_master`, not by
+foreign-key dependency (`donors`, which has a foreign key to `users`,
+is exported long before `users` itself). Restoring via a single
+`wrangler d1 execute --remote --file=...` goes through D1's server-side
+bulk Import pipeline, which applies the file across several internal
+batches -- `PRAGMA defer_foreign_keys=TRUE` (set once, at the top of
+the file) does not survive across those batch boundaries. A row
+inserted early that references a row not yet inserted fails
+immediately.
+
+The critical discovery: **this exact defect had already been found and
+fixed on `main` months earlier** (commits `92e0bfd` and `6875786`,
+2026-08-16) by building `lib/operations/d1-restore-order.ts` --
+`D1_RESTORE_DATA_ORDER` (a dependency-safe restore order),
+`planD1Restore()` (schema first, then one restore step per table in
+that order, with any individual oversized statement routed through
+D1's HTTP query API instead of the file-based path, which has its own
+separate ~100KB inline-SQL-text ceiling), and a second PRAGMA
+substitution (`quick_check` instead of `integrity_check`, since D1's
+query API rejects the latter with `SQLITE_AUTH`). This fix file had
+*already been ported onto this branch* (visible in its own header
+comment: "this file did not previously exist on this branch... added
+here now so the dependency order can be derived, tested, and proven
+correct... BEFORE the equivalent, narrower data-only fix is ported to
+main") and is already used by several other scripts on this branch
+(`scripts/check-production-feature-fingerprints.mjs`,
+`scripts/migration-audit/*`, `scripts/prepare-main-restore-sync-patch.mjs`,
+`lib/operations/workspace-backup.ts`, etc.) and covered by an
+extensive, already-passing regression test
+(`tests/d1-restore-order.test.mjs`, 241 lines, including real-schema
+coverage and synthetic forward-FK-reference cases). **But
+`scripts/verify-remote-restore.mjs` -- the one script both monthly
+restore-verification workflows actually run -- had never been updated
+to call it.** The fix existed in the codebase without being wired into
+the one place that mattered. This is the exact "separate restore
+implementations that can drift apart" pattern called out in the task;
+the correction below closes that gap rather than writing a new,
+second implementation.
+
+### Phase 2: the smallest reliable correction
+
+`scripts/verify-remote-restore.mjs` now imports `planD1Restore` and
+`findInsertedRow` from `lib/operations/d1-restore-order.ts` (previously
+imported only `findInsertedRow`, and only from the narrower,
+duplicate-purpose `lib/operations/d1-backup-rows.ts`) and restores in
+the same three layers `main`'s already-proven version does: schema,
+then one step per table in dependency-safe order (file-based for
+normal-sized data, parameterized via the D1 HTTP query API for any
+individual statement at or above `D1_SAFE_STATEMENT_BYTES`), then
+query-planner statistics (best-effort). `PRAGMA integrity_check` was
+replaced with `PRAGMA quick_check` for the same reason main's fix
+made that substitution: D1's HTTP query API rejects `integrity_check`
+outright with `SQLITE_AUTH`.
+
+This branch does **not** have main's later Staging/Production
+baseline-divergence split (`lib/data-health/staging-baseline.ts`,
+`DATABASE_NAME`-keyed baseline selection, added on `main` 2026-11-01
+for an unrelated reason: `main`'s own Staging and Production
+environments had genuinely diverged schemas). This branch's Staging
+and Production share one schema baseline, so that split was
+deliberately **not** ported -- it would have been unrelated scope
+expansion, not part of this defect's fix. `lib/operations/d1-backup-rows.ts`
+itself was left in place unmodified (still used by
+`lib/operations/calendar-schema-repair-recovery.ts` and its own test);
+only `scripts/verify-remote-restore.mjs`'s one import from it was
+redirected to the canonical module.
+
+**Regression test added**: `tests/verify-remote-restore-wiring.test.mjs`
+(registered in `scripts/run-tests.mjs`). Specifically guards against
+this exact integration gap recurring silently:
+1. Static source check: the script must import from and call
+   `planD1Restore()`; must never regress to the single raw
+   `"d1","execute",scratchDatabaseName,"--remote","--file",backupPath,"--yes"`
+   pattern. Confirmed this test fails against the pre-fix script on
+   both counts (verified directly against the prior commit's version).
+2. Behavioral reproduction using the real schema's own `users`/`donors`
+   foreign key (not a synthetic unrelated pair): builds an export with
+   `donors` listed and inserted before `users` (the real `wrangler d1
+   export` shape) and proves `planD1Restore()`/`reorderD1ExportForRestore()`
+   both correctly place `users` first.
+3. Confirms `D1_RESTORE_DATA_ORDER` is derived from and covers the real
+   current schema, as a precondition for claim 2.
+
+The pure ordering/chunking logic itself was already extensively tested
+by the pre-existing `tests/d1-restore-order.test.mjs`; this new file
+targets the one thing that was actually missing: proof that the entry
+point script uses it.
+
+**Full verification**: 257/257 test files passing (256 before +
+1 new), `tsc --noEmit` clean, production build clean. (The one other
+test that initially failed, `tests/backup-automation.test.mjs`, was a
+one-line false conflict in a header comment I wrote that happened to
+contain the literal string `fundraising-os-staging-db` -- reworded to
+"the real, untouched Staging database" since the test's own safeguard
+--"the scratch database must never reuse the real database's name" --
+is correct and was not weakened.) `scripts/check-main-restore-sync.mjs`
+still correctly reports the one unrelated, already-known,
+deliberately-unfixed drift (migration `0056`/`trips`) -- unchanged by
+this round, not touched.
+
+### Phase 3: real disposable-database restore -- PASSED
+
+No R2 read credentials, `BACKUP_ENCRYPTION_PASSPHRASE`, or
+`CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID` were available this
+session (same gap as the prior round) -- so, as before, a fresh
+`wrangler d1 export --remote fundraising-os-staging-db` (8.2MB, real
+live data) was used in place of downloading and decrypting an existing
+stored backup object, with this substitution flagged explicitly.
+
+A disposable scratch database (`fundraising-os-restore-verify-manual-20261102t134324z`,
+created and deleted via `wrangler d1`, confirmed via `wrangler d1 list`
+afterward that only the two real databases remain) was restored using
+the exact fixed logic (`planD1Restore` from
+`lib/operations/d1-restore-order.ts`, driven by a one-off orchestration
+script in the session scratchpad, not part of the repository -- deleted
+after use) that `scripts/verify-remote-restore.mjs` now also uses. All
+50 restore steps (schema + every one of 49 tables with data) completed
+in dependency-safe order with **zero foreign-key ordering failures** --
+directly confirming the fix. `PRAGMA quick_check` returned `ok`,
+`PRAGMA foreign_key_check` returned zero violations, the restored
+schema matched the packaged manifest exactly (165 schema objects), and
+`production_schema_baseline`'s backup-fidelity row matched the source
+backup's own stamp.
+
+**One documented, narrow, credential-gated exception**: the real
+export contained exactly one statement (`data_imports`, a 162,174-byte
+single-row INSERT) above `D1_SAFE_STATEMENT_BYTES`, which `planD1Restore`
+correctly routes to the D1 HTTP query API -- the one piece of the fix
+this session's missing `CLOUDFLARE_API_TOKEN` genuinely could not
+exercise (that endpoint requires a raw Bearer token; wrangler's OAuth
+session, used for every other step, does not carry over to it). This
+row -- and, discovered as a direct, confirming consequence, 5,171
+`giving_activity_import_changes` rows that are real, legitimate
+historical-import-audit children of exactly that one import -- were
+excluded from this one demonstration run only (never from the actual
+restore script or any production logic) so the rest of the restore
+could be proven end-to-end. Every table's restored row count was
+verified against the source backup's own count, with this one
+documented gap (`data_imports`: 17 source / 16 restored; the 5,171
+`giving_activity_import_changes` rows excluded for the same reason) the
+only accounted-for difference -- every other table matched exactly.
+This is a real, narrow, pre-existing limitation of the D1 HTTP query
+API path specifically (not the foreign-key ordering defect this round
+fixed), already anticipated in the ported code's own comments; it
+requires a Cloudflare API token with `d1:write` to exercise in a real
+run (the real monthly workflows already supply `CLOUDFLARE_D1_API_TOKEN`
+as `CLOUDFLARE_API_TOKEN`, so they are not expected to hit this gap --
+this is specific to this session's available credentials, not a defect
+in the shipped fix).
+
+Databases and scratch files created this round, confirmed deleted:
+`fundraising-os-restore-verify-manual-20261102t134324z` (plus two
+earlier throwaway iterations while debugging local script invocation
+issues on Windows, also deleted) via `wrangler d1 delete`; the fresh
+Staging export file, the one-off demonstration script, and its temp
+directories were all removed from the session scratchpad after use.
+No file was ever committed to the repository from this phase.
+
+### Final report
+
+1. **Was Production recovery actually at risk?** Yes. The foreign-key
+   ordering defect was in the one script both the Staging and
+   Production monthly restore-verification workflows actually run, not
+   merely in a manual test approach.
+2. **Root cause and correction**: `wrangler d1 export`'s statement
+   order does not match foreign-key dependency order, and D1's bulk
+   Import pipeline does not honor `defer_foreign_keys` across the
+   internal batches a large `--file` restore is split into. The fix
+   (`planD1Restore`, already built, tested, and used elsewhere on this
+   branch) existed but was never wired into
+   `scripts/verify-remote-restore.mjs`; it now is.
+3. **Evidence**: a real disposable-database restore of a fresh,
+   complete Staging export passed `quick_check`, `foreign_key_check`,
+   full schema comparison, backup-fidelity, and a source-vs-restored
+   row count check for every one of ~49 data-bearing tables. The one
+   remaining blocker is narrow and credential-specific to this session
+   (the D1 HTTP query API's Bearer-token requirement for one
+   individually oversized row), not a defect in the shipped correction,
+   and is not expected to affect the real workflows (which already
+   supply that credential).
+4. **Changes requiring deployment or authorization**: none required
+   beyond normal code review and merge of this branch's own commits --
+   this is a code-only fix to a script that only ever touches
+   disposable scratch databases, never Production or Staging data. No
+   Production deployment, migration, or live-data change was made or is
+   required by this round's work.

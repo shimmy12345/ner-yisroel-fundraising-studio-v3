@@ -123,6 +123,7 @@ const TEST_FILES = [
   "tests/production-baseline.test.mjs",
   "tests/d1-backup-rows.test.mjs",
   "tests/d1-restore-order.test.mjs",
+  "tests/verify-remote-restore-wiring.test.mjs",
   "tests/restore-drift-guard.test.mjs",
   "tests/canonical-branch.test.mjs",
   "tests/check-migration-sync.test.mjs",

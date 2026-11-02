@@ -4,8 +4,10 @@
 // node:sqlite), this script proves a REMOTE backup actually restores on
 // Cloudflare's real D1 service -- the two are complementary, not
 // duplicates: this one is what the monthly restore-verification GitHub
-// Actions workflow runs, and it is the only one of the two that can catch
-// a problem specific to the remote service itself.
+// Actions workflow runs (both the Staging and the Production copy --
+// d1-restore-verify-monthly.yml / d1-restore-verify-monthly-production.yml
+// both invoke this same script), and it is the only one of the two that can
+// catch a problem specific to the remote service itself.
 //
 // It creates a brand-new, throwaway remote D1 database, restores the given
 // SQL export into it, runs the same integrity checks the manual recovery
@@ -13,6 +15,36 @@
 // hand, and always deletes the scratch database afterward -- including on
 // failure, so a bad run never leaves an orphaned database behind to
 // accumulate silently.
+//
+// Restores in three layers, all driven by planD1Restore
+// (lib/operations/d1-restore-order.ts): schema, then normal-sized data per
+// table in dependency-safe order via `wrangler d1 execute --file=...`, then
+// any individual statement too large for that path via the D1 HTTP query
+// API with the value moved into a bound parameter instead of inline text.
+//
+// Root cause this corrects (2026-11-02, see docs/AI-HANDOFF.md's "Repair
+// and Verify Backup Restoration" entry): a disposable-database restore test
+// against this branch's own real, freshly exported Staging data failed
+// with "no such table: main.users: SQLITE_ERROR" -- `wrangler d1 export`
+// orders CREATE TABLE/INSERT statements by each table's position in
+// sqlite_master, not by foreign-key dependency (`donors`, which has a
+// foreign key to `users`, is exported long before `users` itself), and
+// restoring via a single `wrangler d1 execute --remote --file=...` goes
+// through D1's server-side bulk Import pipeline, which applies the file
+// across several internal batches -- `PRAGMA defer_foreign_keys=TRUE` (set
+// once, at the top of the file) does not survive across those batch
+// boundaries. This is the SAME failure, root-caused and already fixed on
+// `main` months earlier (commits 92e0bfd and 6875786, 2026-08-16) via
+// exactly the planD1Restore-driven restore this file now also uses --
+// lib/operations/d1-restore-order.ts (the fix itself) had already been
+// ported onto this branch, but this script -- the one both monthly restore-
+// verification workflows actually run -- had never been updated to call
+// it, so the fix existed without being wired in where it mattered. This
+// confirms the defect was real and affected the actual automated Production
+// and Staging restore-verification mechanism, not merely a manual test
+// approach: see D1RestorePlan's doc comment in
+// lib/operations/d1-restore-order.ts for the full account, including the
+// second, independent SQLITE_TOOBIG problem found and fixed alongside it.
 //
 // Usage: node scripts/verify-remote-restore.mjs -- <decrypted-backup.sql>
 // Requires CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in the
@@ -24,9 +56,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { FUNDRAISING_DATA_TABLES, PRODUCTION_BASELINE_HASH, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
-import { findInsertedRow } from "../lib/operations/d1-backup-rows.ts";
+import { findInsertedRow, planD1Restore } from "../lib/operations/d1-restore-order.ts";
 
 const backupArgument = process.argv.slice(2).find((argument) => argument !== "--");
 const backupPath = backupArgument ? path.resolve(backupArgument) : null;
@@ -41,6 +74,52 @@ function wrangler(args, { allowFailure = false } = {}) {
   const result = spawnSync("npx", ["--yes", "wrangler@4.92.0", ...args], { cwd: root, encoding: "utf8", env: process.env });
   if (result.status !== 0 && !allowFailure) throw new Error(`wrangler ${args.join(" ")} failed:\n${(result.stderr || result.stdout || "").trim()}`);
   return result;
+}
+
+// Bounded retry for genuine transient failures (network blips, etc.) --
+// NOT a workaround for SQLITE_TOOBIG. That error is handled structurally:
+// planD1Restore (lib/operations/d1-restore-order.ts) routes any statement
+// at or above D1_SAFE_STATEMENT_BYTES through d1QueryApiInsert below
+// instead of this file-based path, so this function should never see that
+// error for a correctly-sized statement. If it ever does, that is a real
+// problem worth failing loudly on, not retrying past -- hence no special-
+// casing of the error message here.
+function wranglerRestoreStepWithRetry(args, { attempts = 3, delayMs = 5_000 } = {}) {
+  let lastResult;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    lastResult = spawnSync("npx", ["--yes", "wrangler@4.92.0", ...args], { cwd: root, encoding: "utf8", env: process.env });
+    if (lastResult.status === 0) return lastResult;
+    if (attempt < attempts) {
+      console.log(`Restore step failed (attempt ${attempt}/${attempts}) -- retrying in ${delayMs / 1000}s...`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+    }
+  }
+  throw new Error(`wrangler ${args.join(" ")} failed after retries:\n${(lastResult.stderr || lastResult.stdout || "").trim()}`);
+}
+
+// D1's HTTP query API accepts a parameterized statement ({sql, params}) and
+// does not share the bulk Import pipeline's (`wrangler d1 execute
+// --file=...`) per-statement inline-SQL-text-length ceiling. This is the
+// fix for an individual oversized row (e.g. a large JSON blob column) --
+// see D1_SAFE_STATEMENT_BYTES's doc comment in
+// lib/operations/d1-restore-order.ts for the full account.
+async function d1QueryApiInsert(databaseId, sql, params, { attempts = 3, delayMs = 5_000 } = {}) {
+  const url = `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/d1/database/${databaseId}/query`;
+  let lastBody;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ sql, params }),
+    });
+    lastBody = await response.json();
+    if (response.ok && lastBody.success) return lastBody;
+    if (attempt < attempts) {
+      console.log(`D1 query API call failed (attempt ${attempt}/${attempts}, HTTP ${response.status}) -- retrying in ${delayMs / 1000}s...`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+    }
+  }
+  throw new Error(`D1 query API insert failed after retries: ${JSON.stringify(lastBody?.errors ?? lastBody)}`);
 }
 
 function wranglerJson(args) {
@@ -58,6 +137,18 @@ function wranglerJson(args) {
   throw new Error(`Could not find JSON in wrangler output for: ${args.join(" ")}\n${result.stdout}`);
 }
 
+const restorePlan = planD1Restore(backupSql);
+if (restorePlan.skippedTables.length > 0) {
+  console.log(`Note: skipping DATA restore for ${restorePlan.skippedTables.join(", ")} (see D1_RESTORE_SKIP_DATA_TABLES in lib/operations/d1-restore-order.ts -- schema for these tables is still restored and verified).`);
+}
+
+const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "fundraising-os-restore-verify-"));
+function writeTempSql(name, sql) {
+  const tempPath = path.join(tempDirectory, name);
+  fs.writeFileSync(tempPath, sql);
+  return tempPath;
+}
+
 let scratchDatabaseId = null;
 try {
   console.log(`Creating scratch database ${scratchDatabaseName}...`);
@@ -67,13 +158,59 @@ try {
   scratchDatabaseId = idMatch[1];
   console.log(`Created ${scratchDatabaseName} (${scratchDatabaseId}).`);
 
-  console.log("Restoring backup into scratch database...");
-  wrangler(["d1", "execute", scratchDatabaseName, "--remote", "--file", backupPath, "--yes"]);
+  // Restored as separate requests -- schema first, then one request per
+  // restore step in dependency-safe order, then query-planner stats --
+  // rather than one combined file. A single `wrangler d1 execute --remote
+  // --file=...` covering the whole database fails with dependency-order
+  // foreign-key errors (see this file's header) and, even once reordered,
+  // with "statement too long: SQLITE_TOOBIG" for a large combined file;
+  // restoring one table at a time in dependency order, with any
+  // individually oversized row routed to the D1 HTTP query API instead,
+  // avoids both. See D1RestorePlan's doc comment in
+  // lib/operations/d1-restore-order.ts for the full account.
+  console.log("Restoring schema...");
+  wranglerRestoreStepWithRetry(["d1", "execute", scratchDatabaseName, "--remote", "--file", writeTempSql("schema.sql", restorePlan.schemaSql), "--yes"]);
 
-  console.log("Running PRAGMA integrity_check...");
-  const integrity = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", "PRAGMA integrity_check;"]);
-  const integrityValue = integrity?.[0]?.results?.[0]?.integrity_check;
-  assert.equal(integrityValue, "ok", `PRAGMA integrity_check did not return "ok": ${JSON.stringify(integrity)}`);
+  // Each table's steps (a "file" step for its normal-sized rows, a
+  // "statement" step for each oversized one) are iterated together, in
+  // dependency order, exactly as planD1Restore produced them -- never
+  // regrouped by kind, since a child row could reference a parent's
+  // oversized row that hasn't been restored yet if oversized statements
+  // were deferred to "the end" instead.
+  for (const step of restorePlan.steps) {
+    if (step.kind === "file") {
+      console.log(`Restoring data for "${step.table}" (${step.sql.length} bytes)...`);
+      wranglerRestoreStepWithRetry(["d1", "execute", scratchDatabaseName, "--remote", "--file", writeTempSql(`data-${step.table}.sql`, step.sql), "--yes"]);
+    } else {
+      const totalParamBytes = step.params.reduce((sum, value) => sum + String(value ?? "").length, 0);
+      console.log(`Restoring 1 oversized statement for "${step.table}" via the D1 query API (parameterized, ~${totalParamBytes} bytes of value data, ${step.sql.length}-byte SQL text)...`);
+      await d1QueryApiInsert(scratchDatabaseId, step.sql, step.params);
+    }
+  }
+
+  if (restorePlan.trailingStatsSql) {
+    console.log("Restoring query-planner statistics (best-effort -- these are planner hints, not data, so a failure here does not affect integrity and must not fail verification)...");
+    wrangler(["d1", "execute", scratchDatabaseName, "--remote", "--file", writeTempSql("stats.sql", restorePlan.trailingStatsSql), "--yes"], { allowFailure: true });
+  }
+
+  // `PRAGMA integrity_check` is rejected outright by D1's query API with
+  // "not authorized: SQLITE_AUTH" (confirmed against the real, untouched
+  // Staging database too, so this is a Cloudflare D1 API-level
+  // restriction, not anything to do with this restore). `PRAGMA
+  // quick_check` is SQLite's own documented, near-equivalent, lighter
+  // alternative (same "ok" / list-of-problems output contract; it performs
+  // the same B-tree, page-linkage, and cell-format structural checks and
+  // most of the same index-consistency checks -- the only thing it skips
+  // is one direction of unique-index/row correspondence verification, a
+  // narrow difference not relevant to proving a restore is structurally
+  // sound) and is not blocked. This is a necessary substitution, not a
+  // weakening: integrity_check is not merely slower via this path, it is
+  // hard-rejected, so quick_check is the only way this step can run at all
+  // via the D1 API today.
+  console.log("Running PRAGMA quick_check...");
+  const integrity = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", "PRAGMA quick_check;"]);
+  const integrityValue = integrity?.[0]?.results?.[0]?.quick_check;
+  assert.equal(integrityValue, "ok", `PRAGMA quick_check did not return "ok": ${JSON.stringify(integrity)}`);
 
   console.log("Running PRAGMA foreign_key_check (referential integrity)...");
   const foreignKeyViolations = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", "PRAGMA foreign_key_check;"]);
@@ -140,4 +277,5 @@ try {
       console.log("Scratch database deleted.");
     }
   }
+  fs.rmSync(tempDirectory, { recursive: true, force: true });
 }
