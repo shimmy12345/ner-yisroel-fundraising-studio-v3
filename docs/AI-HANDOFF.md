@@ -61781,3 +61781,265 @@ the owner's approval for a Staging database change in this round.
 
 Stopping here, per explicit instruction. No further cleanup or feature
 development follows.
+
+## Investigation: Staging Monthly Restore-Test Failures on October 19 and November 1 (2026-11-02) -- READ-ONLY, NO CHANGES MADE
+
+Read-only investigation, per explicit instruction: no Production or
+Staging database modified, no migration run, nothing deployed.
+Everything below is sourced from direct GitHub Actions API queries
+(workflow runs, jobs, check-run annotations), direct `git show`/`git
+ls-tree` reads of both `origin/main` and the real canonical/feature
+branches, and local, in-memory-only test runs against real captured
+schema text (no live database touched). Verified facts and
+unavoidable gaps (GitHub log-download requires admin rights this
+session's token does not have) are labeled separately below.
+
+### 1. Exact cause of each failure -- NOT the same root cause
+
+**October 19 (3 runs, all `workflow_dispatch` against the feature
+branch, NOT the scheduled job)**: every run that day was a *manual*
+dispatch of `.github/workflows/d1-restore-verify-monthly.yml` with
+either `confirm_repair: APPLY-0049-CALENDAR-SCHEMA-REPAIR-STAGING` or
+`diagnose_connection: DIAGNOSE-STAGING-CONNECTION` set -- both of which
+the workflow's own `if:` conditions use to **skip the real `verify`
+job entirely** and run a different, gated job instead:
+
+- Run `39298894750` (18:00:13Z) and `39301756858` (18:21:02Z,
+  cancelled): attempts to apply the (now-determined-unnecessary, see
+  the prior round's entry) `drizzle/pending-review/0049_fix_calendar_
+  schema_text_staging_repair.sql` repair to Staging. Failed at "Apply
+  the reviewed Calendar schema repair to Staging." Entirely unrelated
+  to backup/restore-verification.
+- Run `39311943280` (19:33:13Z): the deliberately gated, **read-only**
+  `diagnose-staging-connection` job -- confirmed via `docs/AI-HANDOFF.md`'s
+  own prior entry (search "DIAGNOSE-STAGING-CONNECTION") to exist
+  *specifically* to capture the real Cloudflare HTTP status/error code
+  from a suspected token-permission problem with the Staging apply
+  tooling's credential, before deciding on a remedy -- "without ever
+  reaching backup, repair, recovery, or scratch-database creation." Its
+  failure is the diagnostic successfully reporting a real connection
+  problem with that migration-apply credential, not a broken test. The
+  exact HTTP status/Cloudflare error code could not be retrieved this
+  round -- GitHub's job-log download endpoint returned `403: Must have
+  admin rights to Repository` for this session's token, and the
+  Checks API's own annotations for that run contain only generic
+  runner-level notices (Node 20 deprecation, Ubuntu image migration
+  notice, a generic "Process completed with exit code 1"), not the
+  diagnostic script's own printed output.
+
+**None of the three October 19 runs ever reached the real `verify`
+job** (confirmed via the Jobs API: `verify` is listed `skipped` on all
+three) -- none of them represent an actual restore-verification
+attempt, successful or not.
+
+**November 1 (the one real scheduled run, `41322245940`, `main`,
+`event: schedule`)**: this IS the real monthly `verify` job, but it
+failed at its own **"Preflight -- confirm main's migration tracking is
+current with the canonical branch"** step -- every subsequent step
+(download, decrypt, restore into a scratch database, run every
+integrity check) is listed `skipped`, confirming the real backup was
+never even downloaded, let alone restored. Root cause, found directly
+in `scripts/check-migration-sync.mjs`'s own current code on
+`origin/main` (this script does not exist on the feature branch by
+design -- see "4" below): this is a **secondary preflight**,
+separate from and much cruder than `scripts/check-main-restore-sync.mjs`
+(the primary guard) -- it only compares a bare list of migration
+*filenames* in the canonical branch's `drizzle/` directory against
+`main`'s committed manifest, with no DDL/structural comparison at all.
+Its filter matched migration files by basename pattern only, without
+excluding `drizzle/pending-review/` -- so it saw
+`0049_fix_calendar_schema_text_staging_repair.sql` (the deliberately
+unapplied, gated draft repair, same file referenced above) sitting in
+that directory and wrongly treated it as a real, expected migration
+`main`'s manifest should already include, failing loudly with "missing
+from main" even though nothing real was actually missing.
+
+**This exact bug was already found and fixed, same day, independently
+of this investigation and of the prior two rounds' work**: commit
+`2e09a31` ("Fix check-migration-sync.mjs: exclude drizzle/pending-review/
+from the canonical-migration scan"), pushed directly to `main` at
+2026-11-01 11:03:26 -0500 (16:03:26Z) -- after the 15:38:27Z failure,
+on the same day. Its own code comment explicitly names this exact run
+ID (`41322245940`) as the one it fixes. Re-running the current,
+already-fixed script confirms it: comparing the real canonical
+branch's migration list (with `pending-review/` now correctly excluded)
+against `main`'s current manifest finds nothing missing.
+
+### 2. Does either failure affect our ability to restore Production backups successfully? NO.
+
+- **October 19**: never touched the backup/restore mechanism at all
+  (see "1" above) -- the real `verify` job was skipped on every run
+  that day.
+- **November 1**: failed at a preflight *before* ever downloading,
+  decrypting, or attempting to restore the real backup -- the actual
+  backup object was never read, and no restore or integrity check was
+  ever attempted, successfully or not.
+- **Production's own restore-verification is a separate workflow**
+  (`.github/workflows/d1-restore-verify-monthly-production.yml`,
+  confirmed this round via direct `grep` to have no
+  `check-migration-sync.mjs`/"Preflight" step at all) and has been
+  passing cleanly -- confirmed in the prior round: latest nightly
+  Production backup (2026-11-01T18:27:49Z) and latest monthly
+  Production restore-verification (2026-11-01T18:28:37Z) both
+  succeeded.
+- **No evidence anywhere in this investigation that a real backup
+  (Staging or Production) is, or ever was, actually non-restorable.**
+  The Staging Health-page card showing "Monthly restore test...
+  failed" reflects exactly the Nov 1 preflight block described above,
+  not a failed restore attempt.
+
+### 3. Does the recent SQL comment-handling correction (commit `5ceee7e`) resolve any part of this? Partially -- not the reported failures themselves, but a real, separate, latent defect in the SAME restore-verification script.
+
+Commit `5ceee7e` did **not** cause and does **not** fix either the
+October 19 or November 1 failure -- those are both explained above by
+entirely different, unrelated causes (manual dispatch/diagnostic jobs,
+and a pending-review filename-filter bug, respectively), and the
+November 1 fix (`2e09a31`) landed on `main` independently, hours before
+this investigation began.
+
+However, `scripts/verify-remote-restore.mjs` -- the script that
+performs the REAL restore-and-integrity-check once a run gets past
+every preflight -- has its own internal structural-integrity check at
+lines 89-91:
+```js
+const schemaComparison = compareSchemaObjects(stagingSchemaObjects(schemaRows));
+assert.equal(schemaComparison.matches, true, `Restored schema does not match the production baseline: ...`);
+```
+This calls the **exact same** `compareSchemaObjects()`/`normalizeSchemaSql()`
+that commit `5ceee7e` fixed. Reproduced this round, in-memory only
+(no live database touched, per the safety requirement): feeding this
+exact call the real, captured, comment-contaminated `calendar_event_links`
+text from Staging's actual live schema (a literal `wrangler d1 export`
+backup -- confirmed this round, via direct `grep` of
+`.github/workflows/d1-backup-nightly.yml`, that Staging's nightly
+backup is the same full-literal-dump style as Production's, which
+preserves this exact stored text verbatim on restore) --
+
+- **With the fix (current code)**: zero differences, `matches: true`.
+  Also already covered by the permanent regression test added last
+  round, `tests/production-baseline.test.mjs`'s "the real, live
+  Staging calendar_event_links/calendar_event_link_history schema...
+  now matches the baseline" (re-ran this round: still passing, 47/47).
+- **Before the fix**: this exact code path (unchanged in
+  `verify-remote-restore.mjs` itself) would have thrown
+  `AssertionError: Restored schema does not match the production
+  baseline: Table definition differs: calendar_event_links...` --
+  confirmed by inspecting the pre-fix `normalizeSchemaSql()` (no
+  comment-stripping) alongside this round's already-established fact
+  that Staging's real stored text for this table carries the
+  pre-correction embedded comments.
+
+**Conclusion**: commit `5ceee7e` did not cause or fix either reported
+failure, but it did fix a real, separate, latent defect that would
+have caused the NEXT real restore-verification attempt to fail at its
+own internal integrity check (a third, independent failure mode, never
+yet actually triggered since no run has gotten this far since
+`calendar_event_links` started carrying this stored text) -- so its
+presence is a genuine, if accidental, improvement to restore-verification
+health, not a coincidental unrelated change.
+
+### 4. Caused by application code, database schema, environment configuration, or the restore workflow itself?
+
+**The restore workflow itself**, in two independent, already-identified
+ways:
+
+1. **Already fixed, on `main`, same day**: `scripts/check-migration-sync.mjs`'s
+   own migration-file filter (a defect in the workflow's own tooling,
+   not a schema or application-code problem) -- see "1".
+2. **Newly found this round, NOT yet fixed anywhere, no actual failure
+   caused by it yet**: `check-migration-sync.mjs`'s `CANONICAL_BRANCH`
+   default (`feature/independent-cloudflare-sandbox`) -- and the
+   *primary* guard's own CI trigger, `.github/workflows/d1-restore-sync-check.yml`'s
+   `on: push/pull_request: branches: [feature/independent-cloudflare-sandbox]`
+   -- both still point at that one specific branch name. Confirmed
+   this round: the real, current, active schema-owning work has moved
+   31 commits past that branch, onto
+   `trip-planner-multi-region-manual-prospects` (a normal, legitimate
+   feature branch off of it, confirmed via `docs/AI-HANDOFF.md`'s own
+   "Production Release Readiness Review" entry -- not a rename or
+   abandonment of the canonical branch, just unmerged-back feature
+   work). Confirmed empirically, read-only, this round: because
+   `main`'s manifest already has migrations `0054`/`0055` (apparently
+   synced directly from a more-current branch at some point, bypassing
+   the documented canonical-branch pipeline) while the *stale*
+   `feature/independent-cloudflare-sandbox` reference itself only has
+   through `0053`, the secondary preflight, AS CURRENTLY WRITTEN,
+   would find **zero** migrations "missing from main" if it ran again
+   right now -- even though `main` is still genuinely missing migration
+   `0056` (`trips`/`trips_owner_archived_idx`, already known and
+   already deliberately left unsynced per the prior two rounds'
+   explicit instructions). This is a **false-negative risk for future
+   runs**, not the cause of either investigated failure -- it did not
+   cause Nov 1's failure (that was specifically about the
+   `pending-review` filter, unrelated to which branch name is
+   referenced) -- but it means the preflight can no longer be trusted
+   to catch a *future* new migration landing only on the real active
+   branch, and the primary CI guard (`d1-restore-sync-check.yml`) has
+   likely not fired automatically on a real push for the same reason
+   since development moved to the newer branch name. This also
+   explains, independent of the two specific dates investigated, why
+   `main` has needed so many manual `fix/d1-restore-sync-00XX`-style
+   catch-up rounds over this project's history (visible in its own
+   branch list) despite this automation existing specifically to
+   prevent that.
+
+Neither failure is caused by application code or an actual database
+schema defect.
+
+### 5. Smallest safe, system-wide correction
+
+- **October 19**: no correction needed from this investigation --
+  these runs were deliberate, already-understood diagnostics for the
+  now-moot calendar-repair migration-apply credential question. If
+  that credential question still matters for some other reason, it is
+  a separate, pre-existing, already-tracked item (see the prior
+  "DIAGNOSE-STAGING-CONNECTION" entry in `docs/AI-HANDOFF.md`), not a
+  restore-verification defect.
+- **November 1's specific failure**: already corrected, on `main`,
+  independently (commit `2e09a31`). No further action needed for this
+  specific bug.
+- **The newly found, not-yet-triggered risk (item 4.2)**: the smallest
+  safe correction is updating `check-migration-sync.mjs`'s
+  `CANONICAL_BRANCH` default and `d1-restore-sync-check.yml`'s
+  `branches:` lists to track wherever the real, current active
+  schema-owning branch actually is -- and, to prevent this exact class
+  of staleness recurring every time a branch gets renamed or replaced,
+  considering a single, clearly documented source for that branch name
+  (e.g., a one-line reference in `docs/D1-MIGRATION-SYNC-PROCESS.md`
+  that both the workflow and the script read, or an environment
+  variable set once at the repository level) rather than a literal
+  branch name duplicated in multiple files. **Not implemented this
+  round** -- purely a recommendation, pending approval, since it
+  touches `main`'s own CI configuration directly.
+- **No database change, migration, or Production/Staging data change
+  is proposed anywhere in this investigation.**
+
+### Verified facts vs. gaps
+
+**Verified this round, directly**: the exact step that failed in every
+one of the 4 runs across both dates (via the GitHub Jobs API); that
+none of them reached the real backup-download/restore/integrity-check
+steps; the exact code and commit (`2e09a31`, already on `main`) that
+fixed the Nov 1 preflight bug; that `verify-remote-restore.mjs`'s own
+internal integrity check calls the exact function commit `5ceee7e`
+fixed, reproduced in-memory with real captured Staging DDL both before
+and after reasoning about the fix; that Production's restore-verify
+workflow has no equivalent preflight step; that `main`'s manifest
+already includes migrations the referenced "canonical" branch itself
+lacks, and that the preflight's current CANONICAL_BRANCH default would
+report a false "all clear" today despite `main` still genuinely
+missing migration `0056`.
+
+**Not verified / could not be retrieved this round**: the exact
+Cloudflare HTTP status/error code from the October 19 connection
+diagnostic's own output -- GitHub's job-log download endpoint requires
+admin rights this session's token does not have, and the Checks API's
+annotations for that run contain no application-level detail, only
+generic runner notices.
+
+---
+
+Stopping here, per explicit instruction. No correction was implemented
+or deployed. Awaiting approval before any change to
+`check-migration-sync.mjs`'s branch reference, `d1-restore-sync-check.yml`'s
+trigger configuration, or anything else identified above.
