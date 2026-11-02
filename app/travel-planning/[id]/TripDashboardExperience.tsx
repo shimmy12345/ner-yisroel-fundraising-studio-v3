@@ -4,8 +4,10 @@ import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { donorNavigationHref, meetingBriefNavigationHref } from "../../../lib/navigation/donor-navigation";
 import { searchDonors } from "../../../lib/relationships/donor-search";
-import { ALL_REGIONS, ALL_CITIES, filterByGeoRegions, type RegionSetFilterValue } from "../../../lib/relationships/donor-geo-filter";
+import { ALL_REGIONS, type RegionSetFilterValue } from "../../../lib/relationships/donor-geo-filter";
+import { effectiveRegionFilter, findProspectResults, toggleRegionInFilter } from "../../../lib/relationships/trip-region-filter";
 import { TRAVEL_REGIONS, type TravelRegionId } from "../../../lib/relationships/travel-regions";
+import { DestinationRegionFieldset } from "../DestinationRegionFieldset";
 import { numericDonorCode } from "../../../lib/relationships/donor-identity";
 import type { TripRecord, TripProspectRecord, TripFinancialAttributionRow, EligibleGivingActivity, ReconcilableAttribution, FindProspectDonor } from "../../../lib/relationships/trips-data";
 import type { TripFinancialSummary } from "../../../lib/relationships/trip-financial-attribution";
@@ -141,10 +143,25 @@ export function TripDashboardExperience({
     setSelectedRegionIds(next);
     syncUrl({ regions: next === ALL_REGIONS ? "all" : next && next.size > 0 ? [...next].join(",") : "", allRegions: "" });
   }
+  // Fix Trip Region Selection (2026-11-01, see docs/AI-HANDOFF.md): base
+  // the toggle on `effectiveRegionSet` (the trip's own saved regions
+  // when nothing has been touched yet), never on the raw `null` state
+  // as an empty set -- otherwise the first checkbox clicked after
+  // opening "Find prospects" silently drops every other region the
+  // trip was already scoped to.
   function toggleRegion(regionId: TravelRegionId) {
-    const current = selectedRegionIds === ALL_REGIONS || selectedRegionIds === null ? new Set<TravelRegionId>() : new Set(selectedRegionIds);
-    if (current.has(regionId)) current.delete(regionId); else current.add(regionId);
-    changeSelectedRegionIds(current);
+    changeSelectedRegionIds(toggleRegionInFilter(effectiveRegionSet, regionId));
+  }
+  // Editing the trip's OWN destination regions (EditTripRegionsControl)
+  // must refresh "Find prospects"' default too -- reset the untouched-
+  // session `null` state so it picks up the new trip regions, rather
+  // than staying frozen on whatever the old default happened to be.
+  // Never resets a fundraiser's own EXPLICIT region choice (this only
+  // fires from the "Edit destination regions" save action, not from
+  // every refresh()).
+  function handleTripRegionsChanged() {
+    changeSelectedRegionIds(null);
+    refresh();
   }
 
   // Full-trip counts (Section 3): always over EVERY selected prospect,
@@ -164,29 +181,27 @@ export function TripDashboardExperience({
   );
   const prospectsFiltering = statusFilter !== "all" || prospectQuery.trim().length > 0;
 
-  // Find prospects (Sections 1 & 4): region + text search composed over
-  // the SAME full donor list, via the exact same filterByGeoRegions()/
-  // searchDonors() the donor directory's own single-region filter uses
-  // underneath -- never truncated, never a second search implementation.
+  // Find prospects (Sections 1 & 4, fixed again 2026-11-01 -- see
+  // docs/AI-HANDOFF.md's "Fix Trip Region Selection and Mobile Layout"
+  // entry): region + text search composed over the SAME full donor
+  // list, via the shared, pure lib/relationships/trip-region-filter.ts
+  // helpers -- never truncated, never a second search implementation.
   // "Any combination of regions" means the UNION of every checked
   // region's donors (never an intersection) -- see donor-geo-filter.ts's
-  // own matchesAnyRegionFilter doc comment.
+  // own matchesAnyRegionFilter doc comment. Defaults to the trip's own
+  // saved destination regions until the fundraiser explicitly changes
+  // the filter (or the trip has none saved, which defaults to every
+  // region rather than hiding all donors).
   const effectiveRegionSet: RegionSetFilterValue = useMemo(
-    () => (selectedRegionIds === ALL_REGIONS ? ALL_REGIONS : selectedRegionIds ?? (trip.destinationRegionIds.length > 0 ? new Set(trip.destinationRegionIds) : ALL_REGIONS)),
+    () => effectiveRegionFilter(selectedRegionIds, trip.destinationRegionIds),
     [selectedRegionIds, trip.destinationRegionIds],
   );
-  // searchDonors() (lib/relationships/donor-search.ts) is typed over the
-  // plain DonorSearchRecord shape, so its result loses the extra
-  // alreadySelected/existingProspectId/city/state fields at the type
-  // level even though they still exist at runtime -- resolved back to
-  // the full FindProspectDonor by id, exactly like
-  // DonorDirectoryExperience.tsx's own `relationshipById.get(...)`
-  // pattern, rather than widening the shared search utility's signature.
-  const findProspectDonorById = useMemo(() => new Map(findProspectDonors.map((donor) => [donor.id, donor])), [findProspectDonors]);
-  const regionFiltered = useMemo(() => filterByGeoRegions(findProspectDonors, effectiveRegionSet, ALL_CITIES), [findProspectDonors, effectiveRegionSet]);
+  // A non-empty donor-name search bypasses the region filter entirely
+  // (owner requirement: "allow me to search for a donor by name
+  // regardless of region") -- see findProspectResults()'s own comment.
   const findResults = useMemo(
-    () => searchDonors(regionFiltered, findQuery, Number.MAX_SAFE_INTEGER).map((donor) => findProspectDonorById.get(donor.id)!),
-    [regionFiltered, findQuery, findProspectDonorById],
+    () => findProspectResults(findProspectDonors, effectiveRegionSet, findQuery),
+    [findProspectDonors, effectiveRegionSet, findQuery],
   );
   const findScopeLabel = effectiveRegionSet === ALL_REGIONS
     ? "all regions"
@@ -253,7 +268,7 @@ export function TripDashboardExperience({
         <h1>{trip.name}</h1>
         <p className="subhead">{dateLabel(trip.startDate)} &ndash; {dateLabel(trip.endDate)}{trip.goalCents != null ? ` · Goal: ${new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(trip.goalCents / 100)}` : ""}</p>
         {trip.notes && <p className="travel-planning-trip-notes">{trip.notes}</p>}
-        <EditTripRegionsControl tripId={trip.id} destinationRegionIds={trip.destinationRegionIds} onChanged={refresh} />
+        <EditTripRegionsControl tripId={trip.id} destinationRegionIds={trip.destinationRegionIds} onChanged={handleTripRegionsChanged} />
       </div>
       <TripStatusControl tripId={trip.id} currentStatus={trip.status} onChanged={refresh} />
     </header>
@@ -285,7 +300,7 @@ export function TripDashboardExperience({
       onFindProspects={() => changeTab("find")} findProspectDonors={findProspectDonors}
     /> : <FindProspectsPanel
       trip={trip} results={findResults} resultCount={findResults.length} totalCount={findProspectDonors.length}
-      findQuery={findQuery} onFindQueryChange={changeFindQuery} selectedRegionIds={selectedRegionIds} onToggleRegion={toggleRegion} onSelectAllRegions={() => changeSelectedRegionIds(ALL_REGIONS)}
+      findQuery={findQuery} onFindQueryChange={changeFindQuery} selectedRegionIds={effectiveRegionSet} onToggleRegion={toggleRegion} onSelectAllRegions={() => changeSelectedRegionIds(ALL_REGIONS)}
       findScopeLabel={findScopeLabel} busyDonorId={busyDonorId} onAdd={addDonor}
       showManualAddForm={showManualAddForm} onShowManualAddForm={setShowManualAddForm} onAddManualProspect={addManualProspectSubmit}
     />}
@@ -348,12 +363,7 @@ function EditTripRegionsControl({ tripId, destinationRegionIds, onChanged }: { t
 
   return <div className="travel-planning-confirm-panel travel-planning-edit-regions-form" aria-label="Edit destination regions">
     {error && <p className="travel-planning-error" role="alert">{error}</p>}
-    <fieldset className="travel-planning-new-trip-regions">
-      <legend>Destination Travel Region(s)</legend>
-      {TRAVEL_REGIONS.map((region) => <label key={region.id} className="travel-planning-region-checkbox">
-        <input type="checkbox" checked={draft.includes(region.id)} onChange={() => toggle(region.id)} /> {region.label}
-      </label>)}
-    </fieldset>
+    <DestinationRegionFieldset regions={TRAVEL_REGIONS} selectedRegionIds={draft} onToggle={toggle} />
     <div className="travel-planning-confirm-actions">
       <button type="button" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save regions"}</button>
       <button type="button" onClick={() => setEditing(false)} disabled={saving}>Cancel</button>
@@ -411,30 +421,45 @@ function FindProspectsPanel({
 }: {
   trip: TripRecord; results: FindProspectDonor[]; resultCount: number; totalCount: number;
   findQuery: string; onFindQueryChange: (value: string) => void;
-  selectedRegionIds: ReadonlySet<TravelRegionId> | typeof ALL_REGIONS | null; onToggleRegion: (regionId: TravelRegionId) => void; onSelectAllRegions: () => void;
+  // Always the EFFECTIVE filter (RegionSetFilterValue, never null --
+  // the caller already resolved the trip's own default) so the
+  // checkboxes always display what's actually being filtered on. Fix
+  // Trip Region Selection (2026-11-01, see docs/AI-HANDOFF.md): this
+  // used to be the raw, `null`-until-touched client state, so every
+  // checkbox (including "All regions") rendered unchecked even when
+  // the trip's own saved regions were already in effect.
+  selectedRegionIds: RegionSetFilterValue; onToggleRegion: (regionId: TravelRegionId) => void; onSelectAllRegions: () => void;
   findScopeLabel: string; busyDonorId: string | null; onAdd: (donorId: string) => void;
   showManualAddForm: boolean; onShowManualAddForm: (next: boolean) => void;
   onAddManualProspect: (input: { name: string; city: string; regionId: string; phone: string; email: string; notes: string }) => Promise<void>;
 }) {
   const isAllRegions = selectedRegionIds === ALL_REGIONS;
+  const searching = findQuery.trim().length > 0;
   return <section className="travel-planning-find-prospects" aria-label="Find prospects">
     <p className="travel-planning-find-intro">Search donors and add the ones you actually plan to reach out to, or add someone who isn&rsquo;t in FOS yet. Nothing here is added until you choose it.</p>
     <div className="directory-filters travel-planning-find-filters" role="group" aria-label="Find prospects filters">
       <label className="directory-filter travel-planning-find-search">
         <span>Search</span>
         <input type="text" value={findQuery} onChange={(event) => onFindQueryChange(event.target.value)} placeholder="Search name, household, spouse, JL code, email, or phone" />
+        <small className="travel-planning-region-hint">Search looks across every region, regardless of what&rsquo;s checked below.</small>
       </label>
       <fieldset className="directory-filter travel-planning-region-filter">
         <legend>Regions</legend>
-        <label className="travel-planning-region-checkbox"><input type="checkbox" checked={isAllRegions} onChange={onSelectAllRegions} /> All regions</label>
-        {TRAVEL_REGIONS.map((region) => <label key={region.id} className="travel-planning-region-checkbox">
-          <input type="checkbox" checked={!isAllRegions && Boolean(selectedRegionIds?.has(region.id))} onChange={() => onToggleRegion(region.id)} /> {region.label}
-        </label>)}
+        <div className="travel-planning-region-list">
+          <label className="travel-planning-region-checkbox"><input type="checkbox" checked={isAllRegions} onChange={onSelectAllRegions} /> All regions</label>
+          {TRAVEL_REGIONS.map((region) => <label key={region.id} className="travel-planning-region-checkbox">
+            <input type="checkbox" checked={!isAllRegions && selectedRegionIds.has(region.id)} onChange={() => onToggleRegion(region.id)} /> {region.label}
+          </label>)}
+        </div>
       </fieldset>
     </div>
-    <p className="travel-planning-find-scope">Showing {resultCount} of {totalCount} donors in {findScopeLabel}{findQuery.trim() ? ` matching “${findQuery.trim()}”` : ""}.</p>
+    <p className="travel-planning-find-scope">
+      {searching
+        ? `Showing ${resultCount} of ${totalCount} donors matching “${findQuery.trim()}” across every region.`
+        : `Showing ${resultCount} of ${totalCount} donors in ${findScopeLabel}.`}
+    </p>
 
-    {resultCount === 0 && <p className="travel-planning-empty-inline">No donors match. {findQuery.trim() ? "Clear the search to see candidates again." : "No donors in the selected regions yet."}</p>}
+    {resultCount === 0 && <p className="travel-planning-empty-inline">No donors match. {searching ? "Clear the search to see candidates again." : "No donors in the selected regions yet."}</p>}
 
     <ul className="travel-planning-candidate-list">
       {results.map((donor) => <li key={donor.id} className={donor.alreadySelected ? "already-selected" : ""}>

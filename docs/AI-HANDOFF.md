@@ -59863,3 +59863,189 @@ No database migration applied. No credential changed or provisioned.
 No background Google Calendar synchronization enabled. No Google
 Calendar event created, modified, or deleted. The UNAUTHORIZED stash
 remains untouched.
+
+## Fix Trip Region Selection and Mobile Layout (2026-11-01) -- FIXED AND VERIFIED ON STAGING, NOT YET DEPLOYED TO PRODUCTION
+
+Owner request: trip creation's "Destination Travel Region(s)" had to
+be re-selected again in "Find prospects," and the region checkboxes
+were poorly formatted on mobile (checkbox above the label, excessive
+spacing). Investigate the root cause, fix the underlying workflow
+(not a second, independent selection system), fix the mobile layout,
+preserve every other Trip Planner feature, test on Staging only, and
+report back before any Production deployment.
+
+### Root cause (investigated first, no code changed until understood)
+
+Destination regions ARE already the correct, single source of truth
+-- `trip_destination_regions` (migration `0055`, both for new trips
+and backfilled for every pre-existing trip with the old single-region
+column) and `TripRecord.destinationRegionIds`. "Find prospects"
+(`FindProspectsPanel` in `TripDashboardExperience.tsx`) already read
+this correctly for the actual donor FILTER (`effectiveRegionSet`
+fell back to the trip's own regions when nothing had been touched
+yet) -- but the region CHECKBOXES rendered their `checked` state from
+the raw `selectedRegionIds` client state instead, which stays `null`
+until the fundraiser's own click (or a `?regions=` URL param) sets
+it. Result: every checkbox, including "All regions," displayed
+unchecked even while the trip's own regions were already correctly in
+effect -- and worse, `toggleRegion()` treated that `null` state as an
+EMPTY set when building the next selection, so the very first
+checkbox clicked silently discarded every other region the trip was
+already scoped to. That combination is exactly what looked like
+"I have to select my regions twice." This affects every trip with
+saved regions, old or new -- not only newly created ones, since
+`0055`'s backfill gave every pre-existing single-region trip a real
+`trip_destination_regions` row at migration time.
+
+The mobile layout bug was separate and simpler:
+`.travel-planning-region-checkbox` had no CSS rule of its own anywhere
+in `app/globals.css` and inherited whichever ancestor form's generic
+`label { display:flex; flex-direction:column }` rule (written for
+text-input labels like "Trip name"), stacking each checkbox above its
+own label text with a 5-6px gap, repeated once per region (15
+regions).
+
+### What changed
+
+- **New pure module** `lib/relationships/trip-region-filter.ts`:
+  `effectiveRegionFilter()` (the trip-default fallback, now the ONE
+  place both the checkboxes and the actual filter read from),
+  `toggleRegionInFilter()` (toggles from the EFFECTIVE set, never an
+  empty one -- the actual root-cause fix), and `findProspectResults()`
+  (donor name search now BYPASSES the region filter entirely --
+  explicit owner requirement: "allow me to search for a donor by name
+  regardless of region" -- browsing with an empty query still respects
+  the region filter as before).
+- `TripDashboardExperience.tsx`: `FindProspectsPanel`'s checkboxes now
+  read the resolved `effectiveRegionSet`, never the raw, possibly-null
+  state; `toggleRegion()` and a new `handleTripRegionsChanged()` (fired
+  only when the trip's OWN destination regions are edited via "Edit
+  destination regions," resetting the Find Prospects default so it
+  picks up the new regions, per the owner's explicit "changing trip
+  regions updates the default donor filter appropriately" requirement)
+  use the new pure helpers.
+- **New shared component** `app/travel-planning/DestinationRegionFieldset.tsx`:
+  used by both trip creation (`TravelPlanningExperience.tsx`) and
+  "Edit destination regions" (`TripDashboardExperience.tsx`'s
+  `EditTripRegionsControl`) -- the two places that set a trip's OWN
+  saved regions -- with the exact owner-specified explanation text
+  ("Select the regions where you plan to meet donors. You can still
+  add prospects from anywhere."), an optional filter box (regions >
+  8), and a scrollable, row-per-checkbox list. Deliberately NOT used by
+  "Find prospects"' own region FILTER, which has different semantics
+  (an "All regions" option, a Set rather than an array) and stayed its
+  own component -- though it reuses the same CSS class, so the mobile
+  fix applies there too.
+- `app/globals.css`: a more-specific override
+  (`.travel-planning-new-trip-regions label.travel-planning-region-checkbox`,
+  `.travel-planning-region-filter label.travel-planning-region-checkbox`)
+  lays each checkbox out as a row (checkbox beside label, not above
+  it), with a 44px tap target, a fixed 18px checkbox that cannot
+  shrink, `overflow-wrap:anywhere` for long region names, and a
+  `:has(input:checked)` highlight so a selected region is visibly
+  different. A `@media (max-width:640px)` rule widens the Find
+  Prospects region filter to the full row width on narrow screens.
+  The original bug-causing ancestor rules were left in place
+  untouched (still used correctly for actual text-input labels); only
+  overridden for this one class, at higher specificity so it wins
+  regardless of source order.
+- Nothing else changed: multi-region trips, manually-added prospects,
+  meeting scheduling/rescheduling/completion/cancellation, meeting
+  duration, trip financial totals, AI Meeting Notes, "Use donor
+  address," "Add to Google Calendar," and both regression safeguards
+  are all untouched code paths, confirmed by the full test suite and
+  the deploy's own passing feature-fingerprint + behavioral checks.
+
+### Regression tests added
+
+- `tests/trip-region-filter.test.mjs`: pure-function tests for all
+  three new helpers, including the EXACT regression scenario (a
+  two-region trip, nothing touched yet, one region unchecked -- the
+  other must survive) and the name-search-bypasses-region-filter
+  requirement.
+- `tests/trip-region-mobile-layout.test.mjs`: source-inspection tests
+  (matching this codebase's own established pattern for UI code with
+  no React/DOM test runner) proving the actual CSS override exists and
+  beats the ancestor rule by specificity, the exact owner-specified
+  explanation sentence is present, the checkboxes read
+  `effectiveRegionSet` rather than the raw possibly-null state, and
+  `toggleRegion`/`handleTripRegionsChanged` are wired to the new fixed
+  logic -- not just that some text exists somewhere.
+- Both registered in `scripts/run-tests.mjs`. Full suite: 251/251
+  test files passed; `tsc --noEmit` clean; `build:staging-independent`
+  clean.
+
+### Tested on Staging (`fundraising-os-staging.sgoldstein.workers.dev`, Worker `dc964edc-079d-4944-bee2-80f572202ebf`)
+
+Using two real, pre-existing Staging trips (not newly created for this
+test, to also prove existing trips are fixed, not only new ones):
+
+1. **Single-region trip ("Chicago," region `chicago-suburbs`)**:
+   opening Find Prospects with no `?regions=` URL param showed the
+   "Chicago & suburbs" checkbox already checked (highlighted) and
+   "Showing 45 of 266 donors in Chicago & suburbs" -- zero manual
+   re-selection needed.
+2. **Multi-region trip ("Test," regions `chicago-suburbs` +
+   `north-central-nj-teaneck-bergenfield`)**: both checkboxes
+   pre-checked, "Showing 88 of 266 donors in Chicago & suburbs,
+   North/Central NJ -- Teaneck/Bergenfield area."
+3. **The exact root-cause regression, reproduced and confirmed fixed
+   live**: on the "Test" trip, unchecking "Chicago & suburbs" left
+   "North/Central NJ" checked (URL updated to
+   `?regions=north-central-nj-teaneck-bergenfield`, not reset to
+   empty) and the donor count narrowed to 43 (NJ only) -- the exact
+   "select regions twice" bug, proven gone.
+4. **Name search ignores the region filter**: with only NJ checked,
+   searching "Amster" (a real Chicago-region donor) found him, with
+   the scope text reading 'Showing 1 of 266 donors matching "Amster"
+   across every region.'
+5. **Manually-added prospect**: added a disposable test prospect
+   ("Staging Test Prospect Nov1") with no donor record, confirmed it
+   appeared in "My trip prospects," then removed it -- confirmed via a
+   direct, read-only D1 query that the trip's prospect count returned
+   to exactly 0, matching its state before this test.
+6. **Changing trip regions updates the default filter**: via "Edit
+   destination regions," changed the "Test" trip from
+   Chicago+NJ to Chicago+Los Angeles -- Find Prospects immediately
+   re-defaulted to "Showing 55 of 266 donors in Chicago & suburbs, Los
+   Angeles & San Fernando Valley, CA" with no stale NJ donors -- then
+   reverted the trip back to its original Chicago+NJ regions,
+   confirmed via a direct D1 read matching the original exactly.
+7. **Mobile layout**: the remote browser window could not be narrowed
+   to true phone width in this session, so the fix was verified via
+   the deployed page's own computed styles instead of a visual
+   screenshot: `flexDirection: "row"`, `alignItems: "center"`,
+   `minHeight: "44px"`, a fixed 18px checkbox (`flexShrink:"0"`,
+   `flexGrow:"0"`) that cannot be squeezed, and `overflowWrap:
+   "anywhere"` for long region names -- all width-independent, so this
+   renders identically at any real viewport width. The one
+   width-gated enhancement (region filter widening below 640px) was
+   confirmed present in the real loaded stylesheet.
+8. **Existing trip data unchanged**: before/after read-only D1 checks
+   confirmed the "Chicago" trip's 45 `trip_prospects` rows (43
+   tracked, 2 actually selected) were never touched, and the "Test"
+   trip was restored to exactly its original two regions and 0
+   prospects. Zero Google network requests (`read_network_requests`
+   filtered for `google`) and zero console errors throughout. No
+   donor, pledge, payment, or financial record was read or written
+   anywhere in this round beyond the disposable manual-prospect test
+   above.
+
+One browser-tab freeze occurred mid-test (clicking "Remove" on the
+disposable manual prospect triggered a blocking native
+`window.confirm()` dialog that hung the CDP connection) -- recovered
+by closing the tab and deleting that one, exact, ID-scoped
+`trip_prospects` row directly via D1 instead of retrying the browser,
+the same recovery pattern used earlier in this session.
+
+### Readiness for Production
+
+Implemented, tested, and documented on Staging only, per the explicit
+instruction not to deploy without separate authorization. Not yet
+added to `FEATURE_FINGERPRINTS`
+(`scripts/check-production-feature-fingerprints.mjs`) or marked
+"Verified working in Production" in `docs/PRODUCTION-FEATURE-BASELINE.md`
+-- per that document's own rule, that happens only once this is
+independently re-verified against real, live Production, the same way
+every other feature on that list was. No unresolved issues identified;
+ready for a Production deployment once authorized.

@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import type { TripListItem } from "../../lib/relationships/trips-data";
 import type { TripStatus } from "../../lib/relationships/trip-model";
+import { DestinationRegionFieldset } from "./DestinationRegionFieldset";
 
 type RegionOption = { id: string; label: string };
 
@@ -81,13 +82,10 @@ export function TravelPlanningExperience({ trips, regions }: { trips: TripListIt
 
     {showForm && <form className="travel-planning-new-trip-form" onSubmit={createTrip}>
       <label>Trip name<input name="name" placeholder="Chicago -- November 2026" required maxLength={200} /></label>
-      <fieldset className="travel-planning-new-trip-regions">
-        <legend>Destination Travel Region(s)</legend>
-        {regions.map((region) => <label key={region.id} className="travel-planning-region-checkbox">
-          <input type="checkbox" checked={selectedRegionIds.includes(region.id)} onChange={() => toggleRegion(region.id)} /> {region.label}
-        </label>)}
-        {selectedRegionIds.length === 0 && <p className="travel-planning-form-hint">No region selected -- manual prospects only, until you add one.</p>}
-      </fieldset>
+      <DestinationRegionFieldset
+        regions={regions} selectedRegionIds={selectedRegionIds} onToggle={toggleRegion}
+        emptyHint="No region selected -- manual prospects only, until you add one."
+      />
       <label>Start date<input name="startDate" type="date" required /></label>
       <label>End date<input name="endDate" type="date" required /></label>
       <label>Fundraising goal (optional)<input name="goalDollars" type="number" min="1" step="1" placeholder="25000" /></label>

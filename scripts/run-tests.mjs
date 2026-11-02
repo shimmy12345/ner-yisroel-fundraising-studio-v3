@@ -110,6 +110,8 @@ const TEST_FILES = [
   "tests/trip-prospect-selection-schema.test.mjs",
   "tests/trip-manual-prospects-schema.test.mjs",
   "tests/trip-multi-region-schema.test.mjs",
+  "tests/trip-region-filter.test.mjs",
+  "tests/trip-region-mobile-layout.test.mjs",
   "tests/data-health.test.mjs",
   "tests/data-health-timestamp-formatting.test.mjs",
   "tests/data-health-repair.test.mjs",

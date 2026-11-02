@@ -1467,6 +1467,36 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .travel-planning-form-actions button:disabled { opacity:.6; cursor:wait; }
 .travel-planning-form-hint { margin:0; color:var(--muted); font-size:12px; line-height:1.5; max-width:420px; }
 
+/* Fix Trip Region Selection and Mobile Layout -- 2026-11-01, see
+   docs/AI-HANDOFF.md. `.travel-planning-region-checkbox` previously had
+   no rule of its own and inherited whichever ancestor form's generic
+   `label { display:flex; flex-direction:column }` rule (meant for
+   text-input labels, e.g. `.travel-planning-new-trip-form label` and
+   `.travel-planning-confirm-panel label` below) -- stacking each
+   checkbox above its own label text with a 5-6px gap, repeated once
+   per region. These selectors are deliberately MORE SPECIFIC (two
+   classes + the element) than those generic single-class rules, so
+   they win regardless of source order, and apply to all three places
+   a region checkbox is rendered: trip creation and "Edit destination
+   regions" (both via DestinationRegionFieldset) and the "Find
+   prospects" region filter. */
+.travel-planning-new-trip-regions { grid-column:1 / -1; }
+.travel-planning-new-trip-regions label.travel-planning-region-checkbox,
+.travel-planning-region-filter label.travel-planning-region-checkbox {
+  display:flex; flex-direction:row; align-items:center; gap:10px;
+  min-height:44px; padding:6px 8px; border-radius:8px;
+  color:#3a463f; font-size:13px; font-weight:600; overflow-wrap:anywhere;
+}
+.travel-planning-new-trip-regions label.travel-planning-region-checkbox input,
+.travel-planning-region-filter label.travel-planning-region-checkbox input {
+  flex:none; margin:0; width:18px; height:18px;
+}
+.travel-planning-region-checkbox:has(input:checked) { background:#e7f0ea; color:#1f6a44; font-weight:700; }
+.travel-planning-region-list { display:flex; flex-direction:column; gap:1px; max-height:280px; overflow-y:auto; border:1px solid #e4e8e3; border-radius:8px; padding:4px; background:#fbfcfa; }
+.travel-planning-region-hint { margin:4px 0 8px; color:var(--muted); font-size:12px; line-height:1.5; }
+.travel-planning-region-search { display:block; width:100%; min-height:40px; margin:0 0 8px; padding:8px 12px; border:1px solid #d8dfda; border-radius:7px; background:#fff; color:var(--ink); font:inherit; font-size:13px; }
+@media (max-width:640px) { .travel-planning-region-filter { flex-basis:100%; } }
+
 .travel-planning-list { display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:14px; }
 .travel-planning-trip-card { display:block; padding:18px; border:1px solid var(--line); border-radius:14px; background:#fff; box-shadow:var(--shadow); text-decoration:none; color:inherit; }
 .travel-planning-trip-card:hover { border-color:#c6d6cc; background:#f8faf8; }
