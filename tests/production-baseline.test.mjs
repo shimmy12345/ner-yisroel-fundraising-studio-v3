@@ -744,6 +744,61 @@ test("backupSchemaObjects throws, never guesses, on a statement it cannot parse 
   assert.throws(() => backupSchemaObjects(["CREATE SOMETHING WEIRD;"]), /could not parse/);
 });
 
+// Trailing ";" fix (2026-11-02, GitHub Actions run 41470202722, job
+// 125361466671): backupSchemaObjects()'s first version left every
+// statement's trailing ";" in its `sql` field. sqlite_schema's own `sql`
+// column NEVER includes it (SQLite strips it when storing a CREATE
+// statement) -- confirmed directly against a real restore (a schema-only
+// export restored into a disposable scratch database, its sqlite_schema
+// queried back and diffed byte-for-byte against the export's own text):
+// D1/SQLite does not rewrite or reformat index text at all; the ";" was
+// the only real asymmetry. compareSchemaObjects()'s TABLE path never
+// surfaced this (tableColumnClauseSet() only looks between the outermost
+// parens, so a trailing ";" is already irrelevant there); its INDEX
+// path is a plain, deliberately exact whole-string comparison, so it
+// broke literally every one of the real schema's 100 indexes, every
+// time -- reproduced directly below.
+test("backupSchemaObjects strips a statement's trailing ';', matching sqlite_schema's own stored text", () => {
+  const objects = backupSchemaObjects([
+    "CREATE TABLE `t` (`id` text);",
+    "CREATE INDEX `t_idx` ON `t` (`id`);",
+  ]);
+  for (const object of objects) assert.doesNotMatch(object.sql, /;\s*$/, `${object.type} "${object.name}"'s sql must not retain the statement terminator: ${JSON.stringify(object.sql)}`);
+});
+
+test("a faithfully restored index compares as a match even though the backup's own statement text ends with ';' and a real sqlite_schema row never does -- the exact real failure (100/100 indexes) reproduced and fixed", () => {
+  const backupIndexStatement = "CREATE INDEX `donors_owner_active_idx`\nON `donors` (`owner_user_id`,`data_source`,`archived_at`);";
+  const backupSchema = backupSchemaObjects([backupIndexStatement]);
+  // A real sqlite_schema row for this exact index, as D1/SQLite actually
+  // stores it: identical text, no trailing ";" -- confirmed empirically
+  // this round against a real disposable-database restore.
+  const realLiveRow = { name: "donors_owner_active_idx", type: "index", tbl_name: "donors", sql: "CREATE INDEX `donors_owner_active_idx`\nON `donors` (`owner_user_id`,`data_source`,`archived_at`)" };
+  const comparison = compareSchemaObjects(stagingSchemaObjects([realLiveRow]), backupSchema);
+  assert.equal(comparison.matches, true, `A faithfully restored index must match the backup's own definition, trailing ";" aside: ${comparison.differences.join(" ")}`);
+});
+
+test("the ';' fix never masks a genuine index corruption: missing index, changed column, changed uniqueness, or a different partial-index condition all still fail", () => {
+  const backupSchema = backupSchemaObjects([
+    "CREATE UNIQUE INDEX `donors_owner_donor_code_unique` ON `donors` (`owner_user_id`,`donor_code`);",
+    "CREATE UNIQUE INDEX `pledge_balance_corrections_active_uidx` ON `pledge_balance_corrections` (`pledge_activity_id`) WHERE `reversed_at` IS NULL;",
+  ]);
+
+  // Genuinely missing index (backup declared it, restore doesn't have it).
+  assert.equal(compareSchemaObjects([], backupSchema).matches, false);
+
+  // Changed indexed column (owner_user_id,donor_code -> just donor_code).
+  const changedColumn = { name: "donors_owner_donor_code_unique", type: "index", tbl_name: "donors", sql: "CREATE UNIQUE INDEX `donors_owner_donor_code_unique` ON `donors` (`donor_code`)" };
+  assert.equal(compareSchemaObjects(stagingSchemaObjects([changedColumn]), backupSchema).matches, false, "a changed indexed column must still fail");
+
+  // Changed uniqueness (UNIQUE dropped).
+  const notUnique = { name: "donors_owner_donor_code_unique", type: "index", tbl_name: "donors", sql: "CREATE INDEX `donors_owner_donor_code_unique` ON `donors` (`owner_user_id`,`donor_code`)" };
+  assert.equal(compareSchemaObjects(stagingSchemaObjects([notUnique]), backupSchema).matches, false, "a UNIQUE index that restored as non-unique must still fail");
+
+  // Changed partial-index WHERE condition.
+  const differentCondition = { name: "pledge_balance_corrections_active_uidx", type: "index", tbl_name: "pledge_balance_corrections", sql: "CREATE UNIQUE INDEX `pledge_balance_corrections_active_uidx` ON `pledge_balance_corrections` (`pledge_activity_id`) WHERE `reversed_at` IS NOT NULL" };
+  assert.equal(compareSchemaObjects(stagingSchemaObjects([differentCondition]), backupSchema).matches, false, "a changed partial-index WHERE condition must still fail");
+});
+
 test("a historical backup's own schema compares as a match against itself, but as a genuine difference against today's newer packaged baseline -- proving the fix without weakening the check", () => {
   // Simulates exactly the real November 1 Staging backup: trips exists,
   // but WITHOUT archived_at or its index (as they stood before migration
@@ -757,12 +812,20 @@ test("a historical backup's own schema compares as a match against itself, but a
   // Restoring that backup faithfully (the restored live schema is
   // IDENTICAL to what the backup itself declared) must compare as a
   // match against the BACKUP's OWN schema -- the corrected behavior.
+  // Mirrors a real sqlite_schema row exactly: its own `sql` column never
+  // includes the statement's trailing `;` (SQLite strips it when storing
+  // a CREATE statement), unlike the raw backup text these statements are
+  // drawn from -- this asymmetry is the real bug fixed below in the
+  // dedicated ";" tests; faithfully reproducing it here too, rather than
+  // leaving both sides with a trailing ";" that a real live row would
+  // never have, is what makes this test a genuine proof.
   const restoredLiveRows = olderBackupCreateStatements.map((sql) => {
-    const isIndex = /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+`(\w+)`/i.exec(sql);
-    const isTable = /^CREATE\s+TABLE\s+`(\w+)`/i.exec(sql);
+    const withoutTerminator = sql.replace(/;\s*$/, "");
+    const isIndex = /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+`(\w+)`/i.exec(withoutTerminator);
+    const isTable = /^CREATE\s+TABLE\s+`(\w+)`/i.exec(withoutTerminator);
     return isIndex
-      ? { name: isIndex[1], type: "index", tbl_name: "trips", sql }
-      : { name: isTable[1], type: "table", tbl_name: isTable[1], sql };
+      ? { name: isIndex[1], type: "index", tbl_name: "trips", sql: withoutTerminator }
+      : { name: isTable[1], type: "table", tbl_name: isTable[1], sql: withoutTerminator };
   });
   const faithfulComparison = compareSchemaObjects(stagingSchemaObjects(restoredLiveRows), olderBackupSchema);
   assert.equal(faithfulComparison.matches, true, `A faithful restore of an older backup must match that backup's OWN schema: ${faithfulComparison.differences.join(" ")}`);

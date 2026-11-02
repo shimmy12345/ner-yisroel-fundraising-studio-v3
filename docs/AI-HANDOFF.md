@@ -62741,3 +62741,128 @@ re-verified against a real GitHub Actions run** -- that is the
 necessary next step, and is for the user to trigger (same branch,
 same "Run workflow" steps as before). No Production deployment,
 migration, or live database change was made or is required.
+
+---
+
+## Index Comparison Trailing-Semicolon Fix (2026-11-02) -- ROOT CAUSE FOUND AND FIXED (GitHub Actions run 41470202722)
+
+Follow-up to a real dispatch of the previous fix (commit `2f546e9`,
+GitHub Actions run `41470202722` / job `125361466671`). Progress: the
+restore completed, including the oversized `data_imports` record via
+the D1 HTTP query API. It then failed schema validation again --
+differently this time: approximately 100 indexes reported "different"
+definitions against the source backup.
+
+### Investigation: compared actual source and restored definitions directly, before deciding anything
+
+Per instruction, did not assume a cause -- restored a real schema-only
+export (`wrangler d1 export --no-data`) of `fundraising-os-staging-db`
+into a brand-new disposable scratch database, then queried that
+database's own `sqlite_schema.sql` back and diffed it, byte-for-byte,
+against the export file's own text for several indexes, including a
+multi-line one (`donor_merge_audits_archived_idx`, whose own CREATE
+statement wraps onto two lines in the live database's real stored
+text).
+
+**Finding: Cloudflare D1/SQLite does not rewrite, reformat, or
+normalize a `CREATE INDEX` statement's stored text at all.** It is
+preserved verbatim, including original multi-line formatting and
+backtick-quoting. The scratch database was deleted immediately after
+(`wrangler d1 list` confirms only the two real databases remain; no
+other resource was created or left behind this round).
+
+The one real, systematic asymmetry: `sqlite_schema.sql` **never**
+includes the statement's trailing `;` (SQLite strips it when storing a
+`CREATE` statement internally) -- confirmed directly against the
+packaged manifest too (`production-baseline/schema-manifest.json`'s
+own `ddlTopology` index entries have no trailing `;` either, since
+they were generated the same way, from a live database). But
+`backupSchemaObjects()` (added last round) parses a statement straight
+out of the raw backup SQL TEXT via `parseRestoreStatements()`
+(`lib/operations/d1-restore-order.ts`), which groups lines up to and
+including one ending in `;` -- so its `sql` field always still had
+that trailing `;`. `compareSchemaObjects()`'s TABLE path never
+surfaced this: `tableColumnClauseSet()` only ever looks between the
+outermost `(` and `)`, so anything after the closing paren (a stray
+`;`) is already irrelevant there. Its INDEX path is a plain,
+deliberately exact, order-sensitive whole-string comparison (by
+design -- a compound index's column order is semantically meaningful)
+with no such tolerance, so it broke literally **every** index, every
+time -- exactly matching the manifest's real index count (100) and the
+"approximately 100" reported. This was a structural parsing bug in
+last round's own new code, not a Cloudflare D1 behavior and not a
+genuine schema difference.
+
+### The fix (does not weaken index comparison in any way)
+
+`backupSchemaObjects()` now strips a statement's trailing `;` before
+building its `SchemaObject`, the same way this codebase already strips
+a trailing statement terminator elsewhere
+(`lib/operations/d1-restore-order.ts`'s `parameterizeInsertStatement`)
+-- fixed at the one place the asymmetry is introduced, not by loosening
+`compareSchemaObjects()`'s own exact-text comparison. A genuinely
+missing index, a changed indexed column or column order, a
+UNIQUE/non-UNIQUE difference, or a changed partial-index `WHERE`
+condition all still fail exactly as before -- see the new regression
+tests below, which exercise all four directly against real index
+definitions from this schema (including two of the five real partial
+indexes).
+
+### Regression tests added (`tests/production-baseline.test.mjs`)
+
+1. `backupSchemaObjects strips a statement's trailing ';'...` -- direct
+   unit coverage of the fix itself.
+2. `a faithfully restored index compares as a match even though the
+   backup's own statement text ends with ';'...` -- reproduces the
+   exact real failure using a real multi-line index definition
+   (`donors_owner_active_idx`) and a synthetic "live" row shaped
+   exactly as a real `sqlite_schema` row is (no trailing `;`).
+   Confirmed this test fails against the pre-fix code (verified
+   directly, reverting only in a throwaway check, never the committed
+   file).
+3. `the ';' fix never masks a genuine index corruption...` -- missing
+   index, changed column, changed uniqueness, and a changed
+   partial-index condition (using real index names/conditions from this
+   schema) all still correctly fail.
+4. The prior round's "historical backup" test was also corrected: its
+   synthetic "live" row previously kept the SAME trailing `;` as the
+   backup side (since both were built from the same source string),
+   which is not how a real `sqlite_schema` row looks and was itself
+   part of why this bug shipped undetected last round. Now mirrors a
+   real live row exactly (no trailing `;`), so this test is a genuine
+   proof going forward, not an accidental pass.
+
+### Row-count and backup-fidelity verification
+
+Unaffected by this round's fix directly -- both were already
+correctly implemented last round (exact source-vs-restored count per
+table, including the oversized `data_imports` row; backup-relative
+`production_schema_baseline` fidelity). They were simply never
+*reached* in run `41470202722` because execution stopped at the now-
+fixed schema-validation step. With that step corrected, the next real
+run should proceed through both.
+
+### Local verification (no live database, migration, or Production/Staging change)
+
+- `tests/production-baseline.test.mjs`: 3 new tests plus 1 corrected
+  existing test (above). Full file: **54/54 passing**.
+- Full suite: **257/257 test files passing**, `tsc --noEmit` clean,
+  production build clean. `scripts/check-main-restore-sync.mjs` still
+  correctly reports the one unrelated, already-known,
+  deliberately-unfixed drift (migration `0056`/`trips` missing from
+  `main`'s own manifest) -- unchanged, not touched.
+- One disposable scratch database (`index-rewrite-investigation-20261102`)
+  was created against real Staging data for this investigation and
+  deleted immediately after use; confirmed via `wrangler d1 list` that
+  only the two real databases remain. No Production or Staging data
+  was modified; no local scratch file from this investigation was kept.
+
+### Report
+
+Reported here, before another GitHub Actions run, per explicit
+instruction. The fix is committed and pushed
+(`trip-planner-multi-region-manual-prospects`) but **not yet
+re-verified against a real GitHub Actions run** -- that is the user's
+next step (same branch, same "Run workflow" steps as before). No
+Production deployment, migration, or live database change was made or
+is required.

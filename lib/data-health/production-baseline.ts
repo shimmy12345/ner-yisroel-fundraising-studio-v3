@@ -326,6 +326,36 @@ export function stagingSchemaObjects(rows: Array<Record<string, unknown>>): Sche
 // stagingSchemaObjects() already filters a live database's rows to
 // type IN ('table','index') only -- so both sides of the comparison stay
 // symmetric.
+//
+// Trailing `;` fix (2026-11-02, GitHub Actions run 41470202722, job
+// 125361466671): this function's first version compared as "different"
+// against EVERY one of the real schema's 100 indexes -- never fewer,
+// never a genuine subset, always the full count -- which was itself the
+// clue this was a structural parsing bug, not real drift. Investigated
+// directly against a real restore (schema-only export restored into a
+// disposable scratch database, its sqlite_schema queried back and
+// diffed against the export's own text byte-for-byte): Cloudflare D1/
+// SQLite does NOT rewrite, reformat, or normalize a CREATE INDEX
+// statement's stored text at all -- it is preserved verbatim, including
+// multi-line formatting. The one real asymmetry: `sqlite_schema.sql`
+// NEVER includes the statement's trailing `;` (SQLite strips it when
+// storing a CREATE statement), but a statement parsed out of raw backup
+// SQL TEXT via parseRestoreStatements() (lib/operations/d1-restore-
+// order.ts) always still has it, since that parser splits on a line
+// ending in `;` without removing it. compareSchemaObjects()'s TABLE path
+// never surfaced this (tableColumnClauseSet() only ever looks between
+// the first `(` and the last `)`, so a trailing `;` after the final `)`
+// is already irrelevant there); only the INDEX path -- a plain whole-
+// string comparison, by design, since a compound index's column order
+// is semantically meaningful -- was ever exposed to it, and it broke
+// literally every index, every time. Stripped the SAME way this
+// codebase already strips a trailing statement terminator elsewhere
+// (lib/operations/d1-restore-order.ts's parameterizeInsertStatement),
+// rather than loosening compareSchemaObjects()'s own exact-text,
+// order-sensitive index comparison -- a genuinely missing index, a
+// changed indexed column or column order, a UNIQUE/non-UNIQUE
+// difference, or a partial index's WHERE condition differing all still
+// fail exactly as before (see tests/production-baseline.test.mjs).
 const CREATE_OBJECT_PATTERN = /^CREATE\s+(TABLE|(?:UNIQUE\s+)?INDEX|TRIGGER|VIEW|VIRTUAL\s+TABLE)\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"']?(\w+)[`"']?/i;
 
 export function backupSchemaObjects(createStatements: readonly string[]): SchemaObject[] {
@@ -334,8 +364,14 @@ export function backupSchemaObjects(createStatements: readonly string[]): Schema
     const match = statement.match(CREATE_OBJECT_PATTERN);
     if (!match) throw new Error(`backupSchemaObjects: could not parse a CREATE statement's type/name -- refusing to guess: ${statement.slice(0, 160)}`);
     const [, kind, name] = match;
-    if (/INDEX/i.test(kind)) objects.push({ type: "index", name, sql: normalizeSchemaSql(statement) });
-    else if (/^TABLE$/i.test(kind)) objects.push({ type: "table", name, sql: normalizeSchemaSql(statement) });
+    // A real `wrangler d1 export`-shaped CREATE statement always ends with
+    // exactly one terminating `;` (parseRestoreStatements() only ever
+    // groups lines up to and including one) -- stripped here, once, so it
+    // is never mistaken for a real structural difference against
+    // sqlite_schema's own stored text, which never has one.
+    const withoutTerminator = statement.replace(/;\s*$/, "");
+    if (/INDEX/i.test(kind)) objects.push({ type: "index", name, sql: normalizeSchemaSql(withoutTerminator) });
+    else if (/^TABLE$/i.test(kind)) objects.push({ type: "table", name, sql: normalizeSchemaSql(withoutTerminator) });
     // TRIGGER / VIEW / VIRTUAL TABLE: deliberately excluded, matching
     // stagingSchemaObjects()'s own type IN ('table','index') filter.
   }
