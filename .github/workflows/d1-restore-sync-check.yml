@@ -47,10 +47,19 @@
 # discovered.
 name: D1 restore/schema sync check
 
+# The `branches:` lists below name the canonical branch -- see
+# lib/operations/canonical-branch.ts, this repository's single source of
+# truth for that name. GitHub Actions evaluates a trigger's own
+# `branches:` filter statically from this YAML, before any code runs, so
+# it cannot read that file directly; tests/canonical-branch.test.mjs
+# instead asserts these two literals stay equal to that constant, so this
+# workflow can never again silently drift out of sync with it the way it
+# did between 2026-10-01 and 2026-11-02 (see docs/AI-HANDOFF.md's "Fix
+# Stale Branch References and Verify Restore Safeguards" entry).
 on:
   push:
     branches:
-      - feature/independent-cloudflare-sandbox
+      - trip-planner-multi-region-manual-prospects
     paths:
       - "drizzle/**"
       - "db/schema.ts"
@@ -59,15 +68,17 @@ on:
       - "lib/operations/restore-drift-guard.ts"
       - "lib/operations/restore-sync-generator.ts"
       - "lib/operations/restore-sync-branch-policy.ts"
+      - "lib/operations/canonical-branch.ts"
       - "lib/data-health/production-baseline.ts"
       - "production-baseline/**"
       - "scripts/generate-production-baseline.mjs"
       - "scripts/check-main-restore-sync.mjs"
+      - "scripts/check-migration-sync.mjs"
       - "scripts/prepare-main-restore-sync-patch.mjs"
       - "scripts/open-or-update-sync-pr.mjs"
   pull_request:
     branches:
-      - feature/independent-cloudflare-sandbox
+      - trip-planner-multi-region-manual-prospects
     paths:
       - "drizzle/**"
       - "db/schema.ts"
@@ -76,10 +87,12 @@ on:
       - "lib/operations/restore-drift-guard.ts"
       - "lib/operations/restore-sync-generator.ts"
       - "lib/operations/restore-sync-branch-policy.ts"
+      - "lib/operations/canonical-branch.ts"
       - "lib/data-health/production-baseline.ts"
       - "production-baseline/**"
       - "scripts/generate-production-baseline.mjs"
       - "scripts/check-main-restore-sync.mjs"
+      - "scripts/check-migration-sync.mjs"
       - "scripts/prepare-main-restore-sync-patch.mjs"
       - "scripts/open-or-update-sync-pr.mjs"
   workflow_dispatch: {}

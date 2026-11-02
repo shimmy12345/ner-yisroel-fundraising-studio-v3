@@ -62043,3 +62043,279 @@ Stopping here, per explicit instruction. No correction was implemented
 or deployed. Awaiting approval before any change to
 `check-migration-sync.mjs`'s branch reference, `d1-restore-sync-check.yml`'s
 trigger configuration, or anything else identified above.
+
+## Fix Stale Branch References and Verify Restore Safeguards (2026-11-02) -- SAFEGUARD FIX IMPLEMENTED AND VERIFIED; RESTORE VERIFICATION FOUND A SEPARATE, SERIOUS, PRE-EXISTING DEFECT -- STOPPING FOR GUIDANCE, NOT PRODUCTION-DEPLOYED
+
+Per explicit scope: code-only changes implemented and pushed; no
+Production deployment, database migration, or modification of live
+Production/Staging data. Part 3 below surfaced a real, reproducible
+restore-mechanism defect that goes beyond this round's authorization to
+fix -- stopping and reporting it rather than attempting a live
+correction.
+
+### Part 1: Corrected the stale branch references
+
+**Root cause** (confirmed last round, re-verified this round): the
+canonical branch name (which branch owns the real, live D1 schema) was
+duplicated as a literal string in multiple independent places --
+`scripts/check-migration-sync.mjs`'s own hardcoded default and
+`.github/workflows/d1-restore-sync-check.yml`'s two `branches:` trigger
+filters -- with nothing checking that they agreed. Schema-owning
+development moved from `feature/independent-cloudflare-sandbox` to
+`trip-planner-multi-region-manual-prospects` (a normal feature branch
+cut from it, never merged back) without either reference being updated,
+so both the secondary preflight and the primary CI guard silently
+stopped tracking the real active branch.
+
+**Authoritative branch, confirmed**: `trip-planner-multi-region-manual-prospects`.
+Confirmed via `git merge-base --is-ancestor origin/feature/independent-cloudflare-sandbox HEAD`
+(true, 31 commits behind) and via `docs/AI-HANDOFF.md`'s own "Production
+Release Readiness Review" entry: every recent schema-affecting
+Production deployment was cut from this exact branch, and `main`'s own
+committed manifest already includes migrations (0054, 0055) that the
+original canonical branch itself still lacks.
+
+**Correction**: created `lib/operations/canonical-branch.ts`, a single
+exported constant (`CANONICAL_BRANCH`, with an env-var override already
+supported), documented with its own history and an explicit instruction
+to update this ONE value -- and nowhere else in application code -- if
+the active branch ever changes again. Updated every consumer to read
+from it instead of its own hardcoded copy:
+
+- `scripts/check-migration-sync.mjs` (did not exist on this branch at
+  all -- recreated from `origin/main`'s already-fixed copy, which
+  already excludes `drizzle/pending-review/`, and refactored to import
+  `CANONICAL_BRANCH` and to reuse the already-tested, pure
+  `diffMigrationLists()` from `lib/operations/restore-drift-guard.ts`
+  instead of its own separate inline filter -- one less duplicated
+  comparison, not just one less duplicated branch name). Also guarded
+  its side-effecting top-level run behind an `isMain` entry-point check
+  (the same pattern several other scripts in this repository already
+  use), so its own pure `filterRealMigrationFiles()` can be imported by
+  tests without triggering a real git/filesystem check as an import
+  side effect.
+- `lib/operations/restore-sync-generator.ts`'s generated doc-comment
+  template (previously hardcoded the old branch name into every
+  automated sync PR's own file).
+- `docs/D1-MIGRATION-SYNC-PROCESS.md` -- updated its "why this exists"
+  section to name the single source of truth instead of hardcoding the
+  branch name in prose, and added an explicit "updating the canonical
+  branch" procedure.
+- `.github/workflows/d1-restore-sync-check.yml`'s two `branches:`
+  triggers -- updated to the current branch, with a comment explaining
+  GitHub Actions evaluates this filter statically from the YAML (it
+  cannot read a repository file at trigger-evaluation time, so this
+  literal cannot be fully eliminated), and that
+  `tests/canonical-branch.test.mjs` now enforces it can never silently
+  drift from the shared constant again. Also added the two new files
+  above to its `paths:` filters.
+
+**Nothing weakened**: no comparison logic changed, no exclusion was
+broadened, and the already-correct `drizzle/pending-review/` exclusion
+(fixed independently on `main`, commit `2e09a31`, see the prior round's
+investigation) was preserved exactly.
+
+### Part 2: Verification, with new regression tests
+
+Added `tests/canonical-branch.test.mjs` (parses
+`d1-restore-sync-check.yml`'s own `on:` block and asserts both
+`branches:` lists equal `CANONICAL_BRANCH` exactly -- the drift-detecting
+test described above) and `tests/check-migration-sync.test.mjs`,
+covering every item on the explicit verification checklist:
+
+1. **Evaluates the correct branch**: asserts `CANONICAL_BRANCH` equals
+   this session's own real, current `git branch --show-current`.
+2. **Detects the genuine migration 0056 discrepancy**: using real,
+   read-only `git ls-tree`/`git show` data from `origin/<canonical
+   branch>` and `origin/main` (no checkout, no write), asserts
+   `0056_trip_archive_delete.sql` is reported missing from main's real
+   committed manifest.
+3. **Does not report success when genuine drift exists**: asserts the
+   missing-migrations list from the same real comparison is non-empty.
+4. **Passes for equivalent migration histories**: a synthetic main
+   manifest containing every migration the real canonical branch has
+   (plus an unrelated one of its own) reports zero missing.
+5. **Ignores intentionally unapplied `drizzle/pending-review/`
+   migrations**: confirms `0049_fix_calendar_schema_text_staging_repair.sql`
+   never appears in the canonical branch's filtered migration list, and
+   is never reported "missing from main" -- the exact real false
+   positive (GitHub Actions run 41322245940, 2026-11-01) this filter
+   exists to prevent.
+
+Also added pure, offline unit coverage of `filterRealMigrationFiles()`
+itself (pending-review exclusion, non-migration file exclusion,
+sorting, blank-line handling).
+
+**Live confirmation, re-running the actual script**:
+`node scripts/check-migration-sync.mjs` now correctly identifies
+`trip-planner-multi-region-manual-prospects` as the branch to compare
+against (previously silently compared against the stale,
+31-commits-behind branch and found nothing missing -- a false "all
+clear" described in the prior round's investigation). Running the full,
+unmodified `node scripts/check-main-restore-sync.mjs` (unaffected by
+this round's changes, confirmed still the sole, independent authority)
+reports exactly the one genuine, already-known drift --
+`0056_trip_archive_delete.sql` / `trips` / `trips_owner_archived_idx`
+-- nothing else. **Migration 0056 was deliberately NOT merged into
+main**, per explicit instruction; this remains open, exactly as
+documented in the two prior rounds.
+
+### Part 3: Backup-restore verification -- a real, reproducible, pre-existing defect found; NOT a credentials gap
+
+**Credentials actually available this session**: an authenticated
+`wrangler` OAuth session (used safely all session for real `d1
+execute`/`deploy` operations) -- but NOT `CLOUDFLARE_API_TOKEN`/
+`CLOUDFLARE_ACCOUNT_ID` (which `scripts/verify-remote-restore.mjs`
+specifically hardcodes and requires), and NOT the R2 read credentials
+or `BACKUP_ENCRYPTION_PASSPHRASE` needed to download and decrypt a real
+stored nightly backup from R2. Per the explicit safety instruction, this
+round used what was actually available rather than requesting those
+secrets: a **fresh, real, unencrypted export of Staging's own current
+live data**, taken read-only via `wrangler d1 export
+fundraising-os-staging-db --remote` (the exact same underlying mechanism
+the real nightly backup workflow uses, minus the encrypt-and-upload-to-R2
+step this session cannot reach) -- genuinely equivalent to "an
+appropriate existing backup" for testing the actual restore mechanism,
+though it does not specifically prove the stored, encrypted R2 artifact
+itself decrypts correctly (that narrower claim remains unverified, and
+would need those specific credentials).
+
+**What was actually tested, end to end, exactly matching
+`verify-remote-restore.mjs`'s own method**: created a brand-new,
+disposable D1 database (`wrangler d1 create`), restored the fresh export
+into it (`wrangler d1 execute <scratch> --remote --file <export> --yes`
+-- the identical invocation that script uses), and always deleted the
+scratch database immediately afterward (confirmed via `wrangler d1
+list` afterward: only the two real databases remain, no stray scratch
+resource left behind).
+
+**Result: the restore itself failed, before ever reaching schema or
+integrity checks.** Error: `no such table: main.users: SQLITE_ERROR`,
+thrown while inserting rows that reference `users` via a foreign key,
+before `CREATE TABLE users` had executed.
+
+**Root cause, confirmed with a minimal, clean, 10-line reproduction**
+(two tables, `child` referencing not-yet-created `parent`, `PRAGMA
+defer_foreign_keys=TRUE;` at the top -- restored into its own fresh
+disposable database, deleted immediately after): the exact same error
+reproduces with zero real data and zero chance of a file-size/chunking
+artifact. **`wrangler d1 execute --file` does not actually execute an
+entire file as one atomic transaction against real remote D1 -- each
+statement commits independently, so `PRAGMA defer_foreign_keys=TRUE`
+has no effect across more than the single statement it appears in, and
+any insert referencing a table that has not been created yet (by a
+later `CREATE TABLE` in the same file) fails immediately.** This is not
+a new platform discovery -- it is the exact same already-documented,
+open, unresolved Cloudflare limitation found and recorded in the
+`drizzle/pending-review/0049_fix_calendar_schema_text_staging_repair.sql`
+migration's own revision history (`cloudflare/workerd#7657`,
+`cloudflare/workers-sdk#16071`: "D1's own commit-time FK consistency
+check does not reliably honor `defer_foreign_keys`'s deferral window")
+-- discovered there in a different context (a live table rebuild), now
+confirmed this round to ALSO break the plain, generic backup/restore
+path that `verify-remote-restore.mjs` and the real nightly backup
+workflow both rely on.
+
+**How exposed is this, really?** Analyzed Staging's real export file
+directly (local, offline, no further D1 access): `wrangler d1 export`
+orders `CREATE TABLE` statements **alphabetically**, not by creation or
+dependency order, and never wraps the output in an explicit
+transaction. Of 61 real tables, **25 have a forward foreign-key
+reference** (a table created before a table it references) --
+`users` alone is referenced by 23 tables that each sort alphabetically
+before it. This is not a rare edge case produced by one unusually
+rebuilt table; it is close to unavoidable for a real-world schema of
+this shape, meaning **a real restore of this Staging backup -- or very
+likely Production's, which shares the same core schema shape -- would
+be expected to fail the same way, every time, via this exact
+mechanism.**
+
+**Whether this affects our ability to restore Production backups
+successfully**: this round did not test Production directly (per the
+safety boundary -- no Staging/Production modification was needed to
+establish the mechanism, and Production's own export was not pulled
+this round to avoid unnecessary load on it for a question the Staging
+export and the minimal repro already answer conclusively). Given
+Production shares the same application schema shape (same core tables,
+same kinds of foreign keys) and the exact same restore mechanism
+(`scripts/verify-remote-restore.mjs`, unconditionally, for both
+environments), there is no basis to assume Production is exempt from
+this defect -- the honest assessment is that Production's own "monthly
+restore verification: success" result needs to be revisited, not
+simply trusted at face value, since this defect was only now
+discovered by actually attempting a real restore with a real,
+representative set of forward foreign-key references (something no
+recent run, Staging or Production, had actually exercised -- every
+recent Staging attempt failed earlier, at a preflight, before reaching
+this step; Production's own history was not re-examined for this exact
+failure signature this round).
+
+**Not fixed this round, deliberately**: a real fix requires either
+restructuring how the restore applies a backup (e.g. disabling foreign
+keys entirely for the duration of the restore, or topologically
+reordering `CREATE TABLE`/`INSERT` statements before execution) or a
+platform-level resolution of the underlying Cloudflare limitation --
+either is a genuinely new, non-trivial engineering task, not a narrow
+safeguard correction, and squarely outside this round's explicit scope
+("Keep the work limited to these safeguards and restore verification.
+Do not begin unrelated cleanup") and its safety boundary (no Production/
+Staging modification). **Stopping here and requesting direction**, per
+the explicit instruction to stop when a restore test surfaces something
+needing action beyond the existing authorization.
+
+### Final verification (this round's own code changes)
+
+- `tsc --noEmit`: 0 errors.
+- `pnpm run test`: 256/256 test files passing (2 new test files; the
+  only failure is the same, already-known, deliberately-unfixed
+  `check-main-restore-sync.mjs` drift -- migration 0056/`trips`, exactly
+  as before this round, confirmed not worsened or masked).
+- `pnpm run build:staging-independent` + `verify-build-manifest` +
+  `check-production-feature-fingerprints` (7/7 + 5/5 behavioral
+  checks): all clean.
+- `node scripts/check-production-branch-ancestry.mjs ea6186f`
+  (the last authorized Production commit): confirmed this round's HEAD
+  is a clean descendant -- safe to deploy whenever authorized, though no
+  deployment was made or requested this round.
+- No Staging or Production database was modified. Two disposable
+  scratch D1 databases were created and immediately deleted; confirmed
+  via `wrangler d1 list` that only the two real databases remain.
+
+### Final report
+
+1. **Root cause and exact correction**: the canonical branch name was
+   duplicated across multiple files with nothing enforcing agreement,
+   and fell silently out of date when development moved to
+   `trip-planner-multi-region-manual-prospects`. Corrected via a single
+   shared constant (`lib/operations/canonical-branch.ts`), with the one
+   remaining unavoidable literal (the GitHub Actions trigger) now
+   protected by a regression test that fails if it ever diverges again.
+2. **Tests and restore-verification results**: 256/256 passing, 2 new
+   test files covering every item on the explicit verification
+   checklist; the primary guard still correctly reports the one genuine,
+   deliberately-unfixed drift. The actual disposable-database restore
+   attempt **failed** -- not due to missing credentials, but due to a
+   real, reproducible, pre-existing Cloudflare D1/`wrangler` limitation
+   (`defer_foreign_keys` not honored across statements in a
+   `--file`-executed restore) that this round's minimal repro confirms
+   would affect essentially any real backup of this schema shape.
+3. **Remaining genuine branch drift**: unchanged and still open by
+   design -- `main` is still missing migration `0056_trip_archive_delete.sql`
+   (and the corresponding `trips` table/index). Not merged, per
+   explicit instruction.
+4. **Is the next Production deployment safe?** The code changes in this
+   round (branch-reference correction) are safe to deploy on their own
+   merits -- purely additive, no behavior change to anything live, and
+   the branch-ancestry check confirms this HEAD is a clean descendant of
+   the current Production commit. **However, this round's restore-test
+   finding means Production's own backup/restore safety net cannot
+   currently be fully trusted at face value** -- that is a separate,
+   pre-existing condition this round discovered rather than caused, but
+   it is real and should be weighed before treating "Production restore
+   verification: success" as a settled fact going forward.
+
+---
+
+Stopping here and requesting direction on the Part 3 finding, per
+explicit instruction. No correction to the restore mechanism was
+implemented. No Production deployment was made.

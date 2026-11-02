@@ -36,6 +36,7 @@
 // unsafe cases rather than a generic "still drifted" dump.
 
 import type { SchemaObject } from "../data-health/production-baseline.ts";
+import { CANONICAL_BRANCH } from "./canonical-branch.ts";
 import { compareCrossBranchRestoreState, diffMigrationLists, formatDriftReport, type CrossBranchRestoreState } from "./restore-drift-guard.ts";
 
 const normalize = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
@@ -206,7 +207,7 @@ export function renderProductionBaselineTsPatch(oldFileText: string, newMigratio
     `// Automated sync, generated ${generatedAtIso} by scripts/prepare-main-`,
     `// restore-sync-patch.mjs (see docs/D1-MIGRATION-SYNC-PROCESS.md).`,
     `// production-baseline/schema-manifest.json was replaced verbatim from`,
-    `// feature/independent-cloudflare-sandbox's own current, verified`,
+    `// ${CANONICAL_BRANCH}'s own current, verified`,
     `// manifest -- the same sync mechanism used for every prior round (see`,
     `// docs/AI-HANDOFF.md's "D1 Monthly Restore Verification Repair"`,
     `// entries). PRODUCTION_BASELINE_LEVEL stays "0019": that label`,

@@ -124,6 +124,8 @@ const TEST_FILES = [
   "tests/d1-backup-rows.test.mjs",
   "tests/d1-restore-order.test.mjs",
   "tests/restore-drift-guard.test.mjs",
+  "tests/canonical-branch.test.mjs",
+  "tests/check-migration-sync.test.mjs",
   "tests/restore-sync-generator.test.mjs",
   "tests/restore-sync-branch-policy.test.mjs",
   "tests/production-backup-readiness.test.mjs",

@@ -4,22 +4,39 @@ This document is the operating reference for keeping `main`'s restore/
 schema baseline tracking (`production-baseline/schema-manifest.json`,
 `lib/data-health/production-baseline.ts`, and -- for a migration that adds
 a brand-new table -- `lib/operations/staging-reset.ts`/
-`lib/operations/d1-restore-order.ts`) synchronized with
-`feature/independent-cloudflare-sandbox`'s real schema, every time a
-migration is added, without waiting for a failed GitHub Actions run to
-notice.
+`lib/operations/d1-restore-order.ts`) synchronized with the canonical
+branch's real schema, every time a migration is added, without waiting
+for a failed GitHub Actions run to notice.
 
 ## Why this exists
 
-`feature/independent-cloudflare-sandbox` owns `fundraising-os-staging-db`'s
-real, live schema. `main` keeps a *separate, independently committed*
-mirror of that schema's shape, used by the monthly real-backup restore-
-verification workflow. Those two copies only stay in agreement if
-something updates `main`'s copy every time a migration lands on the
-canonical branch -- see `docs/AI-HANDOFF.md`'s "D1 Monthly Restore
-Verification Repair" and "D1 Migration Sync Automation" entries for the
-full incident history (this has happened, unassisted, at least six
-times).
+The canonical branch -- named in exactly one place in this repository,
+`lib/operations/canonical-branch.ts`, currently
+`trip-planner-multi-region-manual-prospects` -- owns
+`fundraising-os-staging-db`'s real, live schema. `main` keeps a
+*separate, independently committed* mirror of that schema's shape, used
+by the monthly real-backup restore-verification workflow. Those two
+copies only stay in agreement if something updates `main`'s copy every
+time a migration lands on the canonical branch -- see `docs/AI-HANDOFF.md`'s
+"D1 Monthly Restore Verification Repair" and "D1 Migration Sync
+Automation" entries for the full incident history (this has happened,
+unassisted, at least six times) -- or every time the canonical branch
+itself changes (it has, see `docs/AI-HANDOFF.md`'s "Fix Stale Branch
+References and Verify Restore Safeguards" entry: the ORIGINAL canonical
+branch, `feature/independent-cloudflare-sandbox`, fell behind the real
+active development branch for over a month before anyone noticed,
+since the stale reference happened to keep passing instead of failing
+loudly).
+
+**Updating the canonical branch**: change
+`lib/operations/canonical-branch.ts`'s single exported constant --
+nowhere else in application code needs to change. GitHub Actions'
+`d1-restore-sync-check.yml` workflow still needs its own two
+`branches:` filters updated by hand (GitHub evaluates those statically
+from the YAML, before any code runs, so they cannot read that file
+directly), but `tests/canonical-branch.test.mjs` fails loudly if those
+two literals ever stop matching the constant, so the two can never
+again drift apart silently.
 
 ## The two signals
 
