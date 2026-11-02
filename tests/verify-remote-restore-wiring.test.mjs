@@ -88,4 +88,34 @@ function buildExport(tables, insertsInOrder) {
   assert.ok(D1_RESTORE_DATA_ORDER.indexOf("users") < D1_RESTORE_DATA_ORDER.indexOf("donors"), "users must precede donors in D1_RESTORE_DATA_ORDER (donors.user_id is a real foreign key to users.id)");
 }
 
+// ---- 4. Historical Backup Schema Validation follow-up (2026-11-02, GitHub
+// Actions run 41466993401): once the fix above let a real run reach
+// schema validation, it correctly restored an older Staging backup but
+// then failed that check -- it compared the restored schema against
+// TODAY's packaged manifest, which already includes a later migration's
+// index (migration 0056's trips_owner_archived_idx) that had not yet
+// been applied to the real database when that backup was taken. An
+// older backup can never match a newer baseline; that is expected, not
+// corruption. The comparison must use the backup's OWN embedded schema
+// (backupSchemaObjects(), lib/data-health/production-baseline.ts) as its
+// authoritative baseline instead. ----
+{
+  assert.match(scriptText, /backupSchemaObjects\(/, "scripts/verify-remote-restore.mjs must call backupSchemaObjects() -- comparing a restored backup's schema against anything other than that backup's OWN embedded schema is the defect this test guards against.");
+  assert.match(scriptText, /compareSchemaObjects\(stagingSchemaObjects\(schemaRows\),\s*backupSchema\)/, "the authoritative schema comparison must pass the backup's own schema as compareSchemaObjects()'s baseline argument, not rely on its default (today's packaged manifest).");
+}
+
+// ---- 5. Row counts must be checked against the SOURCE BACKUP's own
+// count, not merely "is a valid non-negative integer" -- the prior
+// version of this check could never catch a restore that silently
+// dropped every row of a table, since zero also passes that assertion.
+// ----
+{
+  assert.match(scriptText, /insertsByTable\.get\(table\)/, "row counts must be computed from the source backup's own parsed INSERT statements per table, not asserted as merely present.");
+  assert.doesNotMatch(
+    scriptText,
+    /assert\.ok\(countResult && Number\.isInteger\(countResult\.count\) && countResult\.count >= 0, `Table "\$\{table\}" did not return a valid row count after restore: \$\{JSON\.stringify\(countResult\)\}`\);\s*\n\s*rowCounts\[table\] = countResult\.count;\s*\n\s*\}\s*\n\s*\n\s*console\.log\(`Restore verification passed\. Row counts/,
+    "row-count verification must not regress to only checking that a count is a valid non-negative integer (which a fully-empty, silently-corrupted table would also pass).",
+  );
+}
+
 process.stdout.write("verify-remote-restore-wiring.test.mjs: all assertions passed\n");

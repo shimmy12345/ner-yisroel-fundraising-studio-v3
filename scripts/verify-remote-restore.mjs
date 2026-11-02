@@ -46,6 +46,20 @@
 // lib/operations/d1-restore-order.ts for the full account, including the
 // second, independent SQLITE_TOOBIG problem found and fixed alongside it.
 //
+// Second root cause corrected (2026-11-02, same entry's follow-up, GitHub
+// Actions run 41466993401): once the above fix let a real run reach
+// schema validation, it correctly restored an older (November 1) Staging
+// backup but then failed that check, because the check compared against
+// TODAY's packaged manifest -- which already includes migration 0056's
+// `trips_owner_archived_idx`, applied to the real Staging database only
+// on November 2. An older backup can never match a newer baseline; that
+// is expected, not corruption. The authoritative schema comparison now
+// uses the SOURCE BACKUP's OWN embedded CREATE TABLE/INDEX statements
+// (backupSchemaObjects(), lib/data-health/production-baseline.ts) as the
+// baseline instead, with today's packaged manifest kept only as a
+// separate, non-failing, informational note. See that function's own
+// doc comment for the full account.
+//
 // Usage: node scripts/verify-remote-restore.mjs -- <decrypted-backup.sql>
 // Requires CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in the
 // environment (the same variables `wrangler` itself reads for
@@ -58,8 +72,8 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { FUNDRAISING_DATA_TABLES, PRODUCTION_BASELINE_HASH, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
-import { findInsertedRow, planD1Restore } from "../lib/operations/d1-restore-order.ts";
+import { FUNDRAISING_DATA_TABLES, PRODUCTION_BASELINE_HASH, backupSchemaObjects, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
+import { findInsertedRow, parseRestoreStatements, planD1Restore } from "../lib/operations/d1-restore-order.ts";
 
 const backupArgument = process.argv.slice(2).find((argument) => argument !== "--");
 const backupPath = backupArgument ? path.resolve(backupArgument) : null;
@@ -218,14 +232,35 @@ try {
 
   // CURRENT STRUCTURAL INTEGRITY: a strict, independent, table-by-table and
   // index-by-index DDL comparison between the restored database's ACTUAL
-  // live schema and the packaged manifest (production-baseline/schema-manifest.json).
-  // This check does not read production_schema_baseline at all, so it can
-  // never be satisfied or defeated by that row's value -- see below for why
-  // that is a deliberate, separate concern.
-  console.log("Validating restored schema against the current packaged manifest...");
+  // live schema and the SOURCE BACKUP's OWN embedded CREATE TABLE/INDEX
+  // statements (backupSchemaObjects() -- see its own doc comment in
+  // lib/data-health/production-baseline.ts). Deliberately NOT compared
+  // against today's packaged manifest (PRODUCTION_BASELINE_OBJECTS) by
+  // default: a backup taken before a later schema-affecting migration
+  // landed on the real database can never structurally match today's
+  // baseline, through no fault of the backup or the restore -- confirmed
+  // 2026-11-02 (GitHub Actions run 41466993401): a November 1 Staging
+  // backup correctly lacked `trips_owner_archived_idx`, since migration
+  // 0056 was applied to the real Staging database on November 2. This
+  // check does not read production_schema_baseline at all, so it can
+  // never be satisfied or defeated by that row's value -- see below for
+  // why that is a deliberate, separate concern.
+  console.log("Validating restored schema against the SOURCE BACKUP's own embedded schema (the correct comparison for a historical backup)...");
+  const backupSchema = backupSchemaObjects(parseRestoreStatements(backupSql).schema);
   const schemaRows = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", "SELECT name,type,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY type,name;"])?.[0]?.results ?? [];
-  const schemaComparison = compareSchemaObjects(stagingSchemaObjects(schemaRows));
-  assert.equal(schemaComparison.matches, true, `Restored schema does not match the production baseline: ${schemaComparison.differences.join(" ")}`);
+  const schemaComparison = compareSchemaObjects(stagingSchemaObjects(schemaRows), backupSchema);
+  assert.equal(schemaComparison.matches, true, `Restored schema does not match the SOURCE BACKUP's own schema (a genuine restore defect): ${schemaComparison.differences.join(" ")}`);
+
+  // Informational only, never fails verification: separately notes any
+  // difference against TODAY's packaged manifest, so it stays visible
+  // when an older backup is restore-tested -- e.g. "this backup predates
+  // migration 0056" -- without that fact ever being treated as a defect.
+  const packagedComparison = compareSchemaObjects(stagingSchemaObjects(schemaRows));
+  if (!packagedComparison.matches) {
+    console.log(`Note: restored schema differs from TODAY's packaged baseline (informational only -- expected for a backup taken before a later schema-affecting migration landed, and does not fail verification): ${packagedComparison.differences.join(" ")}`);
+  } else {
+    console.log("Restored schema also matches today's packaged baseline exactly (this backup is current as of the latest migration).");
+  }
 
   // BACKUP FIDELITY for production_schema_baseline (id '0019'): this row is
   // a write-once historical lineage stamp, not a continuously-reverified
@@ -255,15 +290,34 @@ try {
   const stampedCurrent = restoredBaselineRow.schema_hash === PRODUCTION_BASELINE_HASH;
   console.log(`production_schema_baseline backup fidelity OK (schema_hash=${restoredBaselineRow.schema_hash}${stampedCurrent ? ", also matches today's packaged hash" : " -- an older but faithfully-restored historical stamp relative to today's packaged hash " + PRODUCTION_BASELINE_HASH + ", which is expected and does not indicate a problem; current structural integrity was already verified independently above"}).`);
 
-  console.log("Validating every fundraising table is present and queryable (basic row integrity)...");
+  // Row count is checked against the SOURCE BACKUP's own INSERT count for
+  // that table, not merely "is a valid non-negative integer" (the prior
+  // version of this check: it could never actually catch a restore that
+  // silently dropped every row of a table, since zero also passes "is a
+  // valid non-negative integer"). D1_RESTORE_SKIP_DATA_TABLES tables
+  // (lib/operations/d1-restore-order.ts) are deliberately expected to
+  // restore zero rows regardless of their source count -- see that
+  // constant's own doc comment; this is the one named, visible exception,
+  // never a general tolerance for a mismatch.
+  console.log("Validating every fundraising table's row count exactly matches the source backup (including any individually oversized row restored via the D1 query API)...");
+  const parsedBackupForCounts = parseRestoreStatements(backupSql);
   const rowCounts = {};
+  const rowCountMismatches = [];
   for (const table of FUNDRAISING_DATA_TABLES) {
     const countResult = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", `SELECT COUNT(*) AS count FROM "${table}";`])?.[0]?.results?.[0];
     assert.ok(countResult && Number.isInteger(countResult.count) && countResult.count >= 0, `Table "${table}" did not return a valid row count after restore: ${JSON.stringify(countResult)}`);
-    rowCounts[table] = countResult.count;
+    const restoredCount = countResult.count;
+    const sourceCount = (parsedBackupForCounts.insertsByTable.get(table) ?? []).length;
+    const deliberatelySkipped = restorePlan.skippedTables.includes(table);
+    const expectedCount = deliberatelySkipped ? 0 : sourceCount;
+    if (restoredCount !== expectedCount) {
+      rowCountMismatches.push(`${table}: source backup has ${sourceCount} row(s)${deliberatelySkipped ? " (data deliberately not restored -- see D1_RESTORE_SKIP_DATA_TABLES)" : ""}, restored database has ${restoredCount}.`);
+    }
+    rowCounts[table] = { source: sourceCount, restored: restoredCount };
   }
+  assert.deepEqual(rowCountMismatches, [], `Row count mismatch against the source backup (missing records): ${rowCountMismatches.join(" ")}`);
 
-  console.log(`Restore verification passed. Row counts: ${JSON.stringify(rowCounts)}`);
+  console.log(`Restore verification passed -- every table's restored row count exactly matches the source backup. Row counts: ${JSON.stringify(rowCounts)}`);
 } finally {
   if (scratchDatabaseId) {
     console.log(`Deleting scratch database ${scratchDatabaseName}...`);

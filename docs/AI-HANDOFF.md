@@ -62610,3 +62610,134 @@ created.)
 5. No credentials were exposed, no integrity check was bypassed, and
    no record was excluded in order to produce a result -- the task was
    left incomplete rather than approximated.
+
+---
+
+## Historical Backup Schema Validation (2026-11-02) -- ROOT CAUSE FOUND AND FIXED (GitHub Actions run 41466993401)
+
+Follow-up to a *real* dispatch of the corrected workflow (commit
+`2f96990`, triggered by the user from branch
+`trip-planner-multi-region-manual-prospects`, GitHub Actions run
+`41466993401` / job `125350401801`). The foreign-key-ordering fix
+worked end-to-end against a real credential set: the oversized
+`data_imports` row restored successfully via the D1 HTTP query API,
+data restoration completed, `quick_check` and `foreign_key_check` both
+passed. The run then failed at schema validation: the restored `trips`
+table differed from the packaged baseline, and `trips_owner_archived_idx`
+was reported missing.
+
+### Investigation: expected historical difference, not corruption -- confirmed
+
+- Migration `0056_trip_archive_delete.sql` (adds `trips.archived_at`
+  and `trips_owner_archived_idx`) was committed `2026-11-01 21:12:43
+  -0500` (`2026-11-02 02:12 UTC`) and the packaged manifest already
+  reflects it (`production-baseline/schema-manifest.json`'s
+  `sourceMigrations.length === 56`, `PRODUCTION_BASELINE_VERIFIED ===
+  true`).
+- **Confirmed directly against the real, live `fundraising-os-staging-db`**
+  (read-only `SELECT sql FROM sqlite_schema WHERE tbl_name='trips'`):
+  the column and the index both exist there right now -- migration
+  0056 genuinely was applied to the real database, not merely
+  committed to `drizzle/` and the manifest.
+- The restore-verified backup was a **November 1** Staging backup --
+  taken before migration 0056 landed on November 2. A backup is a
+  point-in-time snapshot; one taken before a schema-affecting
+  migration landed can **never** structurally match a baseline that
+  already includes that migration, through no fault of the backup or
+  the restore mechanism. This is the exact same class of problem
+  already solved for `production_schema_baseline`'s own backup-
+  fidelity row (compare against the backup's OWN stamp, never today's)
+  -- that fix had not yet been generalized to the full structural
+  schema comparison, which still compared unconditionally against
+  today's packaged baseline. **Confirmed expected, not genuine
+  corruption.**
+
+### The smallest safe correction
+
+`backupSchemaObjects()` (new, `lib/data-health/production-baseline.ts`)
+extracts the same `SchemaObject{type,name,sql}` shape `stagingSchemaObjects()`
+already derives from a live database's `sqlite_schema` rows, but from
+the **source backup's own embedded `CREATE TABLE`/`CREATE INDEX`
+statements** instead (via `parseRestoreStatements()`,
+`lib/operations/d1-restore-order.ts`, already used elsewhere in this
+script). `compareSchemaObjects()` already accepted an optional
+`baselineObjects` override (unused until now) -- `scripts/verify-
+remote-restore.mjs`'s authoritative schema check now passes the
+backup's own schema as that baseline, instead of relying on the
+default (today's packaged manifest). This makes the question
+genuinely asked "did the restore faithfully reproduce exactly what
+this backup itself declared" -- the real question a restore
+mechanism's correctness turns on -- rather than "does this particular
+backup already contain every object today's LATEST migration expects"
+(an unrelated question, already covered by `scripts/check-main-
+restore-sync.mjs`, never this script's job).
+
+**No weakening**: a genuine restore defect -- the restored database
+missing, adding, or changing a table/index relative to what the
+backup's own SQL explicitly declared -- is still caught exactly as
+before; only the comparison target changed. A separate, now purely
+**informational** comparison against today's packaged baseline is
+still logged (never asserted) so an operator can see at a glance that
+an older backup predates a later migration, without that fact ever
+failing the run.
+
+**Row-count verification was also genuinely incomplete**, separately
+from the schema issue: the prior check only asserted a count was "a
+valid non-negative integer" -- which a fully, silently emptied table
+would also pass. It now compares the restored count against the
+SOURCE BACKUP's own parsed `INSERT` count for every table (including
+the oversized `data_imports` row, now restored via the D1 query API),
+with `D1_RESTORE_SKIP_DATA_TABLES` tables (`import_preview_sessions`/
+`import_preview_session_chunks`) as the one named, already-documented
+exception expected to restore zero rows regardless of source count.
+Any other mismatch now fails the run loudly. Backup-fidelity
+(`production_schema_baseline`'s own historical stamp) was already
+correctly backup-relative from an earlier round and is unaffected;
+both this check and row counts now simply reach execution instead of
+being cut short by the earlier false schema failure.
+
+### Local verification (no live database, migration, or Production/Staging change)
+
+- `tests/production-baseline.test.mjs`: 4 new tests for
+  `backupSchemaObjects()` -- parses `CREATE TABLE`/`INDEX` correctly;
+  skips `TRIGGER`/`VIEW`/`VIRTUAL TABLE` (matching `stagingSchemaObjects()`'s
+  own filter); throws rather than guessing on an unparseable statement;
+  and a direct reproduction of the real scenario -- a synthetic older
+  `trips` schema (missing `archived_at`/`trips_owner_archived_idx`,
+  using the real table/column/index names) restored faithfully
+  compares as a **match** against its own backup schema, a genuine
+  **difference** against today's newer packaged baseline (informational
+  only), and a real dropped index is still caught as a **genuine
+  failure** against the backup's own schema -- proving the fix closes
+  the false positive without opening a false negative.
+- `tests/verify-remote-restore-wiring.test.mjs`: 2 new static-wiring
+  guards -- the script must call `backupSchemaObjects()` and pass it
+  as `compareSchemaObjects()`'s baseline argument; row counts must be
+  computed from the backup's own parsed `INSERT` counts, never merely
+  asserted present. Confirmed both would fail against the pre-fix
+  (commit `2f96990`) script text.
+- Full suite: **257/257 test files passing**, `tsc --noEmit` clean,
+  production build clean. `scripts/check-main-restore-sync.mjs` still
+  correctly reports the one unrelated, already-known,
+  deliberately-unfixed drift (migration `0056`/`trips` missing from
+  `main`'s own manifest) -- unchanged by this round, not touched; this
+  is the same migration whose *Staging* application created the
+  historical-backup scenario this round fixed, but the two are
+  independent concerns (one is about `main`'s tracking being stale, the
+  other is about validating an old backup against the right baseline).
+- No real Cloudflare/R2 credentials or GitHub Actions dispatch access
+  were available or used this round (unchanged from the prior entry);
+  nothing was run against a live database, and no scratch database was
+  created locally. Verification here is code-level only: unit tests,
+  `tsc`, and build. The real end-to-end proof is the next GitHub
+  Actions run the user triggers.
+
+### Report
+
+Reported here, before any further GitHub Actions run, per explicit
+instruction. The fix is committed and pushed
+(`trip-planner-multi-region-manual-prospects`) but **not yet
+re-verified against a real GitHub Actions run** -- that is the
+necessary next step, and is for the user to trigger (same branch,
+same "Run workflow" steps as before). No Production deployment,
+migration, or live database change was made or is required.

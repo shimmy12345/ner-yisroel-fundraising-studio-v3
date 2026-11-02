@@ -282,3 +282,62 @@ export function stagingSchemaObjects(rows: Array<Record<string, unknown>>): Sche
     .map((row) => ({ type: row.type as "table" | "index", name: String(row.name), sql: normalizeSchemaSql(row.sql) }))
     .sort((a, b) => `${a.type}:${a.name}`.localeCompare(`${b.type}:${b.name}`));
 }
+
+// Repair and Verify Backup Restoration follow-up (2026-11-02, see
+// docs/AI-HANDOFF.md's "Historical Backup Schema Validation" entry).
+// Root cause: scripts/verify-remote-restore.mjs's restored-schema check
+// always compared against TODAY's packaged baseline (PRODUCTION_BASELINE_OBJECTS,
+// via compareSchemaObjects()'s own default argument) -- which is correct
+// for the LATEST backup, but genuinely wrong for an older one: a backup
+// taken before a later schema-affecting migration landed on the real
+// database can NEVER structurally match today's baseline, through no
+// fault of the backup or the restore mechanism (confirmed: GitHub Actions
+// run 41466993401 restored a November 1 Staging backup and correctly
+// found `trips_owner_archived_idx` missing -- migration 0056 was applied
+// to the real Staging database on November 2, one day AFTER that backup
+// was taken; the live Staging database has the index right now). This is
+// the exact same class of problem already solved for
+// production_schema_baseline's own backup-fidelity row below (compare
+// against the BACKUP's own stamp, never today's) -- generalized here to
+// the full structural schema comparison, which had not yet been fixed the
+// same way.
+//
+// This function extracts the SAME SchemaObject{type,name,sql} shape
+// stagingSchemaObjects() derives from a live database's sqlite_schema
+// rows, but from the BACKUP FILE'S OWN embedded CREATE TABLE/INDEX
+// statements instead -- the backup's own declared schema travels WITH
+// it, so no separate historical-baseline lookup or migration-level
+// tracking is needed. Passed as compareSchemaObjects()'s `baselineObjects`
+// argument (which already supported overriding the default), this makes
+// restore verification check "did the restore faithfully reproduce
+// EXACTLY what this backup itself specifies" -- the real question a
+// restore mechanism's own correctness turns on -- rather than "does this
+// particular backup happen to already contain every table/index today's
+// LATEST migration expects," a different, unrelated question already
+// covered elsewhere (scripts/check-main-restore-sync.mjs / the monthly
+// migration-sync guard) and never this script's job. A genuine restore
+// defect -- the restored database missing, adding, or changing a
+// table/index relative to what the backup's own SQL explicitly declared
+// -- is still caught exactly as before; only the comparison TARGET
+// changed, not the comparison's strictness.
+//
+// CREATE TRIGGER/VIEW/VIRTUAL TABLE statements (none exist in this
+// project's real schema today) are skipped here, by design, the same way
+// stagingSchemaObjects() already filters a live database's rows to
+// type IN ('table','index') only -- so both sides of the comparison stay
+// symmetric.
+const CREATE_OBJECT_PATTERN = /^CREATE\s+(TABLE|(?:UNIQUE\s+)?INDEX|TRIGGER|VIEW|VIRTUAL\s+TABLE)\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"']?(\w+)[`"']?/i;
+
+export function backupSchemaObjects(createStatements: readonly string[]): SchemaObject[] {
+  const objects: SchemaObject[] = [];
+  for (const statement of createStatements) {
+    const match = statement.match(CREATE_OBJECT_PATTERN);
+    if (!match) throw new Error(`backupSchemaObjects: could not parse a CREATE statement's type/name -- refusing to guess: ${statement.slice(0, 160)}`);
+    const [, kind, name] = match;
+    if (/INDEX/i.test(kind)) objects.push({ type: "index", name, sql: normalizeSchemaSql(statement) });
+    else if (/^TABLE$/i.test(kind)) objects.push({ type: "table", name, sql: normalizeSchemaSql(statement) });
+    // TRIGGER / VIEW / VIRTUAL TABLE: deliberately excluded, matching
+    // stagingSchemaObjects()'s own type IN ('table','index') filter.
+  }
+  return objects.sort((a, b) => `${a.type}:${a.name}`.localeCompare(`${b.type}:${b.name}`));
+}

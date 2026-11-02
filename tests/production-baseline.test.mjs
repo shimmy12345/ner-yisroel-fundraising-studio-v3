@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { generateBaseline, schemaTopology } from "../scripts/generate-production-baseline.mjs";
-import { ACCOUNT_CONFIGURATION_COUNT_SQL, ACCOUNT_CONFIGURATION_TABLES, BUSINESS_DATA_COUNT_SQL, FUNDRAISING_DATA_COUNT_SQL, FUNDRAISING_DATA_TABLES, PRODUCTION_BASELINE_HASH, PRODUCTION_BASELINE_LEVEL, PRODUCTION_BASELINE_SOURCE_MIGRATIONS, PRODUCTION_BASELINE_VERIFIED, compareSchemaObjects, normalizeSchemaSql, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
+import { ACCOUNT_CONFIGURATION_COUNT_SQL, ACCOUNT_CONFIGURATION_TABLES, BUSINESS_DATA_COUNT_SQL, FUNDRAISING_DATA_COUNT_SQL, FUNDRAISING_DATA_TABLES, PRODUCTION_BASELINE_HASH, PRODUCTION_BASELINE_LEVEL, PRODUCTION_BASELINE_SOURCE_MIGRATIONS, PRODUCTION_BASELINE_VERIFIED, backupSchemaObjects, compareSchemaObjects, normalizeSchemaSql, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
 import { ACTIVE_DONORS_SQL, DUPLICATE_GIVING_FINGERPRINTS_SQL, DUPLICATE_JL_CODES_SQL, GIVING_RECONCILIATION_SQL, ORPHANED_GIFTS_SQL, ORPHANED_INTERACTIONS_SQL, ORPHANED_PAYMENTS_SQL, ORPHANED_REMINDERS_SQL } from "../lib/data-health/queries.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -707,4 +707,80 @@ test("baseline picks up the schema-adding 0056 trip archive/delete migration", (
   assert.match(tripsTable.sql, /archived_at/, "archived_at must be captured in the baseline");
   const archivedIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "trips_owner_archived_idx");
   assert.ok(archivedIndex, "the owner+archived_at index must be captured in the baseline");
+});
+
+// Repair and Verify Backup Restoration follow-up (2026-11-02, see
+// docs/AI-HANDOFF.md's "Historical Backup Schema Validation" entry).
+// scripts/verify-remote-restore.mjs used to compare a restored backup's
+// schema against TODAY's packaged baseline unconditionally -- correct
+// only for the LATEST backup. A real run (GitHub Actions run
+// 41466993401) restored a November 1 Staging backup and correctly found
+// `trips_owner_archived_idx` missing, because migration 0056 was applied
+// to the real Staging database only on November 2 -- an expected,
+// historical difference, not corruption. backupSchemaObjects() lets the
+// comparison use the backup's OWN embedded schema as the baseline
+// instead, which travels with the backup and needs no separate
+// historical-baseline lookup.
+test("backupSchemaObjects parses CREATE TABLE/INDEX statements into the same shape stagingSchemaObjects derives from a live database", () => {
+  const objects = backupSchemaObjects([
+    "CREATE TABLE `trips` (\n\t`id` text PRIMARY KEY NOT NULL\n);",
+    "CREATE INDEX `trips_owner_status_idx` ON `trips` (`owner_user_id`,`status`);",
+    "CREATE UNIQUE INDEX `trips_owner_archived_idx` ON `trips` (`owner_user_id`,`archived_at`);",
+  ]);
+  assert.deepEqual(objects.map((object) => `${object.type}:${object.name}`), ["index:trips_owner_archived_idx", "index:trips_owner_status_idx", "table:trips"]);
+  assert.equal(objects.find((object) => object.name === "trips").type, "table");
+});
+
+test("backupSchemaObjects skips CREATE TRIGGER/VIEW/VIRTUAL TABLE, matching stagingSchemaObjects' own type IN ('table','index') filter", () => {
+  const objects = backupSchemaObjects([
+    "CREATE TABLE `t` (`id` text);",
+    "CREATE TRIGGER `some_trigger` AFTER INSERT ON `t` BEGIN SELECT 1; END;",
+    "CREATE VIEW `some_view` AS SELECT 1;",
+  ]);
+  assert.deepEqual(objects.map((object) => object.name), ["t"]);
+});
+
+test("backupSchemaObjects throws, never guesses, on a statement it cannot parse a type/name from", () => {
+  assert.throws(() => backupSchemaObjects(["CREATE SOMETHING WEIRD;"]), /could not parse/);
+});
+
+test("a historical backup's own schema compares as a match against itself, but as a genuine difference against today's newer packaged baseline -- proving the fix without weakening the check", () => {
+  // Simulates exactly the real November 1 Staging backup: trips exists,
+  // but WITHOUT archived_at or its index (as they stood before migration
+  // 0056 landed on the real database).
+  const olderBackupCreateStatements = [
+    "CREATE TABLE `trips` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`owner_user_id` text NOT NULL,\n\t`status` text NOT NULL\n);",
+    "CREATE INDEX `trips_owner_status_idx` ON `trips` (`owner_user_id`,`status`);",
+  ];
+  const olderBackupSchema = backupSchemaObjects(olderBackupCreateStatements);
+
+  // Restoring that backup faithfully (the restored live schema is
+  // IDENTICAL to what the backup itself declared) must compare as a
+  // match against the BACKUP's OWN schema -- the corrected behavior.
+  const restoredLiveRows = olderBackupCreateStatements.map((sql) => {
+    const isIndex = /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+`(\w+)`/i.exec(sql);
+    const isTable = /^CREATE\s+TABLE\s+`(\w+)`/i.exec(sql);
+    return isIndex
+      ? { name: isIndex[1], type: "index", tbl_name: "trips", sql }
+      : { name: isTable[1], type: "table", tbl_name: isTable[1], sql };
+  });
+  const faithfulComparison = compareSchemaObjects(stagingSchemaObjects(restoredLiveRows), olderBackupSchema);
+  assert.equal(faithfulComparison.matches, true, `A faithful restore of an older backup must match that backup's OWN schema: ${faithfulComparison.differences.join(" ")}`);
+
+  // The SAME faithful restore, compared against TODAY's newer packaged
+  // baseline (which already has migration 0056's index), correctly still
+  // shows a difference -- proving this is a deliberate, informational-
+  // only comparison now, never silently dropped.
+  const packagedComparison = compareSchemaObjects(stagingSchemaObjects(restoredLiveRows));
+  assert.equal(packagedComparison.matches, false, "an older backup's restored schema is expected to differ from today's newer packaged baseline");
+  assert.ok(packagedComparison.differences.some((difference) => difference.includes("trips_owner_archived_idx")), "the difference must specifically name the index migration 0056 added");
+
+  // And a GENUINE restore defect -- the index from the backup's own
+  // schema missing after restore -- must still be caught against the
+  // backup's own schema, proving this change did not weaken detection of
+  // real corruption.
+  const corruptedLiveRows = restoredLiveRows.filter((row) => row.name !== "trips_owner_status_idx");
+  const corruptedComparison = compareSchemaObjects(stagingSchemaObjects(corruptedLiveRows), olderBackupSchema);
+  assert.equal(corruptedComparison.matches, false, "a restore that drops an index the backup itself declared must still fail");
+  assert.ok(corruptedComparison.differences.some((difference) => difference.includes("trips_owner_status_idx")));
 });
