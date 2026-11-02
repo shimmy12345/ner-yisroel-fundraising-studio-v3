@@ -62866,3 +62866,91 @@ re-verified against a real GitHub Actions run** -- that is the user's
 next step (same branch, same "Run workflow" steps as before). No
 Production deployment, migration, or live database change was made or
 is required.
+
+---
+
+## Staging Backup Restore Verification: COMPLETE (2026-11-02, GitHub Actions run 41472943028)
+
+The real GitHub Actions run the user triggered against
+`trip-planner-multi-region-manual-prospects` (run `41472943028`, job
+`125371006254`) **passed** -- the first fully clean, uninterrupted
+pass of `scripts/verify-remote-restore.mjs` against a real Staging
+backup, on GitHub's own infrastructure with its own configured
+secrets. This closes out the chain of three defects found and fixed
+across this and the three preceding entries (commits `2f96990`,
+`2f546e9`, `336d9f8`).
+
+This entry records that result, as reported; the raw GitHub Actions
+run logs themselves were not independently fetched or re-inspected in
+this session (no `gh` CLI or GitHub API token is available here, same
+limitation noted in every prior entry in this chain) -- the real
+workflow run itself, executing with its own real Cloudflare/R2
+credentials, is the independent verification; this entry is the
+record of its reported outcome, not a second, separate confirmation.
+
+**What a passing run of the corrected script means, in order (per
+`scripts/verify-remote-restore.mjs`'s own sequence)**:
+
+1. **Restore completed**, schema first, then every table's data in
+   dependency-safe order (`planD1Restore`, commit `2f96990`) -- no
+   foreign-key-ordering failure.
+2. **The oversized `data_imports` record restored successfully** via
+   the D1 HTTP query API (the one credential-gated gap this session's
+   own local demonstrations could never close, since this session has
+   no `CLOUDFLARE_API_TOKEN`) -- the real workflow has
+   `CLOUDFLARE_D1_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID` as GitHub Actions
+   secrets, which this run used.
+3. **`PRAGMA quick_check`: `ok`.**
+4. **`PRAGMA foreign_key_check`: zero violations.**
+5. **Schema validation passed** against the SOURCE BACKUP's own
+   embedded schema (`backupSchemaObjects()`, commit `2f546e9`), with
+   the trailing-`;` index-comparison bug (commit `336d9f8`) no longer
+   producing a false "~100 indexes differ" failure -- no genuine
+   missing/changed table, index, column, uniqueness, or partial-index
+   condition was reported.
+6. **`production_schema_baseline` backup fidelity confirmed**: the
+   restored marker matched the SOURCE BACKUP's own historical stamp
+   (this check has been backup-relative, never compared to today's
+   packaged hash, since an earlier round -- commit `a9685bac34db` on
+   `main`).
+7. **Exact row-count verification completed and passed** for every
+   table in `FUNDRAISING_DATA_TABLES`, including `data_imports` --
+   restored count equal to the SOURCE BACKUP's own parsed `INSERT`
+   count for that table, with zero unexplained mismatches (the only
+   named exception the check itself allows,
+   `D1_RESTORE_SKIP_DATA_TABLES` -- `import_preview_sessions`/
+   `import_preview_session_chunks`, deliberately restored with zero
+   rows regardless of source count -- does not count as a mismatch by
+   design; this run reported no row-count failure of any kind).
+8. **Temporary scratch database cleanup completed**: the workflow's
+   `verify` job creates one freshly-named, throwaway D1 database per
+   run and deletes it in a `finally` block regardless of outcome --
+   consistent with every prior round's own direct confirmation (via
+   `wrangler d1 list`) that no orphaned scratch database is ever left
+   behind. `fundraising-os-staging-db` and `fundraising-os-production-db`
+   themselves were never written to by this or any run of this
+   workflow.
+
+### Status
+
+- **Staging backup restore verification: COMPLETE.** The corrected
+  restore mechanism (dependency-safe ordering, oversized-row handling,
+  backup-relative schema validation, and the fixed index comparison)
+  has now been proven, end-to-end, against a real Staging backup, via
+  the real automated workflow, using its own real credentials. No
+  further Staging restore-verification work is open as of this round.
+- **Production backup restore verification: UNRESOLVED.** No
+  Production backup has been restored or checked, in this round or any
+  prior one. `scripts/verify-remote-restore.mjs` is shared by both
+  `d1-restore-verify-monthly.yml` (Staging) and
+  `d1-restore-verify-monthly-production.yml` (Production), and the
+  same three fixes apply to both -- but that is an expectation, not
+  independent proof. A real run of the Production workflow (same "Run
+  workflow" UI steps, selecting "D1 monthly restore verification
+  (Production)" instead) is the only thing that would actually verify
+  it, and has not been done.
+
+### This update
+
+Documentation-only, per explicit instruction: no application code,
+database, workflow, or deployment was changed to produce this entry.
