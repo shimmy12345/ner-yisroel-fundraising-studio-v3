@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { generateBaseline, schemaTopology } from "../scripts/generate-production-baseline.mjs";
-import { ACCOUNT_CONFIGURATION_COUNT_SQL, ACCOUNT_CONFIGURATION_TABLES, BUSINESS_DATA_COUNT_SQL, FUNDRAISING_DATA_COUNT_SQL, FUNDRAISING_DATA_TABLES, PRODUCTION_BASELINE_HASH, PRODUCTION_BASELINE_LEVEL, PRODUCTION_BASELINE_SOURCE_MIGRATIONS, PRODUCTION_BASELINE_VERIFIED, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
+import { ACCOUNT_CONFIGURATION_COUNT_SQL, ACCOUNT_CONFIGURATION_TABLES, BUSINESS_DATA_COUNT_SQL, FUNDRAISING_DATA_COUNT_SQL, FUNDRAISING_DATA_TABLES, PRODUCTION_BASELINE_HASH, PRODUCTION_BASELINE_LEVEL, PRODUCTION_BASELINE_SOURCE_MIGRATIONS, PRODUCTION_BASELINE_VERIFIED, compareSchemaObjects, normalizeSchemaSql, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
 import { ACTIVE_DONORS_SQL, DUPLICATE_GIVING_FINGERPRINTS_SQL, DUPLICATE_JL_CODES_SQL, GIVING_RECONCILIATION_SQL, ORPHANED_GIFTS_SQL, ORPHANED_INTERACTIONS_SQL, ORPHANED_PAYMENTS_SQL, ORPHANED_REMINDERS_SQL } from "../lib/data-health/queries.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -149,6 +149,61 @@ test("the real, live Production interactions/trip_prospects schema (captured 202
   const result = compareSchemaObjects(liveProductionObjects);
   assert.deepEqual(result.differences, []);
   assert.equal(result.matches, true);
+});
+
+// Final Schema and Deployment Safeguard Cleanup (2026-11-02, see
+// docs/AI-HANDOFF.md): the real, live Staging calendar_event_links/
+// calendar_event_link_history schema -- captured 2026-11-01, carrying
+// the pre-fix `--` comments embedded inside their column lists -- must
+// now match the baseline, which has no such comments at all (the
+// current, already-corrected migration file never puts a comment
+// inside a column list). This is the permanent regression pin for the
+// real-world scenario this round's normalizeSchemaSql() fix resolves.
+test("the real, live Staging calendar_event_links/calendar_event_link_history schema (captured 2026-11-01, with its pre-fix embedded comments) now matches the baseline", () => {
+  const liveCalendarEventLinksSql = "CREATE TABLE `calendar_event_links` (\n  `id` text PRIMARY KEY NOT NULL,\n  `interaction_id` text NOT NULL REFERENCES `interactions`(`id`),\n  `user_id` text NOT NULL REFERENCES `users`(`id`),\n  `google_calendar_id` text DEFAULT 'primary' NOT NULL,\n  `generation` integer DEFAULT 0 NOT NULL,\n  `google_event_id` text,\n  `google_etag` text,\n  `desired_state` text DEFAULT 'present' NOT NULL,\n  `desired_revision` integer DEFAULT 1 NOT NULL,\n  `synced_revision` integer DEFAULT 0 NOT NULL,\n  `sync_status` text DEFAULT 'pending' NOT NULL,\n  `last_error` text,\n  `attempt_count` integer DEFAULT 0 NOT NULL,\n  `lease_owner` text,\n  `lease_expires_at` integer,\n  -- 2026-10-19 review, issue 2: bounded-backoff scheduling for a\n  -- 'failed' link -- null means eligible now (no backoff in effect).\n  -- Never consulted for 'invalid'/'auth_required', which are excluded\n  -- from automatic reconciliation entirely regardless of this value.\n  `next_retry_at` integer,\n  `created_at` integer NOT NULL,\n  `updated_at` integer NOT NULL,\n  CHECK (`desired_state` IN ('present','absent')),\n  -- 2026-10-19 review, issue 2: 'invalid' (a definitive, permanent\n  -- rejection -- this app's own pre-mutation validation or a real\n  -- Google 400 -- never auto-retried) and 'auth_required' (a 401/403,\n  -- an authentication/configuration problem, also never auto-retried)\n  -- added -- see calendar-sync-types.ts's own SyncStatus doc comment.\n  CHECK (`sync_status` IN ('pending','synced','failed','invalid','auth_required','missing_remotely'))\n)";
+  const liveCalendarEventLinkHistorySql = "CREATE TABLE `calendar_event_link_history` (\n  `id` text PRIMARY KEY NOT NULL,\n  `link_id` text NOT NULL REFERENCES `calendar_event_links`(`id`),\n  `generation` integer NOT NULL,\n  `google_event_id` text NOT NULL,\n  `create_status` text DEFAULT 'not_attempted' NOT NULL,\n  `cleanup_needed` integer DEFAULT 0 NOT NULL,\n  `cleanup_status` text DEFAULT 'not_needed' NOT NULL,\n  `cleanup_attempts` integer DEFAULT 0 NOT NULL,\n  `created_at` integer NOT NULL,\n  `updated_at` integer NOT NULL,\n  -- 2026-10-19 review, issue 2: 'invalid' added -- a DEFINITIVE,\n  -- PERMANENT rejection of this generation's create attempt (a real\n  -- Google 400), distinct from 'in_flight' (genuinely ambiguous --\n  -- timeout/network/malformed response) -- see\n  -- calendar-sync-types.ts's own CreateStatus doc comment.\n  CHECK (`create_status` IN ('not_attempted','in_flight','succeeded','failed','invalid')),\n  CHECK (`cleanup_status` IN ('not_needed','pending','uncertain','done'))\n)";
+
+  const liveStagingObjects = manifest.ddlTopology.map((object) => {
+    if (object.type === "table" && object.name === "calendar_event_links") return { ...object, sql: liveCalendarEventLinksSql };
+    if (object.type === "table" && object.name === "calendar_event_link_history") return { ...object, sql: liveCalendarEventLinkHistorySql };
+    return object;
+  });
+
+  const result = compareSchemaObjects(liveStagingObjects);
+  assert.deepEqual(result.differences, []);
+  assert.equal(result.matches, true);
+});
+
+// A genuinely different column, even one hidden behind an otherwise
+// comment-laden table, must still be caught -- comment-stripping must
+// never become a second "ignore extra content" loophole.
+test("comment-stripping never masks a genuinely different column", () => {
+  const corruptedCalendarEventLinksSql = "CREATE TABLE `calendar_event_links` (\n  `id` text PRIMARY KEY NOT NULL,\n  `interaction_id` text NOT NULL REFERENCES `interactions`(`id`),\n  `user_id` text NOT NULL REFERENCES `users`(`id`),\n  `google_calendar_id` text DEFAULT 'primary' NOT NULL,\n  `generation` integer DEFAULT 0 NOT NULL,\n  `google_event_id` text,\n  `google_etag` text,\n  `desired_state` text DEFAULT 'present' NOT NULL,\n  `desired_revision` integer DEFAULT 1 NOT NULL,\n  `synced_revision` integer DEFAULT 0 NOT NULL,\n  `sync_status` text DEFAULT 'pending' NOT NULL,\n  `last_error` text,\n  `attempt_count` integer DEFAULT 0 NOT NULL,\n  -- a comment, same as the real pre-fix text, but this column is\n  -- genuinely renamed below -- must still be caught.\n  `lease_owner_renamed` text,\n  `lease_expires_at` integer,\n  `next_retry_at` integer,\n  `created_at` integer NOT NULL,\n  `updated_at` integer NOT NULL,\n  CHECK (`desired_state` IN ('present','absent')),\n  CHECK (`sync_status` IN ('pending','synced','failed','invalid','auth_required','missing_remotely'))\n)";
+  const liveObjects = manifest.ddlTopology.map((object) => (object.type === "table" && object.name === "calendar_event_links" ? { ...object, sql: corruptedCalendarEventLinksSql } : object));
+  assert.match(compareSchemaObjects(liveObjects).differences.join(" "), /Table definition differs: calendar_event_links/);
+});
+
+test("normalizeSchemaSql strips -- line comments, respecting string literals", () => {
+  // A comment between column definitions, across multiple lines (the
+  // real pre-fix shape) collapses to nothing -- not to a swallowed
+  // continuation of the following columns.
+  assert.equal(
+    normalizeSchemaSql("CREATE TABLE `t` (\n  `a` text,\n  -- a comment\n  -- spanning two lines\n  `b` text\n)"),
+    "CREATE TABLE `t` ( `a` text, `b` text )",
+  );
+  // A literal `--` inside a single-quoted string is real data, never a
+  // comment -- the string, and everything after it, must survive intact.
+  assert.equal(
+    normalizeSchemaSql("CREATE TABLE `t` (`a` text DEFAULT 'x--y' NOT NULL, `b` text)"),
+    "CREATE TABLE `t` (`a` text DEFAULT 'x--y' NOT NULL, `b` text)",
+  );
+  // An escaped '' quote inside a string must not be mistaken for the
+  // string's own end (which would otherwise make the real `--` right
+  // after it look like it's outside the string, and get stripped).
+  assert.equal(
+    normalizeSchemaSql("CREATE TABLE `t` (`a` text DEFAULT 'it''s--fine' NOT NULL)"),
+    "CREATE TABLE `t` (`a` text DEFAULT 'it''s--fine' NOT NULL)",
+  );
 });
 
 test("schema comparison excludes only known platform-managed tables", () => {

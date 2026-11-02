@@ -82,7 +82,70 @@ export const PLATFORM_MANAGED_SCHEMA_OBJECTS = new Set([
   "drizzle_migrations",
 ]);
 
-export const normalizeSchemaSql = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
+// Removes SQL `--` line comments, respecting single-quoted string
+// literals (so a literal `--` inside a string, or a `'` escaped as `''`,
+// is never mistaken for a comment) -- never touches `/* */` block
+// comments, since none exist anywhere in this project's real schema
+// (confirmed by direct search of drizzle/*.sql; every `/*` that appears
+// there is plain prose inside an ordinary `--` line comment, e.g. a
+// `lib/research/*` path). Called BEFORE whitespace collapsing
+// specifically: once a table's whole CREATE TABLE text is flattened
+// onto one line, a `--` comment that used to end at a real newline has
+// no terminator left at all, and silently swallows every following
+// column/constraint as part of itself -- see normalizeSchemaSql's own
+// doc comment for the real defect this caused (2026-11-02, "Final
+// Schema and Deployment Safeguard Cleanup", docs/AI-HANDOFF.md).
+function stripSqlLineComments(sql: string): string {
+  let result = "";
+  let inString = false;
+  for (let index = 0; index < sql.length; index++) {
+    const char = sql[index];
+    if (inString) {
+      result += char;
+      if (char === "'") {
+        if (sql[index + 1] === "'") { result += sql[++index]; }
+        else inString = false;
+      }
+      continue;
+    }
+    if (char === "'") { inString = true; result += char; continue; }
+    if (char === "-" && sql[index + 1] === "-") {
+      while (index < sql.length && sql[index] !== "\n") index++;
+      continue;
+    }
+    result += char;
+  }
+  return result;
+}
+
+// Resolve Staging-only calendar_event_links/calendar_event_link_history
+// schema differences (2026-11-02, see docs/AI-HANDOFF.md's "Final Schema
+// and Deployment Safeguard Cleanup" entry). Root cause: an earlier review
+// round briefly added explanatory `--` comments INSIDE these two tables'
+// column lists (since corrected in the migration file itself, commit
+// d153259), and Staging's real tables were created from that pre-fix
+// text before the correction landed -- a table's own stored CREATE
+// TABLE text, once created, is never retroactively rewritten just
+// because the migration file that created it later changes. A `--`
+// comment is completely inert SQL -- it can never represent a real
+// column, type, default, constraint, or index -- so its mere presence
+// or position can never be a genuine structural difference; stripping
+// it before comparison is strictly more correct than treating it as
+// one, and can never mask a real difference the way a general "ignore
+// extra content" rule could. This also happens to fix a second, more
+// serious, non-cosmetic defect in the same stored text: `normalizeSchemaSql`
+// is also what `lib/operations/schema-backup.ts`'s buildSchemaOnlyBackup()
+// uses to serialize a schema-only backup -- collapsing the OLD,
+// uncommented-out `--` text onto one line destroyed its only terminator,
+// so restoring that backup threw a genuine "near CREATE: syntax error"
+// (see tests/calendar-schema-repair-rehearsal.test.mjs, which rehearsed
+// drizzle/pending-review/0049_fix_calendar_schema_text_staging_repair.sql
+// as a live-table-rebuild fix for exactly this). Fixing the shared
+// normalization function instead resolves both the Health-page warning
+// and the backup/restore defect with no database change at all, which is
+// why that migration is NOT being applied -- see this round's entry in
+// docs/AI-HANDOFF.md for the full comparison.
+export const normalizeSchemaSql = (value: unknown) => stripSqlLineComments(String(value ?? "")).replace(/\s+/g, " ").trim();
 
 // Resolve Production Schema Health Warnings (2026-11-02, see
 // docs/AI-HANDOFF.md's investigation and this entry). Root cause: the

@@ -9,11 +9,20 @@ import { buildCalendarTablesRecoveryStatements } from "../lib/operations/calenda
 
 // Rehearses drizzle/pending-review/0049_fix_calendar_schema_text_staging_repair.sql
 // (NOT part of the applied migration sequence -- see that file's own
-// header) against a REAL local Workers/D1 runtime, before that repair is
-// ever proposed for Staging. Linux-CI-only, same convention as
-// tests/calendar-d1-store.test.mjs (see that file's own header for why:
-// getPlatformProxy() needs a working local `workerd` binary, which this
-// project's Windows sandbox cannot run).
+// header) against a REAL local Workers/D1 runtime. Linux-CI-only, same
+// convention as tests/calendar-d1-store.test.mjs (see that file's own
+// header for why: getPlatformProxy() needs a working local `workerd`
+// binary, which this project's Windows sandbox cannot run).
+//
+// UPDATED 2026-11-02 (see docs/AI-HANDOFF.md's "Final Schema and
+// Deployment Safeguard Cleanup" entry): the restore defect this file
+// was written to rehearse a fix for (Phase 2) is now fixed directly in
+// lib/data-health/production-baseline.ts's normalizeSchemaSql(), which
+// strips `--` comments before collapsing whitespace -- the actual root
+// cause, since a `--` comment is inert SQL that was never a genuine
+// structural difference in the first place. This migration is therefore
+// NOT being applied to Staging; this file is kept to prove it remains a
+// safe, fully rehearsed fallback option, not because it is still needed.
 //
 // What this proves, each against the REAL D1 engine, never a simulation:
 //   1. The pre-fix defect is real (Phase 2).
@@ -225,28 +234,6 @@ async function createRehearsalDatabase() {
   return { db, dispose };
 }
 
-// Proves the restore defect directly, using the SAME normalizeSchemaSql()
-// the real production schema-backup path (lib/operations/schema-backup.ts)
-// uses: collapse the stored CREATE TABLE text to one line, then try to
-// actually execute it as a fresh CREATE TABLE. The embedded `--` comment,
-// once there is no newline left to end it, swallows the rest of the
-// statement (including its own closing paren/semicolon), so the very
-// next statement's text gets parsed as a continuation -- a genuine syntax
-// error, not a theoretical one.
-function assertRestoreSyntaxError(createTableSql, nextStatementSql) {
-  const normalized = normalizeSchemaSql(createTableSql);
-  const restoreAttempt = new DatabaseSync(":memory:");
-  try {
-    assert.throws(
-      () => restoreAttempt.exec(`${normalized};\n${nextStatementSql};`),
-      /syntax error/i,
-      "the pre-fix buggy stored schema text must reproduce a genuine SQL syntax error once normalized, the same way the real schema-backup/restore path does",
-    );
-  } finally {
-    restoreAttempt.close();
-  }
-}
-
 function assertRestoreSucceeds(createTableSql) {
   const normalized = normalizeSchemaSql(createTableSql);
   const restoreAttempt = new DatabaseSync(":memory:");
@@ -432,21 +419,33 @@ async function run() {
       assert.equal(before.history.length, 10, "setup sanity: all ten synthetic history rows must exist before the repair");
 
       // =====================================================================
-      // Phase 2: the pre-fix defect is real against this exact stored
-      // schema text, via the REAL normalizeSchemaSql() the production
-      // backup path uses -- not assumed, not merely re-asserted from a
-      // prior round.
+      // Phase 2 (UPDATED 2026-11-02, see docs/AI-HANDOFF.md's "Final Schema
+      // and Deployment Safeguard Cleanup" entry): this exact stored schema
+      // text used to reproduce a genuine "near CREATE: syntax error" once
+      // run through normalizeSchemaSql() (the pre-fix comment-swallowing
+      // defect this whole file was written to rehearse a live-table-rebuild
+      // fix for). normalizeSchemaSql() itself was then fixed to strip `--`
+      // comments before collapsing whitespace, which resolves the SAME
+      // defect at its actual root -- a `--` comment is inert SQL and can
+      // never need a live rebuild to become "valid" again, only correct
+      // handling by whatever code re-serializes it. This assertion now
+      // proves the buggy text restores CLEANLY under the fixed function,
+      // demonstrating that the live-rebuild migration below, while still
+      // safe (Phases 3-8 keep proving that), is no longer NECESSARY: fixing
+      // the shared comparison/normalization logic was sufficient on its own.
       // =====================================================================
       const buggyLinksSql = await tableSql(db, "calendar_event_links");
       const buggyHistorySql = await tableSql(db, "calendar_event_link_history");
       assert.match(buggyLinksSql, /next_retry_at/, "sanity: this must be the real stored schema, not an empty result");
-      assertRestoreSyntaxError(buggyLinksSql, "CREATE UNIQUE INDEX `calendar_event_links_interaction_uidx` ON `calendar_event_links` (`interaction_id`)");
-      assertRestoreSyntaxError(buggyHistorySql, "CREATE UNIQUE INDEX `calendar_event_link_history_link_generation_uidx` ON `calendar_event_link_history` (`link_id`,`generation`)");
+      assertRestoreSucceeds(buggyLinksSql);
+      assertRestoreSucceeds(buggyHistorySql);
 
       // =====================================================================
-      // Phase 3: apply the repair -- EXACTLY the mechanism proposed for
-      // Staging, a single db.batch() call built from the real migration
-      // file's own statements.
+      // Phase 3: apply the repair anyway, to confirm it REMAINS a safe,
+      // fully rehearsed fallback option even though it is no longer the
+      // chosen fix -- EXACTLY the mechanism that was proposed for Staging,
+      // a single db.batch() call built from the real migration file's own
+      // statements.
       // =====================================================================
       const repairStatements = readMigrationBatchStatements(REPAIR_MIGRATION_PATH);
       assert.ok(repairStatements.length >= 14, "sanity: the repair migration must parse into its full set of statements");

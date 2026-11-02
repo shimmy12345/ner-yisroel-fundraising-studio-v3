@@ -157,4 +157,36 @@ function state({ ddlTopology, sourceMigrations, restoreOrder, skipDataTables = [
   assert.equal(typeof compareCrossBranchRestoreState, "function");
 }
 
+// 9. Regression (2026-11-02, "Final Schema and Deployment Safeguard
+// Cleanup", see docs/AI-HANDOFF.md): schemaComparison must use the SAME
+// order-independent comparison as lib/data-health/production-baseline.ts's
+// own compareSchemaObjects, not a stale, separately hand-maintained copy.
+// Before this fix, this module defined its own local re-implementation
+// that compared each table's CREATE TABLE text as one opaque,
+// order-sensitive string -- so a column that physically landed in a
+// different position on one branch than the other (the exact,
+// already-confirmed-harmless drift behind the real interactions/
+// trip_prospects warnings) registered as a false "Table definition
+// differs" here too, even after the real check was fixed to tolerate it.
+// A pure column reorder with an otherwise byte-identical column set must
+// report in sync.
+{
+  const DONORS_COLUMN_ORDER_A = { type: "table", name: "donors", sql: "CREATE TABLE `donors` (`id` text PRIMARY KEY NOT NULL, `owner_user_id` text NOT NULL, `archived_at` integer, FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`))" };
+  const DONORS_COLUMN_ORDER_B = { type: "table", name: "donors", sql: "CREATE TABLE `donors` (`id` text PRIMARY KEY NOT NULL, `archived_at` integer, `owner_user_id` text NOT NULL, FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`))" };
+  const feature = state({ ddlTopology: [USERS, DONORS_COLUMN_ORDER_A], sourceMigrations: ["0000_a.sql"], restoreOrder: [...ROOTS, "donors"] });
+  const main = state({ ddlTopology: [USERS, DONORS_COLUMN_ORDER_B], sourceMigrations: ["0000_a.sql"], restoreOrder: [...ROOTS, "donors"] });
+  const report = compareCrossBranchRestoreState(feature, main);
+  assert.equal(report.inSync, true, formatDriftReport(report));
+}
+// And a genuinely missing column across branches must still fail -- the
+// fix must not have traded a false positive for a false negative.
+{
+  const DONORS_WITH_EXTRA_COLUMN = { type: "table", name: "donors", sql: "CREATE TABLE `donors` (`id` text PRIMARY KEY NOT NULL, `owner_user_id` text NOT NULL, `archived_at` integer, FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`))" };
+  const feature = state({ ddlTopology: [USERS, DONORS_WITH_EXTRA_COLUMN], sourceMigrations: ["0000_a.sql"], restoreOrder: [...ROOTS, "donors"] });
+  const main = state({ ddlTopology: [USERS, DONORS], sourceMigrations: ["0000_a.sql"], restoreOrder: [...ROOTS, "donors"] });
+  const report = compareCrossBranchRestoreState(feature, main);
+  assert.equal(report.inSync, false);
+  assert.match(report.schemaComparison.differences.join(" "), /Table definition differs: donors/);
+}
+
 process.stdout.write("Restore drift guard checks passed.\n");

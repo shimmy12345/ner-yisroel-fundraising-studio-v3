@@ -1,3 +1,4 @@
+import { compareSchemaObjects } from "../data-health/production-baseline.ts";
 import type { SchemaObject, SchemaComparison } from "../data-health/production-baseline.ts";
 
 // Generic D1 restore/schema drift detection -- the preventative guard for
@@ -113,9 +114,9 @@ export type CrossBranchDriftReport = {
   migrationDrift: MigrationListDiff;
   // D/E: structural DDL drift for every table present on both branches
   // (new/changed columns, indexes, or constraints) plus any table whose
-  // mere presence differs -- reuses the SAME compareSchemaObjects already
-  // used everywhere else in this codebase for this exact comparison,
-  // rather than a second, parallel diffing implementation.
+  // mere presence differs. See the call site below for why this now
+  // literally calls lib/data-health/production-baseline.ts's own
+  // compareSchemaObjects rather than a second, parallel implementation.
   schemaComparison: SchemaComparison;
   // F: FK-ordering violations evaluated against FEATURE's current schema
   // (the authoritative source of truth for what foreign keys actually
@@ -156,8 +157,22 @@ export function compareCrossBranchRestoreState(feature: CrossBranchRestoreState,
   // (the canonical, authoritative schema it must match): a table feature
   // has that main lacks reads as "Missing table: X" (main is missing it);
   // a table main has that feature no longer does reads as "Unexpected
-  // table: X" (a stale entry on main).
-  const schemaComparison = compareSchemaObjectsPlain(main.ddlTopology, feature.ddlTopology);
+  // table: X" (a stale entry on main). This now calls the REAL
+  // compareSchemaObjects (lib/data-health/production-baseline.ts)
+  // directly instead of a separate, parallel re-implementation -- see
+  // that function's own doc comment for why: an earlier round fixed a
+  // false-positive there (order-independent table-column comparison,
+  // plus a narrow allowlist for two confirmed-dead trip_prospects
+  // columns) but this file's own hand-maintained copy was never
+  // updated, so it kept reporting those same two tables as "differing"
+  // here even after the real check was fixed (2026-11-02, see
+  // docs/AI-HANDOFF.md's "Final Schema and Deployment Safeguard
+  // Cleanup" entry). Importing the real function directly, rather than
+  // duplicating it, makes that class of drift-between-two-copies
+  // structurally impossible going forward. It has no live-D1 or other
+  // side effect beyond the same static schema-manifest.json import
+  // every other caller of this module already needs.
+  const schemaComparison = compareSchemaObjects(main.ddlTopology, feature.ddlTopology);
   const restoreOrderIssues = validateRestoreOrderAgainstSchema(feature.ddlTopology, main.restoreOrder, main.skipDataTables);
 
   const inSync = missingFromMainOrder.length === 0
@@ -168,27 +183,6 @@ export function compareCrossBranchRestoreState(feature: CrossBranchRestoreState,
     && restoreOrderIssues.length === 0;
 
   return { inSync, missingFromMainOrder, staleInMainOrder, migrationDrift, schemaComparison, restoreOrderIssues };
-}
-
-// Thin, dependency-free re-implementation of
-// lib/data-health/production-baseline.ts's compareSchemaObjects, used
-// here instead of importing that module directly so this guard never
-// needs a live D1 connection or that module's own manifest import side
-// effect -- same exact comparison semantics (missing/unexpected/differing
-// table or index), operating on plain data either side already has in
-// memory.
-function compareSchemaObjectsPlain(liveObjects: readonly SchemaObject[], baselineObjects: readonly SchemaObject[]): SchemaComparison {
-  const normalize = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
-  const live = new Map(liveObjects.map((object) => [`${object.type}:${object.name}`, object]));
-  const baseline = new Map(baselineObjects.map((object) => [`${object.type}:${object.name}`, object]));
-  const differences: string[] = [];
-  for (const [key, expected] of baseline) {
-    const actual = live.get(key);
-    if (!actual) differences.push(`Missing ${expected.type}: ${expected.name}.`);
-    else if (normalize(actual.sql) !== normalize(expected.sql)) differences.push(`${expected.type === "table" ? "Table" : "Index"} definition differs: ${expected.name}${expected.type === "table" ? " (columns or constraints)" : ""}.`);
-  }
-  for (const [key, actual] of live) if (!baseline.has(key) && actual.name !== "production_schema_baseline") differences.push(`Unexpected ${actual.type}: ${actual.name}.`);
-  return { matches: differences.length === 0, differences };
 }
 
 // Human-readable report, used by both the CI script and anything that

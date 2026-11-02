@@ -7,6 +7,20 @@
 -- lib/data-health/production-baseline.ts) is the owner's own decision
 -- to make, not performed here. NOT applied anywhere by this round.
 --
+-- RESOLUTION (2026-11-02, see docs/AI-HANDOFF.md's "Final Schema and
+-- Deployment Safeguard Cleanup" entry): determined NOT NECESSARY. The
+-- defect below ("near CREATE: syntax error" on restore) and the
+-- Staging Health-page warning it also caused are both fixed directly in
+-- lib/data-health/production-baseline.ts's normalizeSchemaSql(), which
+-- now strips `--` comments before collapsing whitespace -- the actual
+-- root cause, since a `--` comment is inert SQL and was never a genuine
+-- structural difference. That fix requires no database change at all.
+-- This migration remains here, unapplied, as a safe, fully rehearsed
+-- fallback (tests/calendar-schema-repair-rehearsal.test.mjs still
+-- exercises it against a real local D1 binding) should it ever actually
+-- be wanted for some other reason -- not because it is still needed for
+-- this one.
+--
 -- What this fixes: a read-only `wrangler d1 execute --remote` schema
 -- export of Staging's REAL, currently-live calendar_event_links/
 -- calendar_event_link_history tables, fed through the exact same
