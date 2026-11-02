@@ -60457,3 +60457,168 @@ added to `FEATURE_FINGERPRINTS`
 independently re-verified against real, live Production, the same way
 every other feature on that list was. Ready for a Production
 deployment (including applying migration 0056 there) once authorized.
+
+## Final Safety Fix Before Trip Archive/Delete Production Deployment (2026-11-03)
+
+Owner review, before authorizing Production deployment: the Delete
+Trip safety check only blocked on CURRENTLY ACTIVE financial activity
+-- a trip with completed/scheduled meetings (including AI Meeting
+Notes) and zero active financial rows, or a trip whose financial
+attribution had since been soft-removed/reconciled, could still be
+permanently deleted. That could erase valuable trip history even
+though donor records remained intact. Requested a narrowly-scoped
+tightening: block on ANY recorded meeting/notes history, and on ANY
+financial activity -- active or historical -- implemented atomically
+in the backend, with regression tests, verified live on Staging.
+
+### What changed
+
+`deleteTrip()` in `lib/relationships/trips-data.ts` -- the only place
+this logic lives; `app/api/trips/[id]/route.ts`'s `DELETE` handler and
+the UI's blocked-delete handling were unchanged, since both already
+worked generically off `result.ok`/`result.reason`/the `blocked` flag,
+not a hardcoded reason string:
+
+1. **Recorded meetings now block deletion.** Any `trip_prospects` row
+   for the trip with `linked_interaction_id IS NOT NULL` blocks it.
+   This column is set exactly once, the moment a real meeting
+   interaction is created (`statusRequiresInteraction()` --
+   `meeting_scheduled`/`meeting_completed` only), and confirmed by
+   inspection to never be cleared afterward by any later status
+   change -- a permanent, reliable marker that a real meeting (and
+   therefore possibly AI Meeting Notes, which live on that same
+   interaction's `summary`) exists. A prospect that only ever reached
+   not_contacted/contacted/meeting_requested/declined/
+   unable_to_schedule -- none of which create a real interaction --
+   never sets this, so a trip of purely planning-stage prospects
+   remains deletable, exactly per the owner's own explicit scoping
+   ("prospects added for planning, with no meetings... may still be
+   deleted").
+2. **Financial history now blocks deletion regardless of age.**
+   Widened from "any ACTIVE `trip_financial_attributions`/
+   `trip_prospect_commitments` row" to "ANY row in either table AT
+   ALL, active or `removed_at`/soft-removed/migrated/reconciled." This
+   directly reverses this feature's original design decision that a
+   migrated-then-reconciled commitment didn't block deletion -- the
+   owner's own explicit instruction ("a trip's financial history
+   should not disappear because an attribution was subsequently
+   removed or reconciled") overrides that.
+3. **Atomicity and concurrency safety, moved into the database layer,
+   not just the interface.** The check is no longer a separate
+   read-then-act step (which would leave a race window for a
+   concurrent request to add a meeting/note/financial record between
+   the check and the delete). It is now a `NOT EXISTS (...)` guard
+   embedded directly inside EVERY delete statement (all five: 
+   `trip_prospect_commitments`, `trip_financial_attributions`,
+   `trip_prospects`, `trip_destination_regions`, `trips`), all sent in
+   one `env.DB.batch()` call. D1's `batch()` executes as a single
+   atomic transaction (`BEGIN IMMEDIATE`, taking a write lock up
+   front -- the same guarantee this project's own prior concurrency
+   fix already relies on, drizzle/0051's
+   `trip_financial_attributions_active_reconciled_pending_uidx` and
+   `tests/trip-reconciliation-concurrency.test.mjs`), so the guard and
+   every delete are evaluated against the exact same, final, serialized
+   state. A concurrent insert either completes entirely before this
+   transaction starts (correctly seen and blocking it) or waits until
+   after it commits (and if this transaction proceeded, there was
+   nothing to race against). If blocked, every statement in the batch
+   matches zero rows -- the whole operation is a true no-op everywhere,
+   never a partial delete -- and the batch still commits cleanly
+   (committing zero changes), so no manual rollback is ever needed.
+4. **A specific, helpful refusal message.** After a blocked (no-op)
+   batch, one additional read-only query (never load-bearing for
+   safety, which the atomic guard already enforced) determines exactly
+   which category or categories triggered the block and names them:
+   "This trip has completed or scheduled donor meetings, including any
+   meeting notes recorded on them[, and/and] pledges, donations, or
+   financial attributions -- including ones that were later removed or
+   reconciled, and cannot be permanently deleted... Archive it
+   instead..." The result's `reason` was renamed from
+   `"has_financial_activity"` to `"has_recorded_activity"` to reflect
+   the broader scope; the API route and UI needed no changes since
+   both only ever branched on `result.ok`/the `blocked` flag.
+5. A rare edge case (the trip is concurrently deleted by a second
+   request between the initial ownership check and this batch) is
+   handled by re-checking existence after a no-op batch, so it reports
+   `not_found` rather than incorrectly claiming blocked activity.
+
+### Regression tests added/updated
+
+- `tests/trip-archive-delete.test.mjs`: new test proving a recorded
+  meeting blocks deletion (with a SECOND, unrelated planning-only
+  prospect on the same trip, proving the block is never partial -- both
+  prospect rows, the real interaction, its notes text, and the trip's
+  destination regions all survive); the migrated-then-reconciled-
+  commitment test's expectation REVERSED (now correctly blocks, with
+  the historical rows confirmed to survive the blocked attempt
+  untouched); the financial-activity tests' `reason` assertions updated
+  to `"has_recorded_activity"`; the existing "prospects but zero
+  financial activity" test re-labeled accurately (it never actually
+  created a real meeting, so it correctly remains deletable under the
+  new rule too).
+- `tests/trip-archive-delete-schema.test.mjs`: new test exercising the
+  exact guard SQL `deleteTrip()` embeds, directly, against a real
+  trip_prospects row with `linked_interaction_id` set -- proves the
+  guarded batch is a true no-op (zero rows changed anywhere, including
+  the trips row itself) when a recorded meeting exists, confirming the
+  atomicity claim at the SQL level, not just through the application
+  function.
+- `tests/trip-archive-delete-ui.test.mjs`: unchanged and still passing
+  -- it only asserts the UI calls the real PATCH/DELETE endpoints and
+  shows the right kind of warning text, never a specific reason string.
+- Full suite: 254/254 test files pass (no new files this round, two
+  updated); `tsc --noEmit` clean; `build:staging-independent` clean.
+  No new migration -- this round is purely application-logic, not
+  schema.
+
+### Tested on Staging (`fundraising-os-staging.sgoldstein.workers.dev`, Worker `04984a40-d6c1-457f-bb3a-34b3e890f8d0`)
+
+Using real, disposable test trips created through the actual UI:
+
+1. **Recorded meeting blocks deletion**: created "Safety Fix Test C
+   (Meeting)," added two real donors as selected prospects (Abdelhak,
+   Bashevkin), then set a real test `interactions` row and linked it to
+   Abdelhak's `trip_prospects` row via D1 (`status = 'meeting_completed'`,
+   `linked_interaction_id` set) -- the fastest reliable way to produce
+   this exact state without depending on Calendar-sync integration
+   machinery unrelated to this check. Attempting Delete Trip via the UI
+   was correctly refused with the exact expected message ("This trip
+   has completed or scheduled donor meetings, including any meeting
+   notes recorded on them..."); a direct D1 check afterward confirmed
+   BOTH prospect rows, the real interaction, and its notes text
+   ("TEST: AI meeting notes -- discussed capital campaign") were
+   completely untouched -- the block was never partial.
+2. **Historical/reconciled financial activity blocks deletion** (the
+   core of this round's fix): created "Safety Fix Test D (Historical
+   Pledge)" with zero prospects and zero meetings, then injected one
+   disposable `giving_activities` pledge and one `trip_financial_
+   attributions` row already marked `removed_at`/"Reconciled with
+   JL-imported record" (i.e., exactly the scenario the PREVIOUS version
+   of this feature would have allowed to delete). Delete Trip was
+   correctly refused: "This trip has pledges, donations, or financial
+   attributions -- including ones that were later removed or
+   reconciled, and cannot be permanently deleted..." -- proving the
+   tightened rule live, not just in a unit test.
+3. **Planning-only trips remain deletable**: created "Safety Fix Test E
+   (Planning Only)," added one real donor as a selected prospect with
+   no meeting ever recorded, and deleted it successfully via the UI in
+   one step -- confirming the tightening did not over-block the
+   legitimate case the owner explicitly preserved.
+4. **Preserving donor records, financial history, meeting notes, and
+   linked activity**: zero Google network requests and zero console
+   errors throughout. All disposable Staging data (3 test trips, 1 test
+   interaction, 1 test pledge, 1 test attribution) fully cleaned up
+   afterward; `donors` (266), `giving_activities` (5488), `trips` (2),
+   `trip_prospects` (45), `trip_financial_attributions` (5), and
+   `interactions` row counts confirmed identical to the pre-test
+   baseline via direct, read-only D1 queries.
+
+### Unresolved issues
+
+None. The tightened Delete Trip safeguard is implemented atomically in
+the backend, covered by regression tests at both the pure-function and
+live-Staging level, and documented. Not yet added to
+`FEATURE_FINGERPRINTS` or marked "Verified working in Production" --
+same rule as the original Archive/Delete entry. Ready for a Production
+deployment (including applying migration 0056, still not yet applied
+to Production) once authorized.

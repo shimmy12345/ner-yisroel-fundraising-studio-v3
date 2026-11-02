@@ -100,12 +100,15 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   return Response.json({ trip });
 }
 
-// Delete Trip (2026-11-02, see docs/AI-HANDOFF.md's "Add Archive and
-// Delete Options to Trip Planner" entry). See deleteTrip() in
-// trips-data.ts for exactly what is and is not removed, and why a
-// trip with real linked financial activity is refused outright (409)
-// rather than deleted -- the UI's own response to that status offers
-// Archive Trip instead, never a forced/overridable delete.
+// Delete Trip (2026-11-02, tightened 2026-11-03 -- see docs/AI-
+// HANDOFF.md's "Add Archive and Delete Options to Trip Planner" and
+// "Final Safety Fix Before Trip Archive/Delete Production Deployment"
+// entries). See deleteTrip() in trips-data.ts for exactly what is and
+// is not removed, and why a trip with any recorded meeting/meeting-
+// notes history or any financial activity (active or historical) is
+// refused outright (409) rather than deleted -- the UI's own response
+// to that status offers Archive Trip instead, never a forced/
+// overridable delete.
 export async function DELETE(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const user = await getChatGPTUser();
   if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });

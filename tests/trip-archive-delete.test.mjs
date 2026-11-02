@@ -1,12 +1,14 @@
-// Add Archive and Delete Options to Trip Planner (2026-11-02, see
-// docs/AI-HANDOFF.md). Calls the REAL, unmodified
+// Add Archive and Delete Options to Trip Planner (2026-11-02, tightened
+// 2026-11-03 -- "Final Safety Fix Before Trip Archive/Delete Production
+// Deployment," see docs/AI-HANDOFF.md). Calls the REAL, unmodified
 // updateTrip/deleteTrip/getTrip/listTrips exported from
 // lib/relationships/trips-data.ts -- not a hand-copied reproduction of
 // their SQL -- by intercepting "cloudflare:workers" with this
 // codebase's own established shim/adapter (see
 // tests/trip-reconciliation-concurrency.test.mjs's own header for why
-// this exists). Proves the real write paths' logic (the financial-
-// activity block, the FK-safe delete order, archiving never touching
+// this exists). Proves the real write paths' logic (the recorded-
+// activity block -- meetings/notes AND financial history, active or
+// historical -- the FK-safe delete order, and archiving never touching
 // any other row) against SQLite's real transaction/constraint
 // semantics, not merely that a hand-typed copy of the intended SQL
 // behaves as expected.
@@ -103,27 +105,64 @@ async function run() {
     assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM trip_destination_regions WHERE trip_id = ?").get(tripId).n, 0, "its destination-region rows must be gone too -- no orphans left behind");
   }
 
-  // --- Deleting an empty trip that DOES have real, non-financial
-  // activity (a selected prospect, a scheduled/completed meeting) must
-  // still succeed -- only FINANCIAL activity blocks deletion, per the
-  // owner's own explicit scoping. ---
+  // --- A trip containing only prospects added for PLANNING -- selected
+  // for outreach, or manually added -- with no real meeting ever
+  // recorded against them, remains deletable. Neither selectTripProspect
+  // nor addManualProspect ever sets linked_interaction_id. ---
   {
     const db = freshDatabaseWithUserAndDonor();
     env.DB = db;
-    const { tripId } = await createTrip(USER_ID, { name: "Trip With Meetings", destinationRegionIds: [], startDate: NOW, endDate: NOW + 7 * 86400, goalCents: null, notes: null }, NOW);
+    const { tripId } = await createTrip(USER_ID, { name: "Trip With Only Planning Prospects", destinationRegionIds: [], startDate: NOW, endDate: NOW + 7 * 86400, goalCents: null, notes: null }, NOW);
     const selectResult = await selectTripProspect(USER_ID, tripId, DONOR_ID, "America/New_York", NOW);
     assert.equal(selectResult.ok, true);
     const manualResult = await addManualProspect(USER_ID, tripId, { name: "Unlinked Prospect", city: null, regionId: null, phone: null, email: null, notes: null }, NOW);
     assert.equal(manualResult.ok, true);
 
     const result = await deleteTrip(USER_ID, tripId);
-    assert.deepEqual(result, { ok: true }, "a trip with real prospects but zero financial activity must still be deletable");
+    assert.deepEqual(result, { ok: true }, "a trip with only planning-stage prospects (no recorded meeting, no financial activity) must still be deletable");
     assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM trip_prospects WHERE trip_id = ?").get(tripId).n, 0, "its prospect rows (including the manually-added, unlinked one) must be gone");
     // The donor record itself is completely unaffected.
     assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM donors WHERE id = ?").get(DONOR_ID).n, 1);
   }
 
-  // --- 5. Preventing unsafe deletion of a trip with real financial
+  // --- 5. Blocked by a RECORDED MEETING: any trip_prospects row whose
+  // linked_interaction_id is set (the real, permanent marker a
+  // scheduled/completed meeting -- and therefore possibly AI Meeting
+  // Notes -- exists), even with zero financial activity at all. This is
+  // the owner's own explicit tightening: "no meaningful recorded
+  // activity" now includes meetings/notes, not only money. ---
+  {
+    const db = freshDatabaseWithUserAndDonor();
+    env.DB = db;
+    const { tripId } = await createTrip(USER_ID, { name: "Trip With a Recorded Meeting", destinationRegionIds: ["chicago-suburbs"], startDate: NOW, endDate: NOW + 7 * 86400, goalCents: null, notes: null }, NOW);
+    const selectResult = await selectTripProspect(USER_ID, tripId, DONOR_ID, "America/New_York", NOW);
+    assert.equal(selectResult.ok, true);
+    // A second, innocuous planning-only prospect on the SAME trip --
+    // proves a block is never partial: this row must survive too.
+    const manualResult = await addManualProspect(USER_ID, tripId, { name: "Unrelated Planning Prospect", city: null, regionId: null, phone: null, email: null, notes: null }, NOW);
+    db.prepare(`INSERT INTO interactions (id, user_id, donor_id, type, occurred_at, summary, source, created_at, updated_at)
+        VALUES ('int1', ?, ?, 'meeting', ?, 'AI meeting notes: discussed capital campaign gift', 'capture-completed:1:completed:capture-scheduled:trip:trip:meeting', ?, ?)`)
+      .bind(USER_ID, DONOR_ID, NOW, NOW, NOW).run();
+    db.prepare(`UPDATE trip_prospects SET status = 'meeting_completed', linked_interaction_id = 'int1' WHERE id = ?`).bind(selectResult.prospectId).run();
+
+    const result = await deleteTrip(USER_ID, tripId);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "has_recorded_activity");
+    assert.match(result.detail, /meeting/i, "the refusal message must name the recorded meeting as the reason");
+    assert.match(result.detail, /Archive/, "the refusal message must point to Archive as the safe alternative");
+    // A blocked delete is NEVER partial -- BOTH prospect rows survive,
+    // not just the one that triggered the block.
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM trip_prospects WHERE trip_id = ?").get(tripId).n, 2, "a blocked delete must leave every trip_prospects row untouched, including the unrelated planning-only one");
+    // The real interaction (and its AI meeting notes text) is untouched.
+    const interaction = db.raw().prepare("SELECT summary FROM interactions WHERE id = 'int1'").get();
+    assert.equal(interaction.summary, "AI meeting notes: discussed capital campaign gift");
+    assert.ok(await getTrip(USER_ID, tripId), "a blocked delete must leave the trip itself fully intact");
+    // Every other trip-owned row (destination regions) survives too --
+    // a blocked delete truly changes nothing, anywhere.
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM trip_destination_regions WHERE trip_id = ?").get(tripId).n, 1);
+  }
+
+  // --- 6. Preventing unsafe deletion of a trip with real financial
   // activity (an active trip_financial_attributions row). ---
   {
     const db = freshDatabaseWithUserAndDonor();
@@ -137,7 +176,8 @@ async function run() {
 
     const result = await deleteTrip(USER_ID, tripId);
     assert.equal(result.ok, false);
-    assert.equal(result.reason, "has_financial_activity");
+    assert.equal(result.reason, "has_recorded_activity");
+    assert.match(result.detail, /pledge|donation|attribution/i, "the refusal message must name the financial activity as the reason");
     assert.match(result.detail, /Archive/, "the refusal message must point to Archive as the safe alternative");
     // Nothing was touched -- the trip, the attribution, the pledge, and
     // the donor all still exist exactly as they were.
@@ -146,7 +186,7 @@ async function run() {
     assert.equal(db.raw().prepare("SELECT balance_cents FROM giving_activities WHERE id = 'ga1'").get().balance_cents, 100000);
 
     // The same trip CAN be archived instead -- archiving has no
-    // financial-activity restriction at all.
+    // recorded-activity restriction at all.
     const archiveOk = await updateTrip(USER_ID, tripId, { archived: true }, NOW);
     assert.equal(archiveOk, true);
     assert.equal((await getTrip(USER_ID, tripId)).archivedAt, NOW);
@@ -166,14 +206,16 @@ async function run() {
 
     const result = await deleteTrip(USER_ID, tripId);
     assert.equal(result.ok, false);
-    assert.equal(result.reason, "has_financial_activity");
+    assert.equal(result.reason, "has_recorded_activity");
   }
 
-  // --- A commitment that was already MIGRATED into a real
-  // giving_activities row (and whose own attribution was later soft-
-  // removed/reconciled) no longer blocks deletion on its own -- the
-  // real financial fact has fully moved into the donor's own giving
-  // history, independent of this trip. ---
+  // --- 7. TIGHTENED RULE: a commitment that was already MIGRATED into a
+  // real giving_activities row, whose own resulting attribution was
+  // LATER soft-removed/reconciled, now STILL blocks deletion -- this is
+  // the owner's own explicit instruction ("a trip's financial history
+  // should not disappear because an attribution was subsequently
+  // removed or reconciled"), reversing this feature's original
+  // "historical financial activity doesn't block" design. ---
   {
     const db = freshDatabaseWithUserAndDonor();
     env.DB = db;
@@ -189,9 +231,13 @@ async function run() {
       .bind(USER_ID, tripId, manualResult.prospectId, NOW, NOW).run();
 
     const result = await deleteTrip(USER_ID, tripId);
-    assert.deepEqual(result, { ok: true }, "a migrated-then-reconciled commitment must not block deletion -- the real money now lives entirely in giving_activities, independent of this trip");
-    // The real giving_activities row and the donor survive untouched.
+    assert.equal(result.ok, false, "a trip's financial history (even reconciled/soft-removed) must still block permanent deletion");
+    assert.equal(result.reason, "has_recorded_activity");
+    assert.match(result.detail, /pledge|donation|attribution/i);
+    // Nothing was touched, including the historical rows themselves.
     assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM giving_activities WHERE id = 'ga2'").get().n, 1);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM trip_financial_attributions WHERE id = 'attr2'").get().n, 1);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM trip_prospect_commitments WHERE id = 'c2'").get().n, 1);
     assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM donors WHERE id = ?").get(DONOR_ID).n, 1);
   }
 

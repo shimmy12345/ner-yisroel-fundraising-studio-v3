@@ -1114,71 +1114,116 @@ export async function updateTrip(userId: string, tripId: string, update: { name?
   return true;
 }
 
-export type DeleteTripResult = { ok: true } | { ok: false; reason: "not_found" } | { ok: false; reason: "has_financial_activity"; detail: string };
+export type DeleteTripResult = { ok: true } | { ok: false; reason: "not_found" } | { ok: false; reason: "has_recorded_activity"; detail: string };
 
-// Delete Trip (2026-11-02, see docs/AI-HANDOFF.md's "Add Archive and
-// Delete Options to Trip Planner" entry). A real, permanent hard
-// delete -- but ONLY of this trip's own thin workflow rows
-// (trip_prospects, trip_destination_regions, and this trip's own
-// trip_financial_attributions/trip_prospect_commitments LINK rows).
-// Exactly the same "never cascade into real CRM/financial history"
-// discipline removeProspect() already follows for a single prospect
-// (above): `interactions` (the real meeting record, and its AI Meeting
-// Notes, which live in interactions.summary -- see
-// app/api/trips/[id]/prospects/[prospectId]/meeting-notes/route.ts),
-// `recommendations` (follow-ups), `giving_activities` (every real
-// pledge/gift), and the donor record itself are NEVER touched here --
-// deleting a trip only ever removes the TRIP's own wrapper around
-// them, never the underlying CRM facts.
+// Delete Trip (2026-11-02, tightened 2026-11-03 -- see docs/AI-
+// HANDOFF.md's "Add Archive and Delete Options to Trip Planner" and
+// "Final Safety Fix Before Trip Archive/Delete Production Deployment"
+// entries). A real, permanent hard delete -- but ONLY of this trip's
+// own thin workflow rows (trip_prospects, trip_destination_regions,
+// and this trip's own trip_financial_attributions/
+// trip_prospect_commitments LINK rows). Exactly the same "never
+// cascade into real CRM/financial history" discipline removeProspect()
+// already follows for a single prospect (above): `interactions` (the
+// real meeting record, and its AI Meeting Notes, which live in
+// interactions.summary -- see app/api/trips/[id]/prospects/
+// [prospectId]/meeting-notes/route.ts), `recommendations` (follow-ups),
+// `giving_activities` (every real pledge/gift), and the donor record
+// itself are NEVER touched here -- deleting a trip only ever removes
+// the TRIP's own wrapper around them, never the underlying CRM facts.
 //
-// Blocked outright -- never silently drops or orphans real money --
-// if this trip has any ACTIVE (not already soft-removed, and for a
-// commitment, not already migrated into a real giving_activities row)
-// financial link: a real trip_financial_attributions row pointing at
-// an actual pledge/gift, or a real trip_prospect_commitments row for
-// an unlinked prospect's own reported pledge/gift. The owner's own
-// "prevent permanent deletion of trips with linked financial
-// activity" + "prefer a conservative deletion policy over a
-// complicated system that risks financial data" instructions are both
-// satisfied by refusing outright rather than attempting any kind of
-// automatic reattribution -- Archive Trip is the always-safe
-// alternative here, since it deletes nothing at all.
+// Blocked outright -- never a partial/forced delete -- if this trip
+// has any MEANINGFUL RECORDED ACTIVITY:
+//   - a completed or otherwise recorded donor meeting: any
+//     trip_prospects row with linked_interaction_id set. This is set
+//     exactly once, the moment a real `interactions` row is created
+//     for a scheduled/completed meeting (statusRequiresInteraction()
+//     in trip-model.ts), and is NEVER cleared afterward by any status
+//     change (confirmed by inspection: every write to this column in
+//     this file only ever SETS it) -- so this is a permanent, reliable
+//     marker that "a real meeting, and therefore possibly AI Meeting
+//     Notes, exists for this prospect." A prospect that only ever
+//     reached not_contacted/contacted/meeting_requested/declined/
+//     unable_to_schedule -- none of which create a real interaction --
+//     never sets this, so a trip of purely-planning-stage prospects
+//     remains deletable, per the owner's own explicit scoping.
+//   - ANY trip_financial_attributions or trip_prospect_commitments row
+//     for this trip AT ALL -- active or historical/soft-removed/
+//     migrated/reconciled. Earlier this feature only blocked on
+//     currently-ACTIVE financial links; the owner's own explicit
+//     instruction ("a trip's financial history should not disappear
+//     because an attribution was subsequently removed or reconciled")
+//     widens this to any row ever having existed, so a trip's real
+//     financial history can never be erased merely by deleting the
+//     trip after the fact.
+// Archive Trip is the always-safe alternative, since it deletes
+// nothing at all.
 //
-// D1 enforces every foreign key unconditionally, with no way to
-// disable it (confirmed against real D1 in this project's own prior
-// review -- see drizzle/pending-review/0049's header comment), so
-// every child row referencing this trip must be deleted BEFORE the
-// `trips` row itself, in exactly this children-before-parents order,
-// as one atomic batch (every row gone, or none): a
-// trip_prospect_commitments row can reference BOTH trip_prospects AND
-// trip_financial_attributions (via migrated_attribution_id), so it
-// must go first; trip_financial_attributions and trip_prospects can
-// then both be deleted safely; trip_destination_regions and finally
-// `trips` itself follow.
+// ATOMICITY AND CONCURRENCY SAFETY: the activity check above is NOT a
+// separate read-then-act step (which would leave a window for a
+// concurrent request to add a meeting/note/financial record between
+// the check and the delete) -- it is embedded as a `NOT EXISTS (...)`
+// guard directly inside EVERY delete statement below, all sent
+// together in one `env.DB.batch()` call. D1 batch() executes as a
+// single atomic transaction (BEGIN IMMEDIATE, acquiring a write lock
+// up front, same guarantee this project's own prior concurrency fix
+// relies on -- see drizzle/0051's trip_financial_attributions_active_
+// reconciled_pending_uidx and tests/trip-reconciliation-concurrency.
+// test.mjs), so the guard and every delete are evaluated against the
+// exact same, final, serialized database state -- a concurrent insert
+// either completes entirely before this transaction starts (and is
+// therefore seen and correctly blocks it) or waits until after this
+// transaction commits (and if this transaction proceeded, there was
+// nothing for it to have raced against). If the guard fails, every
+// statement in the batch matches zero rows -- the whole operation is a
+// true no-op, never a partial delete -- and the batch still commits
+// (committing zero changes), so this never needs a manual ROLLBACK.
+function deleteTripActivityGuardSql(): string {
+  return `NOT EXISTS (
+      SELECT 1 FROM trip_prospects WHERE trip_id = ? AND linked_interaction_id IS NOT NULL
+      UNION ALL SELECT 1 FROM trip_financial_attributions WHERE trip_id = ?
+      UNION ALL SELECT 1 FROM trip_prospect_commitments WHERE trip_id = ?
+    )`;
+}
+
+// Read-only, run only AFTER a blocked (no-op) delete, purely to build a
+// specific, helpful message -- never load-bearing for safety, which
+// the atomic guard above already enforced.
+async function describeTripDeleteBlockers(tripId: string): Promise<string> {
+  const flags = await env.DB.prepare(`SELECT
+      EXISTS (SELECT 1 FROM trip_prospects WHERE trip_id = ? AND linked_interaction_id IS NOT NULL) AS has_meeting,
+      EXISTS (SELECT 1 FROM trip_financial_attributions WHERE trip_id = ?) AS has_attribution,
+      EXISTS (SELECT 1 FROM trip_prospect_commitments WHERE trip_id = ?) AS has_commitment`)
+    .bind(tripId, tripId, tripId).first<{ has_meeting: number; has_attribution: number; has_commitment: number }>();
+  const reasons: string[] = [];
+  if (flags?.has_meeting) reasons.push("completed or scheduled donor meetings, including any meeting notes recorded on them");
+  if (flags?.has_attribution || flags?.has_commitment) reasons.push("pledges, donations, or financial attributions -- including ones that were later removed or reconciled");
+  const reasonText = reasons.length > 0 ? reasons.join(" and ") : "recorded activity";
+  return `This trip has ${reasonText}, and cannot be permanently deleted -- deleting it would risk losing real trip history or financial records. Archive it instead to hide it from your active trip list while preserving everything exactly as it is.`;
+}
+
 export async function deleteTrip(userId: string, tripId: string): Promise<DeleteTripResult> {
   const trip = await env.DB.prepare(`SELECT id FROM trips WHERE id = ? AND owner_user_id = ?`).bind(tripId, userId).first<{ id: string }>();
   if (!trip) return { ok: false, reason: "not_found" };
 
-  const activity = await env.DB.prepare(`SELECT
-      EXISTS (SELECT 1 FROM trip_financial_attributions WHERE trip_id = ? AND removed_at IS NULL) AS has_attribution,
-      EXISTS (SELECT 1 FROM trip_prospect_commitments WHERE trip_id = ? AND removed_at IS NULL AND migrated_at IS NULL) AS has_commitment`)
-    .bind(tripId, tripId).first<{ has_attribution: number; has_commitment: number }>();
-  if (activity?.has_attribution || activity?.has_commitment) {
-    return {
-      ok: false,
-      reason: "has_financial_activity",
-      detail: "This trip has real pledges or donations attributed to it and cannot be permanently deleted -- deleting it would risk losing or orphaning that financial record. Archive it instead to hide it from your active trip list while preserving every pledge, donation, and donor record exactly as it is.",
-    };
-  }
+  const guard = deleteTripActivityGuardSql();
+  const results = await env.DB.batch([
+    env.DB.prepare(`DELETE FROM trip_prospect_commitments WHERE trip_id = ? AND ${guard}`).bind(tripId, tripId, tripId, tripId),
+    env.DB.prepare(`DELETE FROM trip_financial_attributions WHERE trip_id = ? AND ${guard}`).bind(tripId, tripId, tripId, tripId),
+    env.DB.prepare(`DELETE FROM trip_prospects WHERE trip_id = ? AND ${guard}`).bind(tripId, tripId, tripId, tripId),
+    env.DB.prepare(`DELETE FROM trip_destination_regions WHERE trip_id = ? AND ${guard}`).bind(tripId, tripId, tripId, tripId),
+    env.DB.prepare(`DELETE FROM trips WHERE id = ? AND owner_user_id = ? AND ${guard}`).bind(tripId, userId, tripId, tripId, tripId),
+  ]) as unknown as { meta: { changes?: number } }[];
 
-  await env.DB.batch([
-    env.DB.prepare(`DELETE FROM trip_prospect_commitments WHERE trip_id = ?`).bind(tripId),
-    env.DB.prepare(`DELETE FROM trip_financial_attributions WHERE trip_id = ?`).bind(tripId),
-    env.DB.prepare(`DELETE FROM trip_prospects WHERE trip_id = ?`).bind(tripId),
-    env.DB.prepare(`DELETE FROM trip_destination_regions WHERE trip_id = ?`).bind(tripId),
-    env.DB.prepare(`DELETE FROM trips WHERE id = ? AND owner_user_id = ?`).bind(tripId, userId),
-  ]);
-  return { ok: true };
+  const tripRowDeleted = (results[results.length - 1]?.meta.changes ?? 0) > 0;
+  if (tripRowDeleted) return { ok: true };
+
+  // The batch was a no-op -- either blocked, or (rare) the trip was
+  // concurrently deleted between the ownership check above and this
+  // batch. Distinguish them with one more read-only check.
+  const stillExists = await env.DB.prepare(`SELECT id FROM trips WHERE id = ? AND owner_user_id = ?`).bind(tripId, userId).first<{ id: string }>();
+  if (!stillExists) return { ok: false, reason: "not_found" };
+  return { ok: false, reason: "has_recorded_activity", detail: await describeTripDeleteBlockers(tripId) };
 }
 
 // Trip Fundraising Results Dashboard (2026-10-16, see docs/AI-HANDOFF.md).

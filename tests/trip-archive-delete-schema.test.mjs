@@ -171,4 +171,41 @@ function seedUser(db, userId = "u1") {
   assert.equal(interaction.summary, "AI meeting notes: discussed capital campaign", "the AI meeting notes text itself must be completely unaffected");
 }
 
+// --- Final Safety Fix (2026-11-03, see docs/AI-HANDOFF.md): the
+// recorded-activity GUARD ITSELF (the exact `NOT EXISTS (...)` clause
+// lib/relationships/trips-data.ts's deleteTrip() embeds in every delete
+// statement), exercised directly at the SQL level against a real
+// trip_prospects row with linked_interaction_id set. Proves the guard
+// makes the whole batch a true no-op -- never a partial delete -- when
+// a trip has a recorded meeting, with zero financial activity at all. ---
+{
+  const db = freshDatabase();
+  seedUser(db);
+  db.prepare(`INSERT INTO donors (id, owner_user_id, data_source, display_name, created_at, updated_at) VALUES ('d1', 'u1', 'live', 'Jane Donor', ?, ?)`).run(NOW, NOW);
+  db.prepare(`INSERT INTO interactions (id, user_id, donor_id, type, occurred_at, summary, source, created_at, updated_at)
+    VALUES ('int2', 'u1', 'd1', 'meeting', ?, 'Completed meeting notes', 'capture-completed:1:completed:capture-scheduled:trip:trip-guard:meeting', ?, ?)`).run(NOW, NOW, NOW);
+  db.prepare(`INSERT INTO trips (id, owner_user_id, name, start_date, end_date, status, created_at, updated_at)
+    VALUES ('trip-guard', 'u1', 'Trip', ?, ?, 'planning', ?, ?)`).run(NOW, NOW + 7 * 86400, NOW, NOW);
+  db.prepare(`INSERT INTO trip_prospects (id, trip_id, donor_id, added_method, status, linked_interaction_id, selected_at, created_at, updated_at)
+    VALUES ('p-guard', 'trip-guard', 'd1', 'manual', 'meeting_completed', 'int2', ?, ?, ?)`).run(NOW, NOW, NOW);
+
+  const guard = `NOT EXISTS (
+      SELECT 1 FROM trip_prospects WHERE trip_id = ? AND linked_interaction_id IS NOT NULL
+      UNION ALL SELECT 1 FROM trip_financial_attributions WHERE trip_id = ?
+      UNION ALL SELECT 1 FROM trip_prospect_commitments WHERE trip_id = ?
+    )`;
+  db.exec("BEGIN IMMEDIATE");
+  db.prepare(`DELETE FROM trip_prospect_commitments WHERE trip_id = ? AND ${guard}`).run("trip-guard", "trip-guard", "trip-guard", "trip-guard");
+  db.prepare(`DELETE FROM trip_financial_attributions WHERE trip_id = ? AND ${guard}`).run("trip-guard", "trip-guard", "trip-guard", "trip-guard");
+  db.prepare(`DELETE FROM trip_prospects WHERE trip_id = ? AND ${guard}`).run("trip-guard", "trip-guard", "trip-guard", "trip-guard");
+  db.prepare(`DELETE FROM trip_destination_regions WHERE trip_id = ? AND ${guard}`).run("trip-guard", "trip-guard", "trip-guard", "trip-guard");
+  const tripsResult = db.prepare(`DELETE FROM trips WHERE id = ? AND owner_user_id = ? AND ${guard}`).run("trip-guard", "u1", "trip-guard", "trip-guard", "trip-guard");
+  db.exec("COMMIT");
+
+  assert.equal(tripsResult.changes, 0, "the guarded delete of the trips row must affect zero rows when a recorded meeting exists");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM trips WHERE id = 'trip-guard'").get().n, 1, "the trip itself must still exist -- the guard made the WHOLE batch a no-op, not a partial delete");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM trip_prospects WHERE trip_id = 'trip-guard'").get().n, 1, "the trip_prospects row must still exist too");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM interactions WHERE id = 'int2'").get().n, 1, "the real interaction is, as always, never even referenced by these statements");
+}
+
 process.stdout.write("trip-archive-delete-schema.test.mjs: all assertions passed\n");
