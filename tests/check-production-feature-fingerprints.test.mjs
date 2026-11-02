@@ -39,6 +39,8 @@ async function run() {
     const completeDist = new Map([
       ["dist/client/app.js", "AddToGoogleCalendarLink(...); Use donor address"],
       ["dist/server/index.js", "scheduleProspectMeeting(...); completeProspectMeeting(...); runScheduledAgendaSend(...)"],
+      ["dist/client/index.css", ".travel-planning-region-hint { margin:0; }"],
+      ["dist/server/trip-region-filter.js", "function effectiveRegionFilter(...) {}"],
     ]);
     const result = evaluateFingerprints(completeDist, FEATURE_FINGERPRINTS);
     assert.equal(result.ok, true);
@@ -73,7 +75,7 @@ async function run() {
       writeFileSync(path.join(tempDistDir, "server", "index.js"), `// ${allFingerprints}`);
       const result = spawnSync("node", ["--experimental-strip-types", scriptPath, tempDistDir], { encoding: "utf8" });
       assert.equal(result.status, 0, `expected success; stderr: ${result.stderr}`);
-      assert.match(result.stdout, /All 5 feature fingerprints found\./);
+      assert.match(result.stdout, new RegExp(`All ${FEATURE_FINGERPRINTS.length} feature fingerprints found\\.`));
       assert.match(result.stdout, /All feature fingerprints present and all behavioral checks passed\./);
     } finally {
       rmSync(tempDistDir, { recursive: true, force: true });

@@ -53,6 +53,8 @@ export const FEATURE_FINGERPRINTS = [
   { feature: "Trip Planner: meeting scheduling", pattern: "scheduleProspectMeeting" },
   { feature: "Trip Planner: meeting completion", pattern: "completeProspectMeeting" },
   { feature: "Daily Fundraising Agenda: scheduled send", pattern: "runScheduledAgendaSend" },
+  { feature: "Trip Planner: Find prospects defaults to trip regions", pattern: "effectiveRegionFilter" },
+  { feature: "Trip Planner: mobile region checkbox layout", pattern: "travel-planning-region-hint" },
 ];
 
 // Each one run for real (a child process, not merely checked for
@@ -64,6 +66,8 @@ export const BEHAVIORAL_CHECK_TEST_FILES = [
   "tests/trip-calendar-link.test.mjs",
   "tests/trip-calendar-missing-table-regression.test.mjs",
   "tests/d1-restore-order.test.mjs",
+  "tests/trip-region-filter.test.mjs",
+  "tests/trip-region-mobile-layout.test.mjs",
 ];
 
 function collectFileContents(rootDir) {

@@ -60049,3 +60049,153 @@ added to `FEATURE_FINGERPRINTS`
 independently re-verified against real, live Production, the same way
 every other feature on that list was. No unresolved issues identified;
 ready for a Production deployment once authorized.
+
+## Authorized Production Deployment: Trip Region Fix (2026-11-02) -- DEPLOYED AND VERIFIED LIVE
+
+Owner authorized deployment of commit `01dbd8d961c6051657185d037cbc27a8ea39715f`
+(the entry immediately above) to Production.
+
+### Pre-deployment checks -- all passed, each with live or fresh evidence
+
+1. **Current Production Worker version and source commit, confirmed
+   two independent ways, not assumed from prior notes**: `wrangler
+   deployments status` showed the live Worker version
+   (`b75eedb7-e5e2-40a6-bb93-345338823cb6`, created
+   `2026-11-01T20:34:28.699Z`) exactly matching the version ID recorded
+   from the prior deployment (source commit `2536c52`); separately, the
+   live `/health` page's own "Deployed version" readout independently
+   confirmed `2536c52` as well.
+2. **Branch ancestry, run for real**:
+   `node scripts/check-production-branch-ancestry.mjs
+   2536c526e9c5acfdc006653a95e9b011983e1136
+   01dbd8d961c6051657185d037cbc27a8ea39715f` --
+   confirmed the candidate commit is a real descendant of the live
+   Production commit.
+3. **Both deployment safeguards exercised for real** as part of the
+   actual `deploy:production-independent` run (not a separate manual
+   step): branch-ancestry check passed; feature-fingerprint check found
+   all 5 fingerprints then defined, and all 3 behavioral tests then
+   listed passed.
+4. **251/251 test files passed**, fresh, at the exact commit about to
+   deploy, on a clean working tree (confirmed via `git status`/`git
+   rev-parse HEAD` matching the authorized commit exactly).
+5. **`tsc --noEmit` and `build:production-independent` both clean.**
+6. **Latest Production backup and restore-verification confirmed
+   live** via the real `/health` page: "Automated backup" --
+   completed successfully `2026-11-01T18:28:14Z`; "Monthly restore
+   test" -- "Successfully restored and verified the Nov 1, 2026
+   backup," `2026-11-01T18:33` -- the same, still-current evidence
+   from the prior deployment (nothing had changed in Production since,
+   so no new backup cycle had run, and none was needed).
+7. **No migration needed**, confirmed by `git diff --stat
+   2536c52..01dbd8d -- drizzle/` showing zero migration files changed
+   -- this fix is purely additive application-layer `SELECT`s and
+   client-side logic.
+8. **Rollback target recorded**: `b75eedb7-e5e2-40a6-bb93-345338823cb6`
+   (the Worker version live immediately before this deployment).
+
+### Deployment
+
+`PRODUCTION_LIVE_COMMIT=2536c526e9c5acfdc006653a95e9b011983e1136 pnpm
+run deploy:production-independent` -- the full safeguard chain ran for
+real (build -> verify-build-manifest OK -> fingerprint check 5/5 found
++ 3 behavioral checks passed -> ancestry check passed ->
+`wrangler deploy` succeeded). **New Production Worker version:
+`ad68bdc5-0f92-4c44-8788-b6d92ab35456`**, created
+`2026-11-02T00:57:52.644Z`, confirmed live at 100% via a follow-up
+`wrangler deployments status`.
+
+### Post-deployment verification -- against real, live Production
+
+- **Deployed commit confirmed**: the live `/health` page's "Deployed
+  version" now reads `01dbd8d`, matching the authorized commit exactly.
+- **Single-region trip ("Teaneck-10/20/26," a real, completed trip
+  with real pledges/donations totaling $17,500 against a $15,000 goal
+  and 11 real selected prospects)**: opening Find Prospects
+  auto-selected its one saved region ("North/Central NJ --
+  Teaneck/Bergenfield area") with zero manual re-selection --
+  "Showing 47 of 297 donors in North/Central NJ -- Teaneck/Bergenfield
+  area."
+- **Multi-region trip ("NYC," 4 real saved regions)**: all 4 regions
+  pre-checked, "Showing 105 of 297 donors" across all four; unchecking
+  "Queens & western Long Island, NY" left the other THREE regions
+  checked and in effect (93 of 297 donors, URL confirming exactly the
+  3 remaining region ids) -- the exact root-cause regression,
+  reproduced and confirmed fixed against real Production data, not
+  only a unit test or Staging rehearsal.
+- **Name search ignores the region filter, on real Production donors**:
+  with only 3 of the NYC trip's 4 regions checked, searching "Cohen"
+  returned "Showing 5 of 297 donors matching "Cohen" across every
+  region."
+- **Mobile layout confirmed via computed styles read directly off the
+  live Production page**: `flexDirection: "row"`, `alignItems:
+  "center"`, `minHeight: "44px"`, a fixed, non-shrinking 18px checkbox,
+  `overflowWrap: "anywhere"` -- plain CSS flexbox, not media-query
+  gated, so this renders identically at any real device width.
+- **"Add to Google Calendar" still present and byte-identical** on all
+  5 real scheduled meetings on the "Teaneck-10/20/26" trip; the
+  Bashevkin link's href was re-read and matches the exact value
+  recorded in the prior deployment's verification, unchanged.
+- **"Use donor address" still functional, verified without creating
+  any real data**: opened the scheduling panel for the real,
+  not-yet-scheduled donor Kopstick, clicked "Use donor address" --
+  the location field filled with his real on-file address ("122
+  Maiden Ln, Bergenfield, NJ 07621-4102") -- then clicked Cancel, never
+  Confirm. A direct, read-only D1 re-check afterward confirmed his
+  real record (`status: not_contacted`, `meeting_location: null`) was
+  never touched.
+- **Existing trip prospects and meeting information intact**: all
+  three real trips' saved regions, prospect counts, and financial
+  totals render exactly as before.
+- **Zero Google Calendar network activity and zero console errors**
+  throughout the entire verification session.
+- **No unrelated donor or financial data changed**: `donors` (297),
+  `giving_activities` (5960), `trips` (3), `trip_prospects` (51), and
+  `trip_destination_regions` (6) row counts confirmed byte-identical
+  before and after this entire round, via direct, read-only queries.
+
+### Post-deployment safeguard maintenance (separate, NOT itself deployed)
+
+Per `docs/PRODUCTION-FEATURE-BASELINE.md`'s own pre-deployment
+checklist ("add a new fingerprint entry ... the same day a feature is
+independently verified working"), added two new entries to
+`FEATURE_FINGERPRINTS` (`effectiveRegionFilter`,
+`travel-planning-region-hint`) and the two new test files
+(`tests/trip-region-filter.test.mjs`,
+`tests/trip-region-mobile-layout.test.mjs`) to
+`BEHAVIORAL_CHECK_TEST_FILES`, now that both features are independently
+verified live above. Updated `tests/check-production-feature-fingerprints.test.mjs`'s
+own fixtures/assertions to match (7 fingerprints, 5 behavioral checks)
+and reconfirmed: 251/251 tests still pass, `tsc` clean, a fresh
+Production build still finds all 7 fingerprints and passes all 5
+behavioral checks. **This is a dev-tooling/safeguard-script change
+only -- `scripts/` is never bundled into the deployed Next.js
+application -- so it does not change, and did not require redeploying,
+the live Production app**, which remains running exactly commit
+`01dbd8d961c6051657185d037cbc27a8ea39715f` as authorized. Committed as
+a separate, clearly-labeled follow-up commit.
+
+### Final report
+
+1. **Deployed commit**: `01dbd8d961c6051657185d037cbc27a8ea39715f`.
+   **New Production Worker version**:
+   `ad68bdc5-0f92-4c44-8788-b6d92ab35456`.
+2. **Previous Worker version, retained as rollback target**:
+   `b75eedb7-e5e2-40a6-bb93-345338823cb6`.
+3. **Pre-deployment**: all 8 checks above passed, each with live or
+   fresh evidence, not assumed from prior notes.
+4. **Production verification**: all items above confirmed against
+   real, live Production -- region defaults, multi-region toggle
+   preservation, cross-region name search, mobile layout, existing
+   trip data, "Use donor address," and "Add to Google Calendar" all
+   working correctly, with zero regressions observed.
+5. **Donor/financial data preserved**: confirmed identical row counts
+   (`donors` 297, `giving_activities` 5960, `trips` 3, `trip_prospects`
+   51, `trip_destination_regions` 6) before and after.
+6. **Unresolved issues**: none. The fix is live, verified, and no
+   regression was observed anywhere in this round.
+
+No Production donor record, pledge, payment, or trip assignment was
+modified. No database migration applied. No credential changed. No
+background Google Calendar synchronization enabled. No unrelated
+changes deployed.
