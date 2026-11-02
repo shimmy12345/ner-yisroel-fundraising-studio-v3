@@ -60818,3 +60818,321 @@ recreation. No unrelated schema change. No real trip was created,
 archived, or deleted to test this feature -- the completed Staging
 tests are the evidence for those destructive workflows, per explicit
 instruction.
+
+## Investigation: The Two Pre-Existing "Production ↔ Baseline Schema" Differences -- `interactions` and `trip_prospects` (2026-11-02)
+
+Read-only investigation, per explicit instruction: no Production data
+modified, no migration run, nothing deployed. Every claim below is
+sourced from direct, live, read-only D1 queries against both real
+environments and from direct code/migration-file reads performed this
+round; verified facts and inferences are labeled separately below.
+
+### 1. Exact differences reported
+
+The live `/health` page's "Production ↔ baseline schema" card (backed
+by `compareSchemaObjects()` in `lib/data-health/production-baseline.ts`,
+comparing live Production D1's real DDL against the packaged
+`production-baseline/schema-manifest.json`) reports exactly two
+differences, unchanged across every check this round (including a
+fresh, live-re-run "Run health check," not a stale cached report):
+```
+Table definition differs: interactions (columns or constraints).
+Table definition differs: trip_prospects (columns or constraints).
+```
+No missing table, no unexpected table, no index difference of any
+kind -- confirmed separately by directly comparing every index on both
+tables (6 total: `interactions_donor_date_idx`,
+`interactions_shared_activity_donor_uidx`,
+`interactions_shared_activity_idx`, `trip_prospects_donor_idx`,
+`trip_prospects_trip_donor_idx`, `trip_prospects_trip_selected_idx`)
+byte-for-byte against the baseline -- all 6 match exactly.
+
+**Important distinction, verified this round**: this is a DIFFERENT
+comparison from the recurring `check-main-restore-sync.mjs` failure
+seen throughout this session (which also names `interactions` and
+`trip_prospects`, plus `trips` and a missing index). That script
+compares THIS branch's `production-baseline/schema-manifest.json`
+against `main` branch's own, separately-committed copy -- a git-branch-
+to-git-branch drift check for the backup/restore GitHub Actions
+workflow, unrelated to the live Production database, and already
+tracked as a known, accepted gap in `docs/D1-MIGRATION-SYNC-PROCESS.md`
+(main's own manifest is generally stale, which is why it also flags
+`trips`/the new index -- things that are NOT live-Production problems,
+since migration 0056 was confirmed applied and matching earlier this
+same round). This investigation is specifically about the OTHER
+comparison: real, live Production D1 vs. this branch's own current,
+just-regenerated baseline.
+
+### 2. Live Production schema vs. the complete migration history -- exact comparison
+
+Queried directly, live, read-only, this round (`SELECT sql FROM
+sqlite_master WHERE type='table' AND name=...`):
+
+**`interactions`** -- Production's real column list (in physical
+order): `id, donor_id, user_id, type, occurred_at, summary, source,
+created_at, updated_at, occurred_at_date_only, shared_activity_id,
+role, write_token, all_day, all_day_date, end_at, location`. The
+packaged baseline expects the identical 17 columns, with identical
+types/defaults/constraints for every one -- confirmed by extracting
+and sorting both column lists programmatically: **the sets are
+byte-for-byte identical**. The ONLY difference is physical position:
+baseline places `write_token` LAST (after `all_day`/`all_day_date`/
+`end_at`/`location`); Production has it BEFORE them.
+
+**`trip_prospects`** -- Production's real column list has 25 columns:
+every column the baseline expects (`id` through `updated_at`, 23
+columns from migrations 0045/0047/0054), **plus two the baseline does
+NOT expect at all: `all_day`, `all_day_date`**. Verified programmatically
+(sorted column-list diff): `onlyInLiveProduction = ["all_day",
+"all_day_date"]`, `onlyInBaseline = []`. Every other column, every
+type, the `added_method`/`status` CHECK constraints, the
+donor-or-manual-name CHECK, and all three foreign keys match exactly.
+
+### 3. Root cause -- real divergence, correctly detected; not a comparison bug, not simply "baseline needs regenerating"
+
+Both differences are **genuine, reproducible facts about how these two
+specific migrations were actually applied to Production over this
+project's real history, not a defect in the comparison logic and not
+resolvable by merely re-running `generate-production-baseline.mjs`**
+(confirmed: that script's own replay order is `fs.readdirSync(...).sort()`
+-- a strict, ascending, numeric-filename replay against a fresh,
+empty SQLite database, always, regardless of what order any real
+environment actually received these changes in).
+
+- **`interactions` (pure column-order divergence, zero structural
+  difference)**: `0052_interaction_write_proof_token.sql` (`ALTER
+  TABLE interactions ADD COLUMN write_token text`) was evidently
+  applied to Production BEFORE `0048_google_calendar_sync.sql`'s own
+  `interactions` column additions (`all_day`/`all_day_date`/`end_at`/
+  `location`) -- the reverse of the two files' numeric order. SQLite's
+  `ALTER TABLE ADD COLUMN` always appends to the END of the table's
+  CURRENT column list at the moment it runs, so whichever of these two
+  migrations' relevant statements physically executed first on
+  Production ended up positioned earlier in the stored schema text.
+  A byte-for-byte replay of the files in strict numeric order (what
+  the baseline generator always does) necessarily produces `write_token`
+  last instead.
+- **`trip_prospects` (Production has two genuine extra columns the
+  baseline/Staging lack)**: `0054_trip_manual_prospects.sql` performs
+  a full table rebuild (`CREATE __new_trip_prospects` / copy via an
+  explicit, named `INSERT ... SELECT` / `DROP` / `RENAME` -- SQLite has
+  no `ALTER COLUMN` to drop a `NOT NULL` constraint, which is this
+  migration's real purpose). Its own `CREATE TABLE __new_trip_prospects`
+  statement, and its own `INSERT INTO __new_trip_prospects (...) SELECT
+  (...) FROM trip_prospects` column list, **both only name the 17
+  columns that existed as of migrations 0045/0047 -- neither one
+  mentions `all_day`/`all_day_date`, the two columns
+  `0048_google_calendar_sync.sql` (an EARLIER-numbered migration) adds**.
+  This is a genuine latent bug in migration 0054 itself: replayed in
+  strict numeric order (0048 then 0054, exactly what a fresh bootstrap
+  or `generate-production-baseline.mjs` always does), 0054's rebuild
+  would SILENTLY DROP the two columns 0048 had just added one migration
+  earlier. **Confirmed empirically this round**: Staging's real,
+  live `trip_prospects` -- which, unlike Production, genuinely was
+  built by applying these migrations via the normal sequential
+  deployment process -- is in fact missing `all_day`/`all_day_date`
+  entirely, exactly as this bug predicts. Production's real
+  `trip_prospects` has them (positioned LAST, right after `updated_at`)
+  only because, on Production specifically, migration 0054's rebuild
+  was applied to a `trip_prospects` table that did NOT yet have
+  0048's two columns (so there was nothing for the rebuild to drop),
+  and 0048's `trip_prospects`-specific `ALTER TABLE ADD COLUMN`
+  statements were applied separately, afterward, directly onto the
+  already-rebuilt (post-0054) table -- appending them at the end. In
+  other words: **Production's real, incremental, per-round deployment
+  history accidentally avoided a bug that a byte-for-byte, from-scratch
+  replay of the same files in numeric order would reintroduce.**
+
+Neither difference is an "outdated baseline" in the simple sense of
+"just needs regenerating" -- regenerating it changes nothing here,
+since the generator always replays in the same strict order regardless
+of when it's run. Both are real, verified facts about physical column
+layout and (for `trip_prospects`) a real, verified gap in what a
+fresh/Staging bootstrap of migration 0054 actually produces relative
+to what Production happens to have.
+
+### 4. Could this affect donor meeting history, AI Meeting Notes, trip prospects, or financial records?
+
+**No -- verified, not assumed.** Three independent lines of evidence:
+
+1. **Every write in this codebase against these two tables uses an
+   explicit, named column list** -- confirmed by a direct search of
+   every `INSERT INTO trip_prospects`/`INSERT INTO interactions`
+   statement in `lib/relationships/trips-data.ts` (the sole D1-touching
+   module for this feature area): all four use `INSERT INTO table (col1,
+   col2, ...) VALUES (...)`, never a bare positional `INSERT INTO table
+   VALUES (...)`. Physical column order on disk is irrelevant to
+   correctness for a named-column statement; D1/SQLite always binds by
+   name, never by position, for these. Every `SELECT` throughout this
+   codebase (and D1's own `.all()`/`.first()` result shape, which
+   returns JS objects keyed by column name, never arrays) is the same --
+   there is no code path anywhere in this application that could be
+   affected by a column's physical position.
+2. **The two extra `trip_prospects` columns on Production
+   (`all_day`/`all_day_date`) are provably dead code**: a repository-
+   wide search found them referenced ONLY in `drizzle/
+   0048_google_calendar_sync.sql` itself and its own dedicated
+   rehearsal test (`tests/trip-calendar-migration-0048-production-
+   rehearsal.test.mjs`) -- zero references anywhere in `lib/`, `app/`,
+   or any other test. The feature's own real display logic reads
+   `interactions.all_day`/`all_day_date` directly (the authoritative
+   source, per 0048's own header comment: "never a second independent
+   source of truth") -- `trip_prospects.all_day`/`all_day_date` were
+   evidently never actually wired into any read path.
+3. **This exact live Production schema (both differences, as they
+   stand today) has already been exercised successfully, repeatedly,
+   this session** -- AI Meeting Notes links, meeting scheduling/
+   rescheduling/completion/cancellation, "Use donor address," "Add to
+   Google Calendar," manually-added prospects, and Archive/Delete were
+   all independently verified live against this real Production
+   database in multiple prior rounds, with zero errors and zero
+   orphaned/incorrect data. This is first-hand, already-gathered
+   evidence of real-world safety, not an inference.
+
+Financial records (`giving_activities`, `trip_financial_attributions`,
+`trip_prospect_commitments`, pledges, payments) are not implicated at
+all -- neither reported difference touches those tables; the live
+schema comparison reported zero differences for any of them.
+
+### 5. Staging comparison and recurrence risk
+
+**Staging's `interactions` matches the baseline exactly** (confirmed
+live): its own real column order already has `write_token` last,
+matching the baseline -- Staging's deployment history for these two
+migrations happened to land in the same relative order the files are
+numbered in, unlike Production's.
+
+**Staging's `trip_prospects` does NOT have `all_day`/`all_day_date`
+at all** -- confirmed live, exactly matching the baseline (both are
+"behind" Production for this specific pair of dead columns). Since
+nothing reads or writes them, this has no functional consequence for
+Staging either.
+
+**Could a future deployment recreate this class of discrepancy?
+Yes, very likely, for `interactions`-style column-order drift
+specifically.** This project's real deployment pattern -- confirmed
+across this entire session's history -- is individual, per-round
+`wrangler d1 execute --file` application of specific migrations to
+Production, not a single ordered migration-runner execution per
+environment. Any future pair of migrations that both add columns to
+the same existing table, applied to Production in a different round-
+order than their file numbers, will reproduce exactly this kind of
+false "Table definition differs" alarm, for any table, not only these
+two. The `trip_prospects`-style "a later migration's rebuild silently
+drops an earlier migration's columns" class of bug is specific to
+migration 0054's own rebuild and does not recur automatically for
+future migrations unless a FUTURE table rebuild similarly forgets to
+carry forward a column added by an intervening, not-yet-rebuilt-around
+migration -- a risk worth flagging in migration-authoring practice
+generally, not just fixing this one instance.
+
+### 6. Recommended smallest safe correction (not implemented this round, per instruction)
+
+This is not a single fix -- the two differences have different correct
+remedies:
+
+**For `interactions` (pure Health-check limitation, no database change
+needed on any environment):** `compareSchemaObjects()`'s
+`normalizeSchemaSql()` only collapses whitespace before a raw string-
+equality check, so it is inherently sensitive to column order even
+when every column, type, and constraint is identical. The smallest
+safe, system-wide correction is to make the TABLE comparison (not the
+index comparison, which has no equivalent order concern) parse each
+`CREATE TABLE` statement's column/constraint clauses into a
+normalized, ORDER-INDEPENDENT set (e.g., split on top-level commas --
+respecting parens for inline `CHECK`/`REFERENCES` clauses -- sort the
+resulting clause list, then compare) before the equality check, while
+leaving index comparison and the "missing/unexpected table" checks
+exactly as they are today. This directly fixes today's false alarm for
+BOTH current and any future pair of out-of-order column additions to
+ANY table, without weakening the check's real purpose: a genuinely
+added, removed, retyped, or reconstrained column would still produce a
+different normalized clause set and still correctly fail. No database
+change required on Production, Staging, or anywhere else -- this is a
+pure `lib/data-health/production-baseline.ts` code change plus new
+test coverage (a fixture with two semantically-identical `CREATE
+TABLE` strings in different column order should report "matches";
+a fixture with a genuinely different column/constraint should still
+report a difference).
+
+**For `trip_prospects` (a real, currently-harmless structural gap,
+Staging/baseline side only):** Production already has the more-correct
+shape and needs no change. The safe correction is a new, tiny,
+PURELY ADDITIVE migration (`0057`, following this project's own
+convention of never editing an already-applied migration file) that
+adds `all_day`/`all_day_date` to `trip_prospects` -- applied to Staging
+only, explicitly guarded/labeled the same "not yet applied to
+Production" way several prior migrations already are, except inverted:
+here it is Staging (and any future fresh bootstrap) that needs to
+CATCH UP to what Production already has, not the other way around.
+After applying it to Staging, `pnpm run db:baseline:generate` would
+then need to be re-run so the packaged baseline's `trip_prospects`
+entry includes these two columns too -- at that point Production,
+Staging, and the baseline would all agree, and the live Production
+check's `trip_prospects` difference would resolve on its own (no
+Production-side action needed at all). This also closes the latent
+"0054's rebuild silently drops 0048's trip_prospects columns" bug for
+any FUTURE fresh bootstrap or disaster-recovery rebuild, which is the
+real, durable value of this change beyond just quieting today's
+dashboard alarm.
+
+**Risks of the recommended corrections, if implemented:**
+- The comparison-logic change (Part 1) touches only
+  `lib/data-health/production-baseline.ts`'s pure parsing/comparison
+  function -- no D1 access, no migration, zero data risk. The only
+  real risk is a parsing bug that makes the check falsely PASS a
+  genuine incompatibility; mitigated by explicit new test cases for
+  both "same columns, different order -> matches" and "genuinely
+  different column -> still differs," run against the full existing
+  suite before any deployment.
+- The `trip_prospects` migration (Part 2) is a plain `ALTER TABLE ...
+  ADD COLUMN`, applied to Staging only, identical in shape and risk
+  profile to every other additive Staging-only migration this project
+  has already run (0046, 0047, 0050, 0051, 0052, 0053, 0054, 0055,
+  0056) -- no existing row is altered, no table rebuilt, nullable with
+  no default beyond SQLite's own NULL. The only required protection is
+  the same one already used for every migration this session: confirm
+  a fresh Staging backup/rehearsal exists before applying (Staging has
+  no backup-verification workflow of its own the way Production does,
+  so "confirm via a direct post-apply row-count check" is the
+  established, sufficient safeguard here, same as every prior Staging-
+  only migration this session). **Do not apply this migration to
+  Production** -- it already has the columns; attempting `ADD COLUMN`
+  there would fail outright with a duplicate-column error (harmless,
+  but confirms the point) and is unnecessary regardless.
+- Neither correction touches `giving_activities`, pledges, payments,
+  donor records, or any backup/restore mechanism.
+
+### Verified facts vs. assumptions, explicitly separated
+
+**Verified this round, directly (live queries, direct file reads, or
+programmatic comparison)**: the exact two differences reported live by
+`/health`, both tables' complete live column lists on Production AND
+Staging, the complete baseline-expected column lists for both tables,
+that the column SETS are identical for `interactions` and
+Production-is-a-strict-superset for `trip_prospects`, that all 6
+related indexes match exactly on Production, that
+`generate-production-baseline.mjs` always replays in strict ascending
+filename order, that migration 0054's own rebuild SQL never mentions
+`all_day`/`all_day_date`, that no application code references
+`trip_prospects.all_day`/`all_day_date` anywhere outside migration
+0048 and its own rehearsal test, that every INSERT against these two
+tables in `trips-data.ts` uses named columns, and that Staging's real
+`trip_prospects` is in fact missing these two columns today.
+
+**Inferred, not directly observable**: the exact historical sequence
+and dates of which specific `wrangler d1 execute` commands were run
+against Production, in what order, across this project's full history,
+that produced today's exact column layout. This investigation does not
+depend on reconstructing that exact history -- only on the current,
+directly-verified live state and the mechanical, reproducible reason
+(SQLite's own `ALTER TABLE ADD COLUMN` append behavior, and migration
+0054's own incomplete rebuild column list) that any such history
+would produce exactly what is observed today.
+
+---
+
+Stopping here, per explicit instruction. No Production data, Staging
+data, migration, or application code was modified during this
+investigation. Both recommended corrections above are proposals only,
+awaiting separate authorization before implementation.
