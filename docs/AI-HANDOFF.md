@@ -62533,3 +62533,80 @@ No file was ever committed to the repository from this phase.
    disposable scratch databases, never Production or Staging data. No
    Production deployment, migration, or live-data change was made or is
    required by this round's work.
+
+---
+
+## Final Backup Restore Verification (2026-11-02) -- BLOCKED: NO ACCESS TO TRIGGER THE REAL WORKFLOW OR SUPPLY ITS CREDENTIALS
+
+Follow-up requested after the commit `2f96990` fix above: run the
+*actual* automated restore-verification workflow with its *normal*
+Cloudflare credentials against an *existing* Staging backup object,
+specifically to exercise the one piece the prior round's manual
+demonstration could not (the oversized `data_imports` row's restore
+via the D1 HTTP query API, which needs a real Bearer token).
+
+**Checked and confirmed unavailable in this session, same as every
+prior round**: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_D1_API_TOKEN`,
+`CLOUDFLARE_ACCOUNT_ID`, `R2_BACKUP_READ_ACCESS_KEY_ID`,
+`R2_BACKUP_READ_SECRET_ACCESS_KEY`, `BACKUP_ENCRYPTION_PASSPHRASE`,
+`R2_BACKUP_BUCKET`. These are the real workflow's own GitHub Actions
+secrets -- they live in GitHub's secret store, not in this local
+session's environment.
+
+**Checked and confirmed unavailable: any way to trigger the real
+workflow run on GitHub's own infrastructure** (where those secrets
+*do* exist). No `gh` CLI is installed in this environment, and no
+`GITHUB_TOKEN`/`GH_TOKEN` is present. Git itself can push commits
+(via a credential-manager-stored credential used only for git's own
+HTTPS transport), but that is not a general-purpose GitHub API
+credential, and extracting/repurposing it to call the Actions API
+would be reusing a credential outside the scope it was provided for --
+not attempted.
+
+**Why no substitute was used this round**: the prior round's fresh-
+export-plus-manual-restore demonstration was an explicitly-flagged
+substitute for an unavailable *existing backup download*, used because
+the goal then was to prove the foreign-key-ordering fix worked at all.
+This round's explicit goal is different and narrower: prove the one
+remaining gap from that substitution (the oversized row via the real
+Cloudflare API) is closed, using the real workflow and real
+credentials, restoring an *existing* backup, with *no* excluded
+records. Repeating last round's workaround (skipping the oversized row
+again) would reproduce the exact gap this round exists to close, and
+would violate this round's own explicit instruction not to exclude
+oversized records or bypass integrity checks. No partial or
+approximated run was attempted for this reason.
+
+**No workflow was dispatched. No Cloudflare/R2 API calls were made
+with real backup-reading credentials. No new scratch database was
+created this round.** (The two real databases, `fundraising-os-
+production-db` and `fundraising-os-staging-db`, were untouched; no
+disposable database exists to report cleanup on, since none was
+created.)
+
+### Final report
+
+1. **Status**: Blocked before any workflow run or restore attempt --
+   this session has neither the real Cloudflare/R2 credentials the
+   `verify-remote-restore.mjs` script requires nor any mechanism (CLI
+   or API token) to dispatch the actual GitHub Actions workflow, which
+   is where those credentials actually live.
+2. **What would unblock this**: either (a) access to trigger
+   `.github/workflows/d1-restore-verify-monthly.yml` via
+   `workflow_dispatch` (a `gh`-authenticated session, or a GitHub PAT
+   with `actions:write`/`workflow` scope, handed to this session), so
+   the workflow runs on its own infrastructure with its own
+   already-configured secrets, or (b) the specific credentials listed
+   above supplied directly to this session's environment.
+3. **Staging backup restoration is NOT newly verified this round.**
+   The prior round's finding stands: the ordering fix (commit `2f96990`)
+   is demonstrated correct for every table except one oversized row,
+   using a substitute fresh export rather than an existing stored
+   backup object, and with that one row's restore path (the D1 HTTP
+   query API) still unexercised against real data. This round did not
+   add to or subtract from that evidence.
+4. **Production backup restoration remains unverified**, as before --
+   no Production backup has been restored or checked in any round.
+5. No credentials were exposed, no integrity check was bypassed, and
+   no record was excluded in order to produce a result -- the task was
+   left incomplete rather than approximated.
