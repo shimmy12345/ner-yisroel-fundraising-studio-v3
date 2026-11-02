@@ -62954,3 +62954,173 @@ record of its reported outcome, not a second, separate confirmation.
 
 Documentation-only, per explicit instruction: no application code,
 database, workflow, or deployment was changed to produce this entry.
+
+---
+
+## Production Backup Restore Verification: Readiness Review (2026-11-02) -- ONE CORRECTION MADE; NOT YET TRIGGERED
+
+Reviewed `.github/workflows/d1-restore-verify-monthly-production.yml`
+and `d1-backup-nightly-production.yml` to confirm the proven Staging
+process (run `41472943028`) is actually safe and correctly configured
+to repeat against Production, before the user authorizes a real run.
+**Per explicit instruction, the Production workflow was NOT triggered
+this round.**
+
+### 1. Review: Production backup configuration, restore workflow, safety controls
+
+- **Backup side** (`d1-backup-nightly-production.yml`): scheduled
+  08:15 UTC daily; plain `wrangler d1 export --remote` of
+  `fundraising-os-production-db` (read-only against the live
+  database), gzip + GPG AES256 encryption with the plaintext shredded
+  immediately after, uploaded with a WRITE-ONLY-scoped credential
+  (`R2_BACKUP_WRITE_*_PRODUCTION`) to a dedicated
+  `fundraising-os-production-backups`-class bucket
+  (`vars.R2_BACKUP_BUCKET_PRODUCTION`), with an atomic `latest/`
+  pointer carrying its own `dated-backup-key` provenance metadata.
+  Identical mechanism to Staging's own nightly backup, pointed only at
+  Production's separate resources and secrets (every one suffixed
+  `_PRODUCTION`).
+- **Restore-verification side**
+  (`d1-restore-verify-monthly-production.yml`): identical job
+  structure and `scripts/verify-remote-restore.mjs` entry point as the
+  now-proven Staging workflow -- only `env.DATABASE_NAME` differs
+  (`fundraising-os-production-db`), and that value is used ONLY to
+  build the R2 object key for the backup *download* step; it is never
+  passed to any D1 write/delete/migrate operation anywhere in the job.
+  `scripts/verify-remote-restore.mjs` itself was grepped directly:
+  **it contains no reference to either real database name at all** --
+  it only ever creates, executes against, and deletes a freshly
+  generated `scratchDatabaseName`.
+- **Safety controls, re-confirmed for Production specifically**:
+  `permissions: contents: read` at the workflow level (no repo write
+  access); the backup-*download* credential
+  (`R2_BACKUP_READ_*_PRODUCTION`) is read-only and distinct from the
+  backup-*upload* credential the nightly job uses; the status-publish
+  step's write credential (`R2_STATUS_WRITE_*_PRODUCTION`) targets a
+  completely separate status bucket, never the backup bucket; there is
+  no migration-apply step anywhere in this job.
+
+### 2. Latest Production backup: could not independently re-confirm from this session; not a blocker
+
+This session has no R2 read credentials and no GitHub Actions/API
+access (same limitation as every prior entry in this chain), so the
+backup bucket could not be queried directly here. The most recently
+*confirmed* Production backup on record (from earlier the same day,
+the "Authorized Production Deployment of Trip Archive/Delete" entry
+above) is **`daily/fundraising-os-production-db-20261101T182809Z.sql.gz.gpg`**,
+completed **2026-11-01T18:28:14Z** -- taken before migration `0056`
+was applied directly to Production (~03:06 UTC, 2026-11-02, same
+entry). This is not something that needs pre-confirming separately,
+though: the workflow's own first step
+("Determine and validate the immutable backup identity from `latest/`'s
+metadata") already does this live, safely, and automatically every
+run -- reading `latest/`'s own metadata, strictly validating the
+`dated-backup-key` against an exact allowlist pattern, and falling
+back to `latest/` directly (never guessing) if that metadata is
+missing or invalid. By the time a run actually executes, it will use
+whatever the real current latest backup is, whether that is the one
+above or a newer one from a subsequent nightly run.
+
+### 3-4. Confirmed: disposable database only; live Production/Staging cannot be modified, overwritten, migrated, or deleted
+
+Re-confirmed by direct code inspection (not merely re-stated from the
+Staging round): `scratchDatabaseName` is generated fresh every run
+(`fundraising-os-restore-verify-<timestamp>-<random>`); every D1
+`create`/`execute`/`delete` call in the script targets only that name;
+no step in either workflow file references `fundraising-os-production-db`
+or `fundraising-os-staging-db` as a D1 operation target (the one
+exception, `DATABASE_NAME`, is read-only metadata for picking which R2
+object to download, confirmed above); the scratch database is deleted
+in a `try`/`finally` (point 6 below); and no migration-apply step
+exists in this job at all.
+
+### 5. Same full checks as Staging: confirmed structurally identical
+
+`scripts/verify-remote-restore.mjs` has no Staging/Production branching
+logic whatsoever -- the exact same restore (dependency-safe ordering +
+oversized-row handling), `quick_check`/`foreign_key_check`,
+backup-relative schema validation (including the index trailing-`;`
+fix), `production_schema_baseline` backup fidelity, and exact
+row-count verification run for Production as for Staging. This
+branch's single combined schema baseline (deliberately not split by
+environment, unlike `main`'s later Staging/Production divergence fix --
+see the "Repair and Verify Backup Restoration" entry) does not need
+Production-specific handling for this reason.
+
+### 6. Confirmed: temporary database deleted even on failure
+
+The `finally` block (`scripts/verify-remote-restore.mjs`) runs `wrangler
+d1 delete` unconditionally whenever a scratch database was created,
+regardless of whether the try block threw -- identical mechanism
+already proven against Staging in this exact chain, and unchanged by
+any of this round's review.
+
+### 7. Confirmed: success is recorded only after every check passes
+
+The "Restore into a scratch D1 database and run every integrity check"
+step has no `continue-on-error`; GitHub Actions' `job.status` reflects
+`failure` the moment that step's own exit code is non-zero (any
+assertion anywhere in the script failing). The status-publish step
+only writes `restore-latest-success.json` when `job.status == success`
+-- so a failed check can never be recorded as a successful
+verification.
+
+### One necessary correction found and made, before any Production run was attempted
+
+Found by inspection, not from a failed run: the row-count check
+(`scripts/verify-remote-restore.mjs`) queried every table in today's
+`FUNDRAISING_DATA_TABLES` unconditionally. Production's real,
+incremental deployment history has already lagged Staging's on
+individual migrations more than once (see "Investigation: The Two
+Pre-Existing 'Production <-> Baseline Schema' Differences" above) --
+so a Production backup genuinely missing an entire newer TABLE (not
+merely a newer column or index, which the schema check already
+handles correctly via `backupSchemaObjects()`) is a real, foreseeable
+case, not a hypothetical one. Querying `COUNT(*)` against a table
+absent from the restored database throws a raw "no such table" SQLite
+error, which would have aborted the whole run with an unhandled
+exception rather than a clear "this table predates this backup" note.
+
+**Fix**: the row-count loop now checks each table against the SOURCE
+BACKUP's own schema (the same `backupSchema` already computed for the
+structural check) before querying it, skipping and logging -- never
+failing -- a table genuinely absent from that specific backup. Added 1
+new static-wiring guard plus a direct behavioral proof (using the
+backup's real embedded schema, not a querying-against-live-data
+proxy) to `tests/verify-remote-restore-wiring.test.mjs`; confirmed it
+fails against the pre-fix script text. **257/257 tests passing, `tsc`
+clean, build clean.**
+
+(Note: as of the Nov 2 deployment entry above, Production is now
+confirmed caught up through migration `0056` -- the same level as
+Staging -- so this specific gap is not expected to trigger on the very
+next run. The fix is made proactively, for the first time a future
+Production backup genuinely does lag a table-adding migration, not
+because today's restore is expected to hit it.)
+
+### Exact steps to trigger Production verification safely (not yet executed)
+
+1. Repo -> **Actions** tab.
+2. Left sidebar -> **D1 monthly restore verification (Production)**
+   (a separate entry from the Staging one used before).
+3. **Run workflow** button (top right).
+4. Branch dropdown -> `trip-planner-multi-region-manual-prospects`.
+5. This workflow has no optional text inputs to leave blank (unlike
+   the Staging one) -- just confirm the branch and run.
+6. **Run workflow**.
+
+Same caveat as every prior trigger in this chain: this session cannot
+independently confirm the Production-scoped GitHub Actions secrets
+(`R2_BACKUP_READ_*_PRODUCTION`, `CLOUDFLARE_D1_API_TOKEN`,
+`BACKUP_ENCRYPTION_PASSPHRASE_PRODUCTION`, etc.) are currently valid --
+no GitHub API/CLI access exists in this session to check. Historical
+evidence (the live `/health` page's own "Monthly restore test --
+Successfully restored and verified the Nov 1, 2026 backup" readout,
+referenced in the Nov 2 deployment entry above) strongly suggests this
+exact workflow has run successfully before and its secrets are
+already configured; if the run fails at the download/decrypt step
+rather than at a restore/integrity check, that credential
+configuration is the first thing to check.
+
+**Stopping here, per explicit instruction -- awaiting separate
+authorization before this workflow is triggered.**

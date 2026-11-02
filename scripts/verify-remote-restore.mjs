@@ -60,6 +60,23 @@
 // separate, non-failing, informational note. See that function's own
 // doc comment for the full account.
 //
+// Third root cause corrected (2026-11-02, Production backup restore
+// verification review, before any Production run was ever attempted):
+// the row-count check below previously queried every table in TODAY's
+// FUNDRAISING_DATA_TABLES unconditionally. A real Production backup
+// taken before a later TABLE-adding migration landed would genuinely
+// not have that table at all -- the same backup-relative principle as
+// the schema fix immediately above, just not yet applied to row counts.
+// Unlike a missing COLUMN or INDEX (which the schema check already
+// handles correctly), a missing TABLE means `SELECT COUNT(*) FROM
+// "<table>"` throws a raw "no such table" SQLite error -- which would
+// have aborted the whole run with an unhandled exception, not a clear,
+// expected "this table predates this backup" note. Found by inspection
+// (Production's real, incremental deployment history already lags
+// Staging's on individual migrations more than once this project's
+// history -- see the "Investigation: ... Production ↔ Baseline Schema
+// Differences" entry in docs/AI-HANDOFF.md), not from a failed run.
+//
 // Usage: node scripts/verify-remote-restore.mjs -- <decrypted-backup.sql>
 // Requires CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in the
 // environment (the same variables `wrangler` itself reads for
@@ -299,11 +316,28 @@ try {
   // restore zero rows regardless of their source count -- see that
   // constant's own doc comment; this is the one named, visible exception,
   // never a general tolerance for a mismatch.
+  //
+  // A table in TODAY's FUNDRAISING_DATA_TABLES that is simply absent from
+  // this backup's OWN schema (backupSchema, already computed above) is a
+  // SEPARATE, legitimate case, not corruption: a Production backup taken
+  // before a later table-adding migration landed genuinely never had that
+  // table at all -- the exact same backup-relative principle already
+  // applied to the structural schema check above, now applied here too.
+  // Querying COUNT(*) against a table that does not exist in the restored
+  // database throws a raw "no such table" SQLite error, which must never
+  // be mistaken for a row-count mismatch (or allowed to abort the whole
+  // run with an unhandled exception) -- skipped and logged explicitly
+  // instead, the same way D1_RESTORE_SKIP_DATA_TABLES already is.
   console.log("Validating every fundraising table's row count exactly matches the source backup (including any individually oversized row restored via the D1 query API)...");
   const parsedBackupForCounts = parseRestoreStatements(backupSql);
+  const backupTableNames = new Set(backupSchema.filter((object) => object.type === "table").map((object) => object.name));
   const rowCounts = {};
   const rowCountMismatches = [];
   for (const table of FUNDRAISING_DATA_TABLES) {
+    if (!backupTableNames.has(table)) {
+      console.log(`Note: "${table}" does not exist in this backup at all (it predates a later table-adding migration) -- row count check skipped for it, not failed.`);
+      continue;
+    }
     const countResult = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", `SELECT COUNT(*) AS count FROM "${table}";`])?.[0]?.results?.[0];
     assert.ok(countResult && Number.isInteger(countResult.count) && countResult.count >= 0, `Table "${table}" did not return a valid row count after restore: ${JSON.stringify(countResult)}`);
     const restoredCount = countResult.count;

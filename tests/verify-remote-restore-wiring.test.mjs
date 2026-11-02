@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { backupSchemaObjects } from "../lib/data-health/production-baseline.ts";
 import { D1_RESTORE_DATA_ORDER, parseRestoreStatements, planD1Restore, reorderD1ExportForRestore } from "../lib/operations/d1-restore-order.ts";
 
 // Repair and Verify Backup Restoration (2026-11-02, see docs/AI-HANDOFF.md).
@@ -116,6 +117,39 @@ function buildExport(tables, insertsInOrder) {
     /assert\.ok\(countResult && Number\.isInteger\(countResult\.count\) && countResult\.count >= 0, `Table "\$\{table\}" did not return a valid row count after restore: \$\{JSON\.stringify\(countResult\)\}`\);\s*\n\s*rowCounts\[table\] = countResult\.count;\s*\n\s*\}\s*\n\s*\n\s*console\.log\(`Restore verification passed\. Row counts/,
     "row-count verification must not regress to only checking that a count is a valid non-negative integer (which a fully-empty, silently-corrupted table would also pass).",
   );
+}
+
+// ---- 6. Production backup restore-verification review (2026-11-02,
+// before any Production run was ever attempted): the row-count check
+// must never crash with "no such table" against a backup that
+// genuinely predates a later table-adding migration -- Production's
+// real, incremental deployment history has already lagged Staging's on
+// individual migrations more than once (see "Investigation: ...
+// Production <-> Baseline Schema Differences" in docs/AI-HANDOFF.md),
+// so a future Production backup missing an entire newer table, not
+// merely a newer column or index, is a real, foreseeable case -- it
+// must be skipped and logged, never queried (which throws a raw SQLite
+// error) and never silently treated as a row-count mismatch. ----
+{
+  assert.match(scriptText, /backupTableNames\.has\(table\)/, "the row-count loop must check whether each table actually exists in the SOURCE BACKUP's own schema before querying its row count -- querying COUNT(*) against a table absent from an older backup throws a raw SQLite error, which must never abort the whole run.");
+
+  // Direct behavioral proof, using the real exported pieces the script
+  // itself uses: a synthetic backup missing a real table (as a
+  // genuinely older Production backup predating that table's own
+  // migration would) must be correctly excluded, not silently assumed
+  // present.
+  const olderBackupSql = [
+    "PRAGMA defer_foreign_keys=TRUE;",
+    "CREATE TABLE `users` (`id` text PRIMARY KEY NOT NULL);",
+    "CREATE TABLE `donors` (`id` text PRIMARY KEY NOT NULL);",
+    // Deliberately no `trips` table -- simulates a backup taken before
+    // migration 0045 (which first added it) ever landed on the real
+    // database being restored.
+  ].join("\n") + "\n";
+  const olderBackupSchema = backupSchemaObjects(parseRestoreStatements(olderBackupSql).schema);
+  const backupTableNames = new Set(olderBackupSchema.filter((object) => object.type === "table").map((object) => object.name));
+  assert.ok(!backupTableNames.has("trips"), "a table absent from the backup's own schema must not be treated as present");
+  assert.ok(backupTableNames.has("donors") && backupTableNames.has("users"), "a table that IS present in the backup's own schema must still be treated as present");
 }
 
 process.stdout.write("verify-remote-restore-wiring.test.mjs: all assertions passed\n");
