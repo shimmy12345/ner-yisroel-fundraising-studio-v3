@@ -61392,3 +61392,158 @@ tested, and deployed to Staging only. No Production tables, Production
 migrations, or Production deployment were touched. Committing and
 pushing now, then stopping for review before any Production
 deployment.
+
+## Authorized Production Deployment: Schema Health Check Correction (2026-11-02) -- DEPLOYED AND VERIFIED LIVE
+
+Deployed commit `ea6186fb503a5b43dee4dcd343930497f35de29a` (the fix
+described in the section above) to Production, per explicit
+authorization scoped to a code-only deployment correcting the
+`interactions`/`trip_prospects` Health warnings -- no database
+migrations, schema modifications, or unrelated fixes.
+
+### Pre-deployment safeguards (all passed; rollback point recorded)
+
+- **Current Production state recorded before deploying**: deployed
+  commit `8ef3f17` (Tighten Trip Delete safety), Worker version
+  `a9c3b266-8894-40b4-bd69-b23e06463e5d` (deployed
+  2026-11-02T03:06:59Z) -- the rollback target if needed.
+- `tsc --noEmit`: 0 errors.
+- `pnpm run test`: 254/254 test files passing; the only failure is
+  the pre-existing, already-documented, unrelated
+  `check-main-restore-sync.mjs` branch-drift check (confirmed again
+  this round to use a separate function,
+  `compareCrossBranchRestoreState`, never `compareSchemaObjects`).
+- `tests/production-baseline.test.mjs` run standalone: 44/44 passing,
+  including the 3 regression tests confirming (a) harmless column
+  reordering still passes, (b) missing/retyped/extra-non-allowlisted
+  columns and reordered indexes still fail, and (c) the
+  `trip_prospects` allowlist is narrow (a different extra column, or
+  the same column names on a different table, still fail) --
+  answering the explicit "confirm the exception cannot mask other
+  schema differences" requirement.
+- `pnpm run build:production-independent`: clean.
+- `node scripts/verify-build-manifest.mjs production-independent`:
+  OK.
+- `node scripts/check-production-feature-fingerprints.mjs`: all 7
+  feature fingerprints found; all 5 behavioral checks passed --
+  confirming the deployment includes all existing Production
+  functionality.
+- `node scripts/check-production-branch-ancestry.mjs 8ef3f17`:
+  confirmed `ea6186f` is a descendant of the live Production commit --
+  no commits skipped or dropped.
+- Backup/restore-verification status (GitHub Actions run history):
+  latest `d1-backup-nightly-production.yml` run (2026-11-01T18:27:49Z)
+  -- success; latest `d1-restore-verify-monthly-production.yml` run
+  (2026-11-01T18:28:37Z) -- success (also independently confirmed live
+  on the Health page itself: "Automated backup... Completed
+  successfully 2026-11-01T18:28:14Z" and "Monthly restore test...
+  Successfully restored and verified the Nov 1, 2026 backup").
+
+### Deployment
+
+`npx wrangler deploy --config wrangler.production.jsonc` (the final
+step of the established `deploy:production-independent` safeguard
+chain; the chain's own `check-production-branch-ancestry.mjs` step
+needed the current-Production-commit argument passed explicitly, so
+that check and the final `wrangler deploy` were run as the two
+remaining explicit steps after the chain's build/manifest/fingerprint
+steps had already passed). Succeeded:
+
+- New Worker Version ID: `53ef5832-3442-4728-860e-a94f1dfa7a8c`
+  (deployed 2026-11-02T04:04:09Z, confirmed at 100% via
+  `wrangler deployments list`).
+- No asset changes (`No updated asset files to upload`) -- expected,
+  since this change is backend comparison logic only.
+
+### Post-deployment verification (live, on the real Production Worker)
+
+- **Deployed commit confirmed**: the live Health page's "Deployed
+  version" card now reads `0.1.0 · ea6186f` -- the exact authorized
+  commit.
+- **Original warnings confirmed gone**: a fresh, non-cached "Run
+  health check" click, then reading "Production ↔ baseline schema"
+  directly from the page, now shows **"Match" -- "Application tables,
+  columns, indexes, and constraints match the verified 0019
+  baseline."** Zero differences reported (previously: exactly the two
+  target differences, `interactions` and `trip_prospects`, unchanged
+  across every prior check this entire investigation).
+- **No genuine schema differences are being suppressed**: the
+  "Match" result is independently corroborated by the 44/44 passing
+  regression suite (which pins that a real structural change --
+  missing column, retyped column, unlisted extra column, or reordered
+  index -- still fails), not merely trusted from the live page alone.
+  "Production launch readiness" also independently reports "Ready" --
+  "The clean baseline matches staging and the current workspace
+  integrity checks pass."
+- **Production's `calendar_event_links`/`calendar_event_link_history`
+  status (new information, resolves the one previously-unverified item
+  from the prior round)**: Production's "Production ↔ baseline schema"
+  reports a clean, total "Match" with *no* differences at all -- which
+  means Production, unlike Staging, does **not** carry the separate,
+  pre-existing comment-placement divergence on these two tables. That
+  issue is Staging-only; nothing further is needed on Production for
+  it, and the existing draft migration
+  (`drizzle/pending-review/0049_fix_calendar_schema_text_staging_repair.sql`)
+  remains correctly out of scope and unapplied anywhere.
+- **Data-integrity checks, all live and unchanged**: "Active donors:
+  297" (matches every prior recorded snapshot on this Production
+  database, including the one recorded before this deployment --
+  consistent with a pure code deploy that touched no data);
+  "Duplicate active JL Codes," "Orphaned gifts," "Orphaned
+  interactions," "Orphaned reminders," "Orphaned pledge payments," and
+  "Broken merge redirects" all report "No issue detected"; "Giving-
+  total reconciliation: Reconciled"; "Database connection: Connected";
+  "Production data state: Live records present." No pledge, payment,
+  trip, or meeting-related count or integrity signal changed.
+- **Trip Planner and AI Meeting Notes remain available**: live-loaded
+  `/travel-planning` (shows the same 3 trips -- Planning 2, Completed
+  1, Archived 0 -- as before the deploy, confirming the Archive/Delete
+  feature's own categories are intact) and opened the "Teaneck" trip's
+  detail page, which rendered its scheduled prospect meeting, the
+  "✦ AI meeting notes" entry point, and the "Add to Google Calendar"
+  action, all as expected.
+- **No new application errors**: console messages clean on both
+  pages; of 48 network requests captured loading the trip detail page,
+  every real request to `fundraising-os-production.sgoldstein.workers.dev`
+  returned `200`. (The only non-200 entries were local `file://`
+  font-proxy requests from this machine's own browser tooling,
+  unrelated to the live Worker, which cannot serve or be reached via
+  the `file://` scheme at all.)
+
+### Final report
+
+1. **Deployed commit**: `ea6186fb503a5b43dee4dcd343930497f35de29a`.
+2. **Worker version**: `53ef5832-3442-4728-860e-a94f1dfa7a8c` (rollback
+   target if ever needed: `a9c3b266-8894-40b4-bd69-b23e06463e5d`, commit
+   `8ef3f17`).
+3. **Backup status**: latest nightly backup (2026-11-01T18:27:49Z) and
+   latest monthly restore-verification (2026-11-01T18:28:37Z) both
+   successful, confirmed via GitHub Actions run history and the live
+   Health page.
+4. **Test results**: `tsc --noEmit` clean; 254/254 test files passing
+   (one pre-existing, unrelated, already-documented failure in
+   `check-main-restore-sync.mjs`); 44/44 in
+   `tests/production-baseline.test.mjs`; production build, manifest
+   verification, 7/7 feature fingerprints, and 5/5 behavioral checks
+   all clean; branch ancestry confirmed.
+5. **Health check results**: both original warnings (`interactions`,
+   `trip_prospects`) confirmed gone on live Production; overall schema
+   comparison reports a clean "Match"; no other schema warnings
+   appeared (Production does not share Staging's separate
+   `calendar_event_links`/`calendar_event_link_history` issue).
+6. **Data-integrity checks**: donor, giving, pledge, payment, trip, and
+   meeting-related signals on the live Health page are unchanged and
+   show no issues; Trip Planner and AI Meeting Notes remain available
+   and functional; no new application errors observed.
+7. **Unresolved issues**: none related to this task's scope. The
+   separate, pre-existing, Staging-only `calendar_event_links`/
+   `calendar_event_link_history` stored-text divergence remains open
+   and untouched, exactly as instructed -- its own draft fix
+   (`drizzle/pending-review/0049_fix_calendar_schema_text_staging_repair.sql`)
+   was not applied anywhere, and Production is now confirmed not to
+   share that issue at all.
+
+---
+
+Stopping here, per explicit instruction. No further cleanup or
+feature development follows.
