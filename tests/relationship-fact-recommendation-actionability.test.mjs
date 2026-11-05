@@ -306,6 +306,83 @@ async function run() {
     assert.match(opportunity.action, /bar mitzvah/);
   }
 
+  // --- Regression: the real Production report (2026-11-05), Dr. & Mrs.
+  // Yaakov Abdelhak. The Daily Fundraising Agenda recommended "Make a
+  // solicitation ask, following up on: $10,000 donation. Outcome:
+  // $10,000 donation." -- the donor's own fact already records that the
+  // ask resolved into a $10,000 donation (sourced from a Trip Meeting's
+  // "Confirmed Commitments: $10,000 donation / Outcome: $10,000
+  // donation" note), yet the engine still recommended asking again, with
+  // the generic why "A specific, currently-relevant solicitation
+  // opportunity is on file." Real shape, reproduced verbatim. ---
+  {
+    const f = fact({ factText: "$10,000 donation. Outcome: $10,000 donation.", category: "solicitation", lifecycle: "time_bound", sourceInteractionId: "trip-meeting-abdelhak", sourceInteractionOccurredAt: daysAgo(1) });
+    const evidence = evidenceFor({ relationshipFacts: [f], pendingAskSourceInteractionIds: [] });
+    assert.equal(evidence.factActionability.actionableSolicitationFact, null, "a solicitation fact whose own text already records an Outcome must never be actionable, however recent");
+    const candidates = generateCandidates(evidence);
+    assert.equal(candidates.some((c) => c.kind === "solicit"), false, "a resolved (Outcome-recorded) solicitation fact must never generate a repeat solicit recommendation");
+    const rec = buildDonorRecommendation(evidence);
+    assert.notEqual(rec?.kind, "solicit", "the winning recommendation must never be solicit from an already-resolved ask");
+  }
+
+  // --- Same principle, a negative/declined outcome -- resolution, not
+  // the positive result, is what matters. An ask that was declined is
+  // just as resolved as one that was fulfilled, and must not generate a
+  // repeat "ask again tomorrow" recommendation either. ---
+  {
+    const f = fact({ factText: "Asked for a $5,000 gift. Outcome: Not interested at this time.", category: "solicitation", lifecycle: "time_bound", sourceInteractionId: "int-declined-fresh", sourceInteractionOccurredAt: daysAgo(1) });
+    const evidence = evidenceFor({ relationshipFacts: [f], pendingAskSourceInteractionIds: [] });
+    assert.equal(candidateKinds(evidence).includes("solicit"), false, "a declined ask with a recorded Outcome must not generate solicit either, even one day old");
+  }
+
+  // --- A genuinely still-open solicitation fact (no "Outcome:" marker)
+  // must be completely unaffected by this fix -- both in whether it fires
+  // and in the improved, non-generic `why` wording. The previously
+  // generic, uninformative phrase ("a currently-relevant solicitation
+  // opportunity is on file") must be gone; the replacement must name a
+  // concrete date and flag the evidence as narrative, not a confirmed Ask. ---
+  {
+    const f = fact({ factText: "Interested in a Kollel donation.", category: "solicitation", lifecycle: "time_bound", sourceInteractionId: "int-open", sourceInteractionOccurredAt: daysAgo(10) });
+    const evidence = evidenceFor({ relationshipFacts: [f], pendingAskSourceInteractionIds: [] });
+    const solicit = generateCandidates(evidence).find((c) => c.kind === "solicit");
+    assert.ok(solicit, "a genuinely still-open solicitation fact (no Outcome marker) must still generate solicit");
+    assert.doesNotMatch(solicit.why, /currently-relevant solicitation opportunity is on file/i, "the flagged generic explanation must no longer appear");
+    assert.match(solicit.why, /10 days ago/, "the why text must name the concrete age of the evidence instead of a boilerplate phrase");
+    assert.match(solicit.why, /narrative/i, "the why text must disclose this is narrative evidence, not a confirmed structured Ask");
+  }
+
+  // --- The existing open-pledge-vetoes-solicit hard constraint (recommendation-
+  // rank.ts) must apply to the structured-facts solicit branch exactly as
+  // it already does for the legacy/historical branches -- previously this
+  // branch always reported `supportingDate: evidence.now`, so the veto
+  // (which requires supportingDate > pledge.activityDate) could never
+  // actually fire for it. A solicitation fact that predates the donor's
+  // current open pledge is stale evidence already superseded by that
+  // newer commitment, and must be vetoed the same way a predating
+  // historical/legacy note already is. ---
+  {
+    const f = fact({ factText: "Solicited for $10,000 for the building fund.", category: "solicitation", lifecycle: "time_bound", sourceInteractionId: "int-predates-pledge", sourceInteractionOccurredAt: daysAgo(60) });
+    const evidence = evidenceFor({
+      relationshipFacts: [f],
+      pendingAskSourceInteractionIds: [],
+      openPledge: { balanceCents: 300000, campaign: "Building Fund", description: null, activityDate: daysAgo(10) },
+    });
+    const candidates = generateCandidates(evidence);
+    assert.ok(candidates.find((c) => c.kind === "solicit"), "sanity: the raw candidate must exist before the veto is applied");
+    const rec = buildDonorRecommendation(evidence);
+    assert.notEqual(rec?.kind, "solicit", "a structured solicitation fact predating the donor's current open pledge must be vetoed, same as the legacy/historical paths");
+  }
+  {
+    const f = fact({ factText: "Asked about a new $3,000 annual gift.", category: "solicitation", lifecycle: "time_bound", sourceInteractionId: "int-postdates-pledge", sourceInteractionOccurredAt: daysAgo(2) });
+    const evidence = evidenceFor({
+      relationshipFacts: [f],
+      pendingAskSourceInteractionIds: [],
+      openPledge: { balanceCents: 300000, campaign: "Building Fund", description: null, activityDate: daysAgo(10) },
+    });
+    const rec = buildDonorRecommendation(evidence);
+    assert.equal(rec?.kind, "solicit", "a structured solicitation fact postdating the pledge must survive the veto, same as the legacy/historical paths");
+  }
+
   console.log("relationship-fact-recommendation-actionability: ok");
 }
 

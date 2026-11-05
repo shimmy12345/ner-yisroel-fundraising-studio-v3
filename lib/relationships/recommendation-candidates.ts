@@ -464,18 +464,31 @@ function solicitCandidate(evidence: RecommendationEvidence): RecommendationCandi
   if (evidence.factActionability.hasStructuredFacts) {
     const actionable = evidence.factActionability.actionableSolicitationFact;
     if (actionable) {
+      // isResolvedSolicitationFact() (fact-classification.ts, wired into
+      // scoreFact() in fact-synthesis.ts) already zeroes out -- so
+      // `actionable` never reaches here for -- any solicitation fact whose
+      // own text records how the ask concluded (an explicit "Outcome: "
+      // line). Every candidate reaching this point is therefore a
+      // genuinely still-open, unresolved solicitation note; the `why`
+      // below says so explicitly (dated, and flagged as narrative rather
+      // than a confirmed structured Ask) instead of the removed, fully
+      // generic "a currently-relevant solicitation opportunity is on
+      // file" wording that gave no indication of what, concretely,
+      // still needs attention or how stale the evidence is.
+      const daysAgo = Math.max(0, Math.floor((evidence.now - actionable.sourceDate) / 86400));
+      const recencyLabel = daysAgo === 0 ? "today" : `${daysAgo} day${daysAgo === 1 ? "" : "s"} ago`;
       return {
         kind: "solicit",
         action: `Make a solicitation ask, following up on: ${actionable.factText}`,
-        why: "A specific, currently-relevant solicitation opportunity is on file.",
-        evidence: [`Recorded relationship fact: "${actionable.factText}"`],
+        why: `A solicitation note recorded ${recencyLabel} has no resolved outcome on file -- this is narrative evidence, not a confirmed structured Ask, so confirm it is still open before asking again.`,
+        evidence: [`Recorded relationship fact: "${actionable.factText}" (${dateLabel(actionable.sourceDate)}).`],
         confidence: "medium",
         timing: null,
         certainty: "narrative",
         specificity: 0.7,
         recency: 0.5,
         urgency: 0.4,
-        supportingDate: evidence.now,
+        supportingDate: actionable.sourceDate,
       };
     }
     // No currently-actionable solicitation fact for this donor -- do NOT

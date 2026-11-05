@@ -1,4 +1,4 @@
-import { DURABLE_BASELINE_SCORE, RELEVANCE_FLOOR, resolveDecayWindowDays, isConfirmedOutreachCompletion, isUnambiguousCompletedOutreachAction, type FactCategory, type FactLifecycle } from "./fact-classification.ts";
+import { DURABLE_BASELINE_SCORE, RELEVANCE_FLOOR, resolveDecayWindowDays, isConfirmedOutreachCompletion, isResolvedSolicitationFact, isUnambiguousCompletedOutreachAction, type FactCategory, type FactLifecycle } from "./fact-classification.ts";
 
 // Relationship Intelligence Phase 2 -- deterministic synthesis, exactly
 // as approved in docs/AI-HANDOFF.md's "Relationship Snapshot Synthesis
@@ -67,6 +67,17 @@ function scoreFact(fact: SynthesisFact, now: number, pinnedFresh: PinnedFreshSou
   // written in Production with the stale `durable` value, with zero data
   // migration required.
   if (isUnambiguousCompletedOutreachAction(fact.factText, fact.category)) return 0;
+  // Resolved-solicitation-outcome fix (2026-11-05, see fact-classification.
+  // ts's isResolvedSolicitationFact() doc comment for the full real-world
+  // evidence): checked before even the pinned-fresh override just below,
+  // so a fact whose own text already records how the ask concluded is
+  // never actionable again -- whatever the conclusion was, and regardless
+  // of whether its sourceInteractionId happens to coincide with a still-
+  // `pending` row in the structured `asks` table (that would itself be a
+  // data inconsistency this fix must not paper over by staying silent,
+  // but must also never let win out over the fact's own, more specific,
+  // recorded outcome).
+  if (isResolvedSolicitationFact(fact.factText, fact.category)) return 0;
   if (fact.lifecycle === "durable") return DURABLE_BASELINE_SCORE;
   // fact.lifecycle === "time_bound" (follow_up is filtered out by the
   // caller before this function ever sees it -- see
@@ -135,7 +146,7 @@ export function synthesizeRelationshipSnapshot(facts: SynthesisFact[], now: numb
   return { relationshipSummary: joinFacts(summarySet), institutionalMemory: joinFacts(memorySet) };
 }
 
-export type ActionableFact = { factText: string; category: FactCategory; sourceInteractionId: string | null; score: number };
+export type ActionableFact = { factText: string; category: FactCategory; sourceInteractionId: string | null; sourceDate: number; score: number };
 
 // Relationship Snapshot Architecture Stage 2 (see docs/AI-HANDOFF.md) --
 // a STRICT, non-fallback relevance check answering "is there a currently
@@ -167,7 +178,7 @@ export function findMostActionableFact(facts: SynthesisFact[], now: number, pinn
     .sort((a, b) => b.score - a.score || b.fact.sourceInteractionOccurredAt - a.fact.sourceInteractionOccurredAt);
   if (scored.length === 0) return null;
   const top = scored[0];
-  return { factText: top.fact.factText, category: top.fact.category, sourceInteractionId: top.fact.sourceInteractionId, score: top.score };
+  return { factText: top.fact.factText, category: top.fact.category, sourceInteractionId: top.fact.sourceInteractionId, sourceDate: top.fact.sourceInteractionOccurredAt, score: top.score };
 }
 
 export type ResolvedRelationshipSnapshot = SynthesisResult & { source: "facts" | "cache" };

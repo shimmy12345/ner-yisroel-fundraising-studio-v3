@@ -248,7 +248,7 @@ export type RecommendationEvidence = {
   // are null, because it no longer justifies a live recommendation.
   factActionability: {
     hasStructuredFacts: boolean;
-    actionableSolicitationFact: { factText: string } | null;
+    actionableSolicitationFact: { factText: string; sourceDate: number } | null;
     actionableAnyFact: { factText: string; category: FactCategory } | null;
   };
   now: number;
@@ -360,7 +360,7 @@ export function buildRecommendationEvidence(input: RecommendationEvidenceInput, 
       const any = findMostActionableFact(facts, now, pinnedFresh);
       return {
         hasStructuredFacts: true,
-        actionableSolicitationFact: solicitation ? { factText: solicitation.factText } : null,
+        actionableSolicitationFact: solicitation ? { factText: solicitation.factText, sourceDate: solicitation.sourceDate } : null,
         actionableAnyFact: any ? { factText: any.factText, category: any.category } : null,
       };
     })(),

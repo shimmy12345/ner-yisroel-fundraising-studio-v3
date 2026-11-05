@@ -472,6 +472,50 @@ export function isUnambiguousCompletedOutreachAction(factText: string, category:
   return COMPLETED_WELL_WISH_PATTERN.test(factText) || COMPLETED_OUTREACH_ACTION_PATTERN.test(factText);
 }
 
+// Resolved-solicitation-outcome fix (2026-11-05) -- evidenced investigating
+// a real Production report: the Daily Fundraising Agenda recommended
+// "Make a solicitation ask, following up on: $10,000 donation. Outcome:
+// $10,000 donation." for Dr. & Mrs. Yaakov Abdelhak, with the generic why
+// "A specific, currently-relevant solicitation opportunity is on file."
+// The underlying fact (category `solicitation`, lifecycle `time_bound`,
+// 90-day window) was sourced from a Trip Meeting note whose own text
+// already recorded how the ask concluded: "Confirmed Commitments:
+// $10,000 donation / Outcome: $10,000 donation" -- i.e. the donor already
+// gave the $10,000 during the meeting. Nothing in scoreFact() (fact-
+// synthesis.ts) ever asked "does this fact's own text already state how
+// the ask was resolved" for a singular-state category -- it only applies
+// ordinary age-based decay, so a freshly-recorded, already-resolved
+// solicitation note kept generating a confusing "ask again" recommendation
+// for up to 90 days.
+//
+// The fundraiser's own capture flow writes an explicit "Outcome: " line
+// only once an ask or commitment has actually been resolved -- whether
+// fulfilled, declined, or deferred (see app/api/interactions/[id]/
+// outcome/route.ts's `${notes}\nOutcome: ${outcome}`, and the Trip
+// Meeting "Confirmed Commitments: ... \nOutcome: ..." note format,
+// lib/meeting-notes/format.ts). sentenceList()'s line-based splitting
+// (lib/capture/interaction.ts) turns that "Outcome: ..." line into its
+// own specificFacts sentence whenever it also matches a fact signal (as
+// giving-related outcome language always will for a solicitation fact),
+// so the marker survives verbatim into fact_text.
+//
+// Deliberately NOT gated by `!isSingularStateCategory` the way
+// isUnambiguousCompletedOutreachAction is above: that guard exists
+// because a sentence merely OPENING with a contact verb ("Called and
+// discussed building naming opportunity.") says nothing about whether the
+// ask itself was resolved -- the call happened, the ask may not have. An
+// explicit "Outcome:" marker is a categorically stronger signal: it is
+// written only after the fundraiser has recorded a real conclusion, so
+// the solicitation it describes is -- whatever that conclusion was --
+// no longer outstanding. A genuinely still-open ask ("Solicited for
+// $10k.", "Interested in a Kollel donation.") never contains this marker
+// and is completely unaffected.
+export const SOLICITATION_OUTCOME_RECORDED_PATTERN = /\boutcome:/i;
+
+export function isResolvedSolicitationFact(factText: string, category: FactCategory): boolean {
+  return category === "solicitation" && SOLICITATION_OUTCOME_RECORDED_PATTERN.test(factText);
+}
+
 // Completion-awareness (2026-10-12) -- the 30-day decay window above
 // (COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS/COMPLETED_MILESTONE_EVENT_
 // DECAY_WINDOW_DAYS) fixes a fact that is simply OLD, but the real

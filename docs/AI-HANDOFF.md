@@ -63217,3 +63217,251 @@ sequence**:
 
 Documentation-only, per explicit instruction: no application code,
 database, workflow, or deployment was changed to produce this entry.
+
+## Morning Agenda Repeat-Solicitation Fix (2026-11-05)
+
+**Reported problem.** The Production Daily Fundraising Agenda email
+recommended, for Dr. & Mrs. Yaakov Abdelhak on November 5:
+
+> "Make a solicitation ask, following up on: $10,000 donation. Outcome:
+> $10,000 donation." -- why: "A specific, currently-relevant solicitation
+> opportunity is on file."
+
+Confusing on its face: the same sentence that's supposed to justify
+*asking* already states the ask's *outcome*.
+
+### 1. Donor's actual records (Production, read-only via `wrangler d1
+execute --remote`)
+
+- `donors` (`e4626eea-56ce-4005-96db-eeafbfde6628`): `relationship_summary`
+  / `institutional_memory` = `"$10,000 donation. Outcome: $10,000
+  donation."`
+- `donor_relationship_facts` (one row, `status='current'`): `category =
+  'solicitation'`, `lifecycle = 'time_bound'`, `fact_text = "$10,000
+  donation. Outcome: $10,000 donation."`, `source_interaction_id =
+  'trip-meeting-4198ab12-9d31-497d-9891-c22cf3d18eda'`,
+  `source_interaction_occurred_at = 1793809020` (2026-11-04T16:17:00Z,
+  i.e. the day before the reported agenda).
+- `interactions` (that same row, `type = 'meeting'`): summary --
+  "Trip meeting scheduled with Dr. & Mrs. Yaakov Abdelhak. Meeting with
+  Rav Baruch, who appreciated seeing Rabbi Frand and donated $10,000. ...
+  Confirmed Commitments: $10,000 donation / Outcome: $10,000 donation."
+  -- the fundraiser's own Trip Meeting note already records that the
+  donor donated the $10,000 during the visit.
+- `asks`: zero rows for this donor -- there is no structured, pending Ask
+  at all; the only evidence of a solicitation is this one narrative fact.
+- `giving_activities`: the most recent row is a `category = 'pending_gift'`
+  entry, `committed_cents = 1000000` ($10,000), `paid_cents = 0`,
+  `activity_date` 2026-11-03, `created_at` 2026-11-03T22:10:59Z -- a
+  Trip Planner "awaiting JL [import] confirmation" placeholder (the
+  feature's own, by-design category; `pending_gift`/`pending_pledge` rows
+  are deliberately excluded from every counted-giving total and from
+  `openPledge`/`mostRecentPaidGift` evidence until the back-office import
+  confirms them -- see `lib/giving/pending-records.ts`,
+  `lib/giving/management.ts`'s `COUNTED_GIVING_SQL`). This is working as
+  designed, not a data-integrity bug; it does mean the $10,000 gift is
+  not yet a "paid gift" by the system's own counted definition, so
+  `acknowledge_gift` correctly does not fire either.
+
+**Conclusion on the ask itself:** the fundraiser's own meeting note
+states the $10,000 ask was already fulfilled during the trip meeting.
+It is not open, not stale-but-unconfirmed, and not a separate new
+opportunity -- it is a completed solicitation whose outcome simply
+hadn't propagated into the counted-giving data yet (normal for this
+feature's awaiting-confirmation design) when the agenda ran the next
+morning.
+
+### 2. Why the engine generated this recommendation
+
+Traced to `lib/relationships/recommendation-candidates.ts`'s
+`solicitCandidate()`. For any donor with structured Relationship Facts
+(Stage 2 architecture), it calls `findMostActionableFact(facts, now,
+pinnedFresh, "solicitation")` (`lib/relationships/fact-synthesis.ts`) and,
+if a fact clears `RELEVANCE_FLOOR`, unconditionally recommends asking
+again, with the fixed generic `why` text quoted above.
+
+Root cause is two layers deep in `scoreFact()`
+(`lib/relationships/fact-synthesis.ts`) and the category classifier
+(`lib/relationships/fact-classification.ts`):
+
+1. `classifyFactCategory()` assigns category `solicitation` to ANY
+   sentence containing giving-adjacent vocabulary
+   (`SOLICITATION_FACT_TERMS` includes `gift|giving|donation|
+   contribution|payment`, not only "ask"/"solicited" words) --
+   `classifyFactLifecycle()` then defaults a singular-state category
+   with no other signal to `time_bound` with a 90-day decay window.
+   Neither step asks whether the sentence reports an *open* ask or a
+   *concluded* one.
+2. `isUnambiguousCompletedOutreachAction()` -- the ONE existing
+   "this is already done, stop recommending it" check `scoreFact()`
+   applies -- is explicitly, deliberately disabled for singular-state
+   categories (`solicitation`/`health`), by design: a solicitation note
+   that merely *opens* with a contact verb ("Called and discussed...")
+   must not be assumed resolved just because the call happened. That
+   guard is correct for its own evidenced case, but it left no
+   narrower check at all for the different, stronger signal this bug
+   actually has: the fact's own text explicitly states how the ask
+   concluded (an "Outcome:" line), not merely that a contact occurred.
+
+Mechanically, the literal text landed in `fact_text` because
+`sentenceList()` (`lib/capture/interaction.ts`) splits on line breaks, so
+the Trip Meeting note's two "Confirmed Commitments" lines ("$10,000
+donation" and "Outcome: $10,000 donation") each became their own
+`specificFacts` sentence, both matched `FACT_SIGNAL_PATTERN` (both
+contain "donation"), and both survived the 2-sentence cap, joined
+verbatim.
+
+### 3. System-wide scope
+
+A read-only Production scan of every `donor_relationship_facts` row
+found exactly **one** row anywhere in the table whose `fact_text`
+contains `"Outcome:"` -- Abdelhak's. The other four current
+`category='solicitation'` rows (Klein/"Solicited for a plaque ($5k)",
+Rovinsky/"...in memory of his wife ($5k)", Pfeiffer/"Solicited for $10k",
+Weinschneider/"Interested in a Kollel donation.") are genuinely still-open
+or ambiguous notes with no stated outcome, and are correctly unaffected
+by this fix. Staging has five current `solicitation` facts today
+(the same Klein/Rovinsky/Pfeiffer-shaped real notes); none contains
+`"Outcome:"` either, so this fix changes no currently-live Staging
+recommendation -- confirmed by direct read-only query, not assumed.
+
+This is a **mechanism-level gap**, not a one-off bad row: any future
+Trip Meeting (or any interaction) whose outcome note restates a
+giving-related conclusion in this same "Confirmed Commitments: .../
+Outcome: ..." shape will reproduce it. The fix below is general --
+keyed off the text's own structural marker, not this donor's wording.
+
+### 4. Fix implemented
+
+**`lib/relationships/fact-classification.ts`** -- new exported pattern
+and predicate:
+```ts
+export const SOLICITATION_OUTCOME_RECORDED_PATTERN = /\boutcome:/i;
+export function isResolvedSolicitationFact(factText: string, category: FactCategory): boolean {
+  return category === "solicitation" && SOLICITATION_OUTCOME_RECORDED_PATTERN.test(factText);
+}
+```
+Deliberately **not** gated by `!isSingularStateCategory` the way
+`isUnambiguousCompletedOutreachAction` is: that guard exists because
+merely *opening* with a contact verb says nothing about the ask's
+resolution. An explicit `"Outcome:"` marker is a stronger, structurally
+different signal -- the app's own capture flow (`app/api/interactions/
+[id]/outcome/route.ts`'s `` `${notes}\nOutcome: ${outcome}` ``, and the
+Trip Meeting "Confirmed Commitments: ... / Outcome: ..." note format,
+`lib/meeting-notes/format.ts`) writes it only once the fundraiser has
+recorded how a specific ask/commitment actually concluded -- fulfilled,
+declined, or deferred. Whatever that conclusion was, the solicitation it
+describes is no longer outstanding. A genuinely open ask ("Solicited for
+$10k.") never contains this marker and is unaffected either way
+(confirmed: it does not match any of Klein/Rovinsky/Pfeiffer/
+Weinschneider's real text).
+
+**`lib/relationships/fact-synthesis.ts`** -- wired into `scoreFact()`,
+checked before even the pinned-fresh override, so a resolved fact is
+never actionable regardless of age or whether its `sourceInteractionId`
+happens to coincide with a `pending` row in the structured `asks` table:
+```ts
+if (isResolvedSolicitationFact(fact.factText, fact.category)) return 0;
+```
+Also added `sourceDate` (the fact's real `sourceInteractionOccurredAt`)
+to the `ActionableFact` return type, so callers no longer have to use
+`evidence.now` as a stand-in for a date the fact actually has.
+
+**`lib/relationships/recommendation-evidence.ts`** -- plumbed `sourceDate`
+through `factActionability.actionableSolicitationFact`.
+
+**`lib/relationships/recommendation-candidates.ts`** -- `solicitCandidate()`'s
+structured-facts branch:
+- Removed the flagged generic `why` text ("A specific, currently-relevant
+  solicitation opportunity is on file.") -- per instruction, this phrase
+  is gone system-wide, not reworded case-by-case. Replaced with a dated,
+  specific explanation: *"A solicitation note recorded N days ago has no
+  resolved outcome on file -- this is narrative evidence, not a confirmed
+  structured Ask, so confirm it is still open before asking again."* This
+  only ever renders for a fact that survived the new resolved-outcome
+  check, i.e. a genuinely still-open note -- it both states why the donor
+  needs attention (the note is still live, no outcome recorded) and what
+  to do (confirm, don't assume, before re-asking), consistent with every
+  other candidate's evidence-grounded `why`.
+- `supportingDate` now uses the fact's real `sourceDate` instead of
+  `evidence.now`. Side effect (correctness fix, not scope creep): this
+  makes `recommendation-rank.ts`'s existing "an open pledge vetoes
+  `solicit` unless the evidence postdates the pledge" hard constraint
+  actually apply to the structured-facts branch -- previously it always
+  reported `evidence.now`, so that veto could never fire for it, unlike
+  the already-correct legacy-narrative and unconfirmed-historical
+  branches. A structured solicitation fact that predates the donor's
+  current open pledge is stale evidence already superseded by that newer
+  commitment and is now correctly vetoed the same way.
+
+### 5. Regression tests (`tests/relationship-fact-recommendation-actionability.test.mjs`)
+
+Added, reproducing the real shape directly:
+- Abdelhak's exact real `fact_text`, one day old -- `actionableSolicitationFact`
+  is `null`, no `solicit` candidate, and the winning recommendation is
+  never `solicit`.
+- A declined-outcome variant ("Outcome: Not interested at this time."),
+  one day old -- also suppressed; resolution, not a positive result, is
+  what matters.
+- A genuinely still-open fact ("Interested in a Kollel donation.", no
+  "Outcome:" marker) -- still generates `solicit`; the flagged generic
+  phrase is asserted absent, and the new why text's date/"narrative, not
+  confirmed Ask" language is asserted present.
+- Open-pledge veto now applies to the structured-facts branch: a
+  solicitation fact predating the donor's current open pledge is vetoed;
+  one postdating it survives, mirroring the already-existing legacy/
+  historical-branch tests.
+
+All 257 test files pass (`node scripts/run-tests.mjs`), including every
+pre-existing solicitation/fact-actionability case (Klein/Rovinsky/
+Pfeiffer-shaped regressions, pinned-fresh-Ask case, display-vs-
+actionability split, etc.) unchanged. `tsc --noEmit` passes clean.
+(`next build` could not be exercised in this sandbox -- Turbopack's
+output path for one deeply-nested API route,
+`app/api/trips/[id]/prospects/[prospectId]/attributions/[attributionId]/
+route`, exceeds Windows' filesystem path-length limit under this
+session's deeply-nested scratch directory; this is a pre-existing
+environment artifact of this sandbox's own path depth, unrelated to this
+change, and does not affect `tsc`'s clean type-check of every file this
+change touched.)
+
+### 6. Verification against real data
+
+Ran the actual, real `buildRecommendationEvidence()` /
+`generateCandidates()` / `buildDonorRecommendation()` functions (not a
+reimplementation) against Abdelhak's real, read-only-fetched
+`fact_text` and `sourceInteractionOccurredAt` in a throwaway local
+script: `actionableSolicitationFact` is `null`, no `solicit` candidate
+is generated, and the recommendation falls through to whatever else is
+genuinely supported by evidence (in the minimal script's incomplete
+inputs, `reconnect_contact_gap`; in the real agenda, with Abdelhak's
+actual, more recent contact history, the correct outcome is most likely
+no forced recommendation at all for this specific ask -- an honest
+empty state, not a repeat solicitation).
+
+Staging verification was read-only: queried every current
+`category='solicitation'` fact in both `fundraising-os-staging-db` and
+`fundraising-os-production-db` for the `"Outcome:"` marker (Section 3
+above) -- confirmed this fix changes zero currently-live recommendations
+in either environment today, and corrects exactly the one real,
+currently-wrong Production case. No Staging or Production donor record,
+migration, or deployment was modified to perform this verification.
+
+### 7. Unresolved / out of scope
+
+- The underlying `giving_activities` row for this $10,000 gift is still
+  `category = 'pending_gift'`, `paid_cents = 0`, awaiting the Trip
+  Planner feature's normal JL-import confirmation step -- this is the
+  feature's existing, by-design workflow (not modified or worked around
+  by this fix) and is not a data error for this task to correct. Once
+  that import confirms the gift, `acknowledge_gift` will fire normally
+  through the existing, unmodified giving-evidence path -- no new code
+  needed for that transition.
+- This fix is scoped to the `solicitation` category's own "Outcome:"
+  marker. It does not change `isUnambiguousCompletedOutreachAction`'s
+  existing, deliberate exclusion of singular-state categories from the
+  contact-verb-based completion check (still correct and unaffected --
+  see its own doc comment in `fact-classification.ts`).
+- Not deployed. No application code, migration, or Production/Staging
+  data was modified -- only the files listed in Section 4, committed to
+  this branch, pending authorization to deploy.
