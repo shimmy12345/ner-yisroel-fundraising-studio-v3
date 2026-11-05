@@ -63703,3 +63703,230 @@ not deleted.
 commit `4f3d88c` (includes `f779e24`). Live-verified against all 4
 required scenarios plus overall email clarity. **Not deployed to
 Production** -- awaiting separate authorization.
+
+## Morning Agenda Repeat-Solicitation Fix: Production Deployment (2026-11-05)
+
+**Authorized scope**: deploy the exact tested application revision,
+commit `4f3d88c` (includes `f779e24`), to Production. Commit `073e393`
+(Staging-deployment documentation only) explicitly does not require a
+separate application build. Keep the deployment limited to the reviewed
+changes; no donor-record modifications, no migrations, no manual email
+send, no change to the scheduled-send configuration.
+
+### 1. Pre-deployment check 1: exact revision, diff audit (no unauthorized application changes)
+
+- `git status --porcelain`: clean. `git rev-parse HEAD`:
+  `073e3938660e3cbe4c320905195fce039deab495`.
+- Confirmed `git diff --stat 4f3d88c..HEAD` touches only
+  `docs/AI-HANDOFF.md` (155 insertions, the Staging-deployment entry) --
+  the application code at HEAD is byte-identical to the "exact tested
+  application revision" `4f3d88c`. Built and deployed from HEAD
+  (`073e393`) on this basis, per instruction, rather than checking out
+  an older commit.
+- **Current live Production commit, identified for the diff audit**:
+  `ea6186fb503a5b43dee4dcd343930497f35de29a` (`ea6186f`, "Fix schema
+  Health check: order-independent table comparison"), Worker version
+  `53ef5832-3442-4728-860e-a94f1dfa7a8c` -- confirmed via `wrangler
+  deployments list --config wrangler.production.jsonc` (the only 100%
+  entry) and cross-checked against this file's own prior "Deployed
+  commit: `ea6186fb...`" / "Worker version: `53ef5832-...`" record.
+- `git diff --stat ea6186f..4f3d88c`: 22 files changed. Every file
+  individually accounted for, same method as the Staging round's audit:
+  - `.github/workflows/d1-restore-sync-check.yml`, `docs/AI-HANDOFF.md`,
+    `docs/D1-MIGRATION-SYNC-PROCESS.md`, every `tests/*` file,
+    `scripts/run-tests.mjs`, `scripts/check-migration-sync.mjs`,
+    `scripts/verify-remote-restore.mjs`: CI config, docs, standalone
+    scripts, or test files -- none reachable from `app/` (re-confirmed
+    this round for `scripts/verify-remote-restore.mjs` and
+    `scripts/check-migration-sync.mjs` specifically), so none enter the
+    deployed Worker bundle.
+  - `lib/operations/canonical-branch.ts` (new file),
+    `lib/operations/restore-drift-guard.ts`,
+    `lib/operations/restore-sync-generator.ts`: grepped for importers
+    under `app/` and `lib/` -- confirmed reachable only from each other
+    and from `scripts/check-migration-sync.mjs`/the GitHub Actions
+    workflow above, never from `app/`. Not part of the Worker bundle.
+  - `drizzle/pending-review/0049_fix_calendar_schema_text_staging_repair.sql`:
+    `git diff --name-status` shows `M` (modified), not added -- this is
+    the already-documented comment-only "RESOLUTION" note update to an
+    inert, intentionally-unapplied migration sitting in the
+    `pending-review/` holding area (see the "Final Schema and
+    Deployment Safeguard Cleanup" entry above); its actual SQL is
+    unchanged and it has never been and is not being applied by this or
+    any deploy.
+  - `lib/data-health/production-baseline.ts` (backup-relative schema
+    validation + index trailing-`;` fixes, commits `2f546e9`/`336d9f8`):
+    IS reachable from the Worker bundle (`app/api/operations/schema-
+    backup/route.ts`). Disclosed explicitly, exactly as for the Staging
+    deploy: this was its own separately authorized, separately tested
+    round earlier in this same session, independently verified via real
+    GitHub Actions restore-verification runs against both Staging (run
+    `41472943028`) and **Production** (run `41477811270`, already
+    documented COMPLETE above) -- not unrelated or unapproved, and
+    already live on Staging as of the prior round's deploy
+    (`8a5d938c-...`).
+  - `lib/relationships/fact-classification.ts`, `fact-synthesis.ts`,
+    `recommendation-candidates.ts`, `recommendation-evidence.ts`: the
+    two authorized solicitation-fix commits themselves.
+  - No other file touches application behavior.
+- **Conclusion**: the Production release diff contains no unauthorized
+  application changes. The one non-solicitation application file
+  carried along (`production-baseline.ts`) is itself already
+  independently authorized and verified, and already live on Staging.
+
+### 2. Pre-deployment check 2: latest Production backup, current Worker version for rollback
+
+- **Rollback target recorded**: Worker version
+  `53ef5832-3442-4728-860e-a94f1dfa7a8c` (commit `ea6186f`), confirmed
+  live at 100% via `wrangler deployments list --config
+  wrangler.production.jsonc` immediately before this deployment.
+- **Backup verification**: this session has no Cloudflare API/R2
+  credentials and no GitHub Actions/`gh` access, and Production's own
+  `/health` page requires a Cloudflare Access login this session cannot
+  complete -- disclosed to the owner as a blocker before proceeding
+  (see the pre-deployment question-and-answer immediately preceding
+  this entry). **The owner independently checked GitHub Actions
+  directly and confirmed the most recent Production nightly backup
+  workflow run (`d1-backup-nightly-production.yml`) shows a green
+  checkmark (success).** Recorded here as **owner-confirmed**, not
+  independently verified by this session -- the owner did not provide a
+  specific run ID or timestamp, and none is fabricated here. The most
+  recent backup this session independently, fully verified end-to-end
+  (download + restore + integrity/schema/row-count checks on a
+  disposable database) remains the one already documented above: the
+  2026-11-02 Production restore verification, GitHub Actions run
+  `41477811270`, artifact dated 2026-11-01.
+
+### 3. Pre-deployment check 3: no migrations or donor-record modifications required
+
+- Confirmed by the diff audit above: no new file under `drizzle/`
+  (only a comment-only edit to an already-inert `pending-review/`
+  migration, never applied). The two authorized commits touch only
+  recommendation-engine logic (`lib/relationships/*`) and their tests --
+  no schema change, no data write of any kind.
+- This session performed zero `INSERT`/`UPDATE`/`DELETE` statements
+  against `fundraising-os-production-db` at any point before, during,
+  or after this deployment -- every Production D1 query this session
+  ever issued was a read-only `SELECT` (donor/giving/ask/fact
+  investigation queries, all logged earlier in this file).
+
+### 4. Pre-deployment check 4: build, tests, deployment safety checks
+
+- `tsc --noEmit`: 0 errors.
+- `node scripts/run-tests.mjs`: **257/257 test files passing**.
+- `pnpm run build:production-independent`: completed, full route
+  manifest, no errors.
+- `node scripts/verify-build-manifest.mjs production-independent`: OK
+  (fresh build, correct environment, not stale).
+- `node scripts/check-production-feature-fingerprints.mjs`: all 7
+  feature fingerprints found; all 5 focused behavioral checks passed.
+- `PRODUCTION_LIVE_COMMIT=ea6186fb503a5b43dee4dcd343930497f35de29a node
+  scripts/check-production-branch-ancestry.mjs`: **passed** --
+  "Candidate commit `073e393...` is confirmed to be a descendant of the
+  current Production commit (`ea6186f...`)."
+- All four checks passed; none failed, so no stop-and-report was
+  triggered at this stage.
+
+### 5. Deployment
+
+`wrangler deploy --config wrangler.production.jsonc` -- succeeded.
+**New Production Worker Version ID: `a6e9c009-99e5-48ea-8793-77b738b40001`**,
+created 2026-11-05T16:43:32.449Z. 1 static asset re-uploaded
+(`/assets/index-Dih1ymXi.css` -- an expected fresh-build hash change
+spanning several days/commits of prior, already-authorized work since
+the last Production deploy, not a sign of any unreviewed content).
+Confirmed current (100%) via a follow-up `wrangler deployments status
+--config wrangler.production.jsonc`. No application code outside the
+reviewed diff was deployed. `wrangler.staging.jsonc` not touched by
+this command.
+
+### 6. Post-deployment verification -- against real, live Production
+
+- **New Worker version live**: confirmed, Section 5 above (`a6e9c009-...`
+  at 100%).
+- **Agenda preview loads**: fetched the real, live
+  `/api/agenda/preview?format=json` endpoint (authenticated browser
+  session) -- `status: 200`, `isEmpty: false`, real `generatedAt`
+  matching current time, subject "Fundraising Agenda — Thursday,
+  November 5", 3 suggested items. Confirms the exact same read-only
+  code path the real scheduled send uses (`generateAgenda()`) runs
+  cleanly on the new deployment. This route has no import of
+  `gmail-client.ts`/`sendGmail()` at all -- calling it cannot send mail
+  by construction, so this check could not have sent a manual morning
+  email.
+- **Abdelhak's real Production donor page** (`e4626eea-56ce-4005-96db-
+  eeafbfde6628`), fetched live post-deployment: `"Make a solicitation
+  ask"` confirmed **absent** from the page entirely (also confirmed
+  `"Follow up as previously noted"` and `"Reach out to re-establish
+  contact"` both absent -- his real, fuller evidence set doesn't
+  generate either of those either). **Suggested Action now reads: "No
+  suggested action available. Add a reminder, or log an interaction, to
+  generate a suggested next step."** -- the honest empty state, exactly
+  the fix's intended outcome, replacing the incorrect "Make a
+  solicitation ask, following up on: $10,000 donation. Outcome: $10,000
+  donation." the fundraiser originally reported. The donor's
+  Relationship Snapshot still correctly displays the historical fact
+  text itself ("$10,000 donation. Outcome: $10,000 donation.") --
+  display and actionability remain correctly separated, per this
+  architecture's existing design.
+- **Donor financial records confirmed unmodified** (read-only,
+  before/after comparison against this investigation's original
+  findings): Abdelhak's `giving_activities` row
+  (`6e1e7719-59aa-419e-ba4a-a9887c03a829`) still
+  `committed_cents=1000000, paid_cents=0, balance_cents=0,
+  category='pending_gift'`, byte-identical to the original
+  investigation. Still zero `asks` rows. His
+  `donor_relationship_facts` row's own `updated_at`
+  (`1793809109`) is **unchanged** from its original write on
+  2026-11-04 -- proof nothing touched it. Production D1's own
+  `size_after` meta field (`10543104`) is identical across every read
+  this entire session, before and after this deployment.
+- **No manual email sent, no send-configuration changed**: only the
+  read-only preview route and read-only D1 `SELECT` queries were used
+  for verification; `lib/agenda/send-log.ts`,
+  `lib/agenda/gmail-client.ts`, and the Worker's cron trigger
+  configuration (`schedule: 0 * * * *`, unchanged, visible in the
+  deploy output above) were not touched.
+
+### 7. Rollback information
+
+- **Rollback target**: Worker version
+  `53ef5832-3442-4728-860e-a94f1dfa7a8c` (commit `ea6186f`), live
+  immediately before this deployment.
+- **Rollback command**: `wrangler rollback
+  a6e9c009-99e5-48ea-8793-77b738b40001 --config
+  wrangler.production.jsonc` (rolls back the version just deployed), or
+  explicitly redeploy `53ef5832-...`'s source commit (`ea6186f`) via
+  the standard `deploy:production-independent` chain. No database
+  rollback is required for this change -- no migration was applied and
+  no data was written.
+
+### 8. Unresolved issues
+
+- None found. All required pre- and post-deployment checks passed or
+  were explicitly, transparently resolved (the backup-freshness check
+  via owner confirmation, Section 2).
+- The pre-existing `check-main-restore-sync.mjs` drift warning (main
+  vs. this branch's migration `0056`/`trips` state) remains open,
+  unrelated to this round, already tracked separately.
+
+### Final report
+
+1. **Deployed commit**: `073e3938660e3cbe4c320905195fce039deab495`
+   (application code byte-identical to the authorized `4f3d88c`,
+   includes `f779e24`).
+2. **New Production Worker version**: `a6e9c009-99e5-48ea-8793-77b738b40001`.
+3. **Rollback target**: `53ef5832-3442-4728-860e-a94f1dfa7a8c` (commit
+   `ea6186f`).
+4. **Backup status**: owner-confirmed green checkmark on the most
+   recent Production nightly backup GitHub Actions run (no specific run
+   ID/date supplied); most recent session-verified restore remains the
+   2026-11-02 run (`41477811270`).
+5. **Production verification**: new Worker version live at 100%;
+   agenda preview loads correctly; Abdelhak's real donor page now shows
+   "No suggested action available" instead of the incorrect repeat
+   solicitation; donor financial records and the relationship fact row
+   confirmed unmodified.
+6. **No manual email sent. No send-schedule/configuration changed. No
+   migration applied. No donor record modified.**
+7. **Unresolved issues**: none.
