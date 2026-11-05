@@ -63548,3 +63548,158 @@ passes clean.
 Not deployed, per explicit instruction. No application code, migration,
 or Production/Staging data was modified beyond the files listed above,
 committed to this branch, pending separate authorization to deploy.
+
+## Morning Agenda Repeat-Solicitation Fix: Staging Deployment (2026-11-05)
+
+**Authorized scope**: deploy commits `f779e24` and `4f3d88c` (the
+Abdelhak fix and the pending/deferred-outcome correction above) to
+Staging only. Not Production. Do not modify donor financial records.
+
+### 1. Pre-deployment verification
+
+- `git status --porcelain`: clean working tree.
+- `git rev-parse HEAD`: `4f3d88ca8b88272822bc8b6ed5960a789186e8df`.
+- `git merge-base --is-ancestor f779e24 HEAD` and the same for `4f3d88c`:
+  both confirmed ancestors of HEAD -- both authorized commits are
+  included in the exact revision about to be deployed.
+- **Diff audit against the last-known deployed Staging revision**
+  (`1e1e583`, Worker version `89e7a298-c244-4d71-b597-054028077543`,
+  2026-11-02T04:22:01Z -- confirmed still the current (100%) deployment
+  via `wrangler deployments list` immediately before this round):
+  `git diff --stat 1e1e583..HEAD` showed 11 files changed beyond the two
+  authorized commits' own 4 files. All accounted for and all already
+  explicitly authorized and tested in this same session, not stray or
+  unreviewed:
+  - `docs/AI-HANDOFF.md`, `scripts/run-tests.mjs`, `tests/production-
+    baseline.test.mjs`, `tests/verify-remote-restore-wiring.test.mjs`:
+    docs/tests only, not part of the deployed Worker bundle at all.
+  - `scripts/verify-remote-restore.mjs`: a standalone script invoked
+    only by GitHub Actions/local CLI; confirmed (again) nothing under
+    `app/` imports it, so it never enters the Worker bundle.
+  - `lib/data-health/production-baseline.ts` (+95 lines, commits
+    `2f546e9`/`336d9f8`, the backup-relative schema validation and
+    index-trailing-`;` fixes): this file IS reachable from the Worker
+    bundle via `app/api/operations/schema-backup/route.ts`, so it DOES
+    ship as part of this deploy. **Disclosed explicitly, not silently
+    carried along**: this was its own separately authorized, separately
+    tested round earlier in this same session (verified live via real
+    GitHub Actions restore-verification runs against both Staging run
+    `41472943028` and Production run `41477811270`, both already
+    documented COMPLETE above) -- not unrelated or unapproved, just a
+    different feature than this round's solicitation fix. A Worker
+    deploy ships the full current tree; there is no mechanism to deploy
+    two cherry-picked commits in isolation from the rest of the
+    branch's already-approved history.
+  - No other file in the diff touches application behavior.
+
+### 2. Tests and build
+
+- `tsc --noEmit`: 0 errors.
+- `node scripts/run-tests.mjs`: **257/257 test files passing**
+  (`check-main-restore-sync.mjs`'s pre-existing, documented, unrelated
+  migration-0056-vs-main drift warning is the only non-test-file
+  output, unchanged from every prior round).
+- `pnpm run build:staging-independent`: completed, full route manifest,
+  no errors.
+- `pnpm run deploy:staging-independent` -- its own built-in gates, run
+  automatically as part of the command, both passed before `wrangler
+  deploy` ever ran:
+  - `verify-build-manifest.mjs staging-independent`: OK (fresh build,
+    correct environment, not stale).
+  - `check-production-feature-fingerprints.mjs`: all 7 feature
+    fingerprints found; all 5 focused behavioral checks passed.
+
+### 3. Deployment
+
+`pnpm run deploy:staging-independent` (`wrangler deploy --config
+wrangler.staging.jsonc`) -- succeeded. **New Staging Worker Version ID:
+`8a5d938c-492a-4239-96cf-b7bc05454ab7`**, created
+2026-11-05T15:13:20.248Z. Confirmed current (100%) via a follow-up
+`wrangler deployments list --config wrangler.staging.jsonc` call,
+superseding `89e7a298-...`. Server-only change -- "No updated asset
+files to upload" (no CSS/static diff, as expected for a pure backend
+logic fix). URL: `https://fundraising-os-staging.sgoldstein.workers.dev`.
+Independent Staging only (`wrangler.staging.jsonc`) -- `wrangler.production.jsonc`
+never touched, no Production deploy command run.
+
+### 4. Live Staging verification (real deployed Worker, not a local reproduction)
+
+Fetched the real, live `/api/agenda/preview?format=json` endpoint (the
+exact code path `generateAgenda()`/`buildAgenda()` the real scheduled
+send uses, read-only by construction -- no `sendGmail()` import exists
+in that route) via an authenticated browser session. Today's real
+agenda (Thursday, November 5) rendered correctly: 2 Today's Priorities,
+1 Overdue, 27 Important Dates, 3 Suggested -- all real, pre-existing
+Staging donors, clean HTML and plain-text output, dollar amounts and
+day-counts formatted correctly, no raw template artifacts.
+
+**No currently-live Staging donor has the "Outcome:"-marker shape**
+(confirmed by direct read-only query, Section 3 of the prior
+pre-deployment entry) -- so direct live verification of the 4 specific
+scenarios required real data. Staging already has an established,
+documented convention for exactly this (`SYNTHETIC TEST — ... (safe, do
+not use for real data)` donors, owned by the real Staging user,
+inserted via `wrangler d1 execute --remote`, left in place afterward as
+reusable fixtures -- the same convention behind the two
+`SYNTHETIC TEST — Partial/Multi Payment Pledge` donors already visible
+in today's live Suggested section above). Followed it exactly: created
+4 new synthetic donors, each with ONE `donor_relationship_facts` row
+(narrative-only; **no `gifts`/`giving_activities`/`asks`/`pledges` rows
+created for any of them -- no donor financial record was written or
+modified**):
+
+| Donor (id) | Fact text | Scenario |
+|---|---|---|
+| SYNTHETIC TEST — Completed Solicitation (`9a95df55-...`) | "$10,000 donation. Outcome: $10,000 donation." (Abdelhak's real text, verbatim) | Completed $10,000 donation |
+| SYNTHETIC TEST — Declined Solicitation (`a4dc5b42-...`) | "Asked for a $5,000 gift. Outcome: Declined, not interested at this time." | Declined solicitation |
+| SYNTHETIC TEST — Pending Solicitation Follow-up (`eb2e9e8b-...`) | "Discussed a $10,000 ask. Outcome: Donor requested another meeting next month." | Pending/deferred solicitation (the code-review reviewer's own example) |
+| SYNTHETIC TEST — Open Solicitation (`262b5ef5-...`) | "Interested in a Kollel donation." (no outcome marker) | Genuinely open solicitation |
+
+None of these 4 placed in the agenda EMAIL's own top-3 "Suggested"
+section (`MAX_SUGGESTED = 3` in `lib/agenda/agenda-model.ts`, re-ranked
+by real recommendation score -- existing, unmodified, unrelated
+behavior; they simply scored below the 3 real/existing pledge
+follow-ups already there). This is expected agenda-display behavior,
+not a problem with the fix. Verified each donor's own individual
+Suggested Action directly instead, by fetching each real `/donors/{id}`
+page from the live deployed Worker (authenticated browser session,
+`credentials: 'include'`) and confirming the exact rendered text:
+
+1. **Completed $10,000 donation**: rendered action = **"Reach out to
+   re-establish contact."** -- NOT a repeat solicitation. (`"Make a
+   solicitation ask"` confirmed absent from the page entirely.)
+2. **Declined solicitation**: rendered action = **"Reach out to
+   re-establish contact."** -- NOT a repeat ask. (Same absence
+   confirmed.)
+3. **Pending/deferred solicitation**: rendered action = **"Follow up as
+   previously noted -- do not repeat the original ask: Discussed a
+   $10,000 ask..."** -- an appropriate follow-up recommendation, exactly
+   per instruction, never a repeat ask.
+4. **Genuinely open solicitation**: rendered action = **"Make a
+   solicitation ask, following up on: Interested in a Kollel
+   donation."**, why = **"A solicitation note recorded 1 day ago..."**
+   -- remains eligible, specific and dated, not the removed generic
+   phrase.
+
+All four match this round's unit tests exactly, now proven against the
+real deployed Worker and real D1 data, not only a local reproduction.
+
+Synthetic fixtures **left in place** (matching the existing precedent
+exactly) as a reusable regression-verification set for future rounds --
+not deleted.
+
+### 5. Unresolved issues
+
+- None found. All 5 Staging verification requirements confirmed live.
+- The pre-existing `check-main-restore-sync.mjs` drift warning (main vs.
+  this branch's migration `0056`/`trips` state) remains open, unrelated
+  to this round, already tracked separately.
+- Production deployment was explicitly out of scope for this round and
+  was not performed.
+
+### Status
+
+**Deployed to Staging**: Worker version `8a5d938c-492a-4239-96cf-b7bc05454ab7`,
+commit `4f3d88c` (includes `f779e24`). Live-verified against all 4
+required scenarios plus overall email clarity. **Not deployed to
+Production** -- awaiting separate authorization.
