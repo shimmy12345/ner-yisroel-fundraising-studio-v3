@@ -489,13 +489,11 @@ export function isUnambiguousCompletedOutreachAction(factText: string, category:
 // for up to 90 days.
 //
 // The fundraiser's own capture flow writes an explicit "Outcome: " line
-// only once an ask or commitment has actually been resolved -- whether
-// fulfilled, declined, or deferred (see app/api/interactions/[id]/
-// outcome/route.ts's `${notes}\nOutcome: ${outcome}`, and the Trip
-// Meeting "Confirmed Commitments: ... \nOutcome: ..." note format,
-// lib/meeting-notes/format.ts). sentenceList()'s line-based splitting
-// (lib/capture/interaction.ts) turns that "Outcome: ..." line into its
-// own specificFacts sentence whenever it also matches a fact signal (as
+// once an ask or commitment has a recorded next state -- a concluded
+// result (fulfilled or declined) OR a scheduled next step (deferred,
+// still pending). sentenceList()'s line-based splitting (lib/capture/
+// interaction.ts) turns that "Outcome: ..." line into its own
+// specificFacts sentence whenever it also matches a fact signal (as
 // giving-related outcome language always will for a solicitation fact),
 // so the marker survives verbatim into fact_text.
 //
@@ -505,15 +503,67 @@ export function isUnambiguousCompletedOutreachAction(factText: string, category:
 // discussed building naming opportunity.") says nothing about whether the
 // ask itself was resolved -- the call happened, the ask may not have. An
 // explicit "Outcome:" marker is a categorically stronger signal: it is
-// written only after the fundraiser has recorded a real conclusion, so
-// the solicitation it describes is -- whatever that conclusion was --
-// no longer outstanding. A genuinely still-open ask ("Solicited for
-// $10k.", "Interested in a Kollel donation.") never contains this marker
-// and is completely unaffected.
+// written only after the fundraiser has recorded a real next state. A
+// genuinely still-open ask with no recorded outcome at all ("Solicited
+// for $10k.", "Interested in a Kollel donation.") never contains this
+// marker and is completely unaffected.
 export const SOLICITATION_OUTCOME_RECORDED_PATTERN = /\boutcome:/i;
 
+// Pending/deferred-outcome correction (2026-11-05, post-review) -- the
+// original fix above treated EVERY "Outcome:" marker as a concluded
+// result, but an outcome can just as validly record that the ask is
+// still open and a specific next step is expected ("Outcome: Donor
+// requested another meeting next month.", "Outcome: Thinking it over,
+// will follow up in two weeks."), not that it was fulfilled or declined.
+// Suppressing those entirely would silently drop a genuinely still-open
+// solicitation; recommending the original "Make a solicitation ask,
+// following up on: ..." wording for them is also wrong in the opposite
+// direction -- the recorded next action is to FOLLOW UP (check back,
+// attend the next meeting), not to make a fresh ask. Reuses the exact
+// closed vocabulary already proven for this kind of distinction
+// elsewhere in this module and in lib/capture/interaction.ts's own
+// COMMITMENT_PATTERN ("follow up", "will", "schedule", "call back") plus
+// the narrow set of additional deferral words this evidenced example
+// actually needs ("another meeting", "thinking it over", "next month/
+// week/year", "pending", "deferred", "awaiting") -- not a speculative
+// broader vocabulary.
+//
+// Checked against only the OUTCOME portion of the text (everything
+// after the LAST "Outcome:" marker, via outcomeSegment() below), never
+// the whole fact -- the original ask/commitment description preceding
+// it (e.g. "Discussed a $10,000 ask.") is irrelevant to whether its
+// OUTCOME was concluded or deferred, and must never itself trip this
+// pattern (a commitment description containing "will"/"schedule" is
+// common and does not describe the outcome at all).
+function outcomeSegment(factText: string): string | null {
+  const parts = factText.split(/\boutcome:\s*/i);
+  return parts.length > 1 ? parts[parts.length - 1] : null;
+}
+
+export const PENDING_SOLICITATION_OUTCOME_PATTERN = /\b(follow[- ]?up|another meeting|call back|revisit|will (?:think|decide|get back|discuss)|thinking it over|next (?:month|week|year)|pending|deferred|awaiting|requested (?:more )?time)\b/i;
+
+export function isPendingSolicitationOutcome(factText: string, category: FactCategory): boolean {
+  if (category !== "solicitation") return false;
+  const segment = outcomeSegment(factText);
+  if (segment === null) return false;
+  return PENDING_SOLICITATION_OUTCOME_PATTERN.test(segment);
+}
+
+// A solicitation fact is only treated as fully RESOLVED (never
+// actionable again, regardless of age) when it both has a recorded
+// outcome AND that outcome does not itself describe a still-pending next
+// step. "Resolved" here means "no longer outstanding in its CURRENT
+// form" -- it says nothing about whether the result was positive
+// (fulfilled) or negative (declined); both are equally final and both
+// must stop generating a repeat "ask again" recommendation. A pending/
+// deferred outcome is deliberately excluded here -- see
+// isPendingSolicitationOutcome above -- so it remains eligible for an
+// appropriate follow-up recommendation instead of being silently
+// suppressed.
 export function isResolvedSolicitationFact(factText: string, category: FactCategory): boolean {
-  return category === "solicitation" && SOLICITATION_OUTCOME_RECORDED_PATTERN.test(factText);
+  if (category !== "solicitation") return false;
+  if (!SOLICITATION_OUTCOME_RECORDED_PATTERN.test(factText)) return false;
+  return !isPendingSolicitationOutcome(factText, category);
 }
 
 // Completion-awareness (2026-10-12) -- the 30-day decay window above

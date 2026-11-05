@@ -2,7 +2,7 @@ import type { RecommendationEvidence } from "./recommendation-evidence.ts";
 import type { GiftSource } from "../giving/acknowledgment.ts";
 import { interactionKindLabel, relationshipSnapshotDetails, splitInteractionSummary, sentenceList, type InteractionKind } from "../capture/interaction.ts";
 import { askDescriptor, askFollowUpAction } from "../capture/ask.ts";
-import { classifyFactCategory, isUnambiguousCompletedOutreachAction } from "./fact-classification.ts";
+import { classifyFactCategory, isPendingSolicitationOutcome, isUnambiguousCompletedOutreachAction } from "./fact-classification.ts";
 
 // Plausible next-action candidates generated from one donor's evidence.
 // Each generator only fires on its own precondition, so a candidate simply
@@ -467,16 +467,31 @@ function solicitCandidate(evidence: RecommendationEvidence): RecommendationCandi
       // isResolvedSolicitationFact() (fact-classification.ts, wired into
       // scoreFact() in fact-synthesis.ts) already zeroes out -- so
       // `actionable` never reaches here for -- any solicitation fact whose
-      // own text records how the ask concluded (an explicit "Outcome: "
-      // line). Every candidate reaching this point is therefore a
-      // genuinely still-open, unresolved solicitation note; the `why`
-      // below says so explicitly (dated, and flagged as narrative rather
-      // than a confirmed structured Ask) instead of the removed, fully
-      // generic "a currently-relevant solicitation opportunity is on
-      // file" wording that gave no indication of what, concretely,
-      // still needs attention or how stale the evidence is.
+      // own text records a CONCLUDED outcome (fulfilled or declined).
+      // What DOES still reach here, besides a note with no outcome at
+      // all, is one whose recorded outcome itself describes a still-
+      // pending next step (isPendingSolicitationOutcome() -- "Outcome:
+      // Donor requested another meeting next month."). That case must
+      // never be worded as "make a solicitation ask... again": the
+      // recorded next action is to follow up, not to repeat the original
+      // ask, per the explicit post-review correction (2026-11-05).
       const daysAgo = Math.max(0, Math.floor((evidence.now - actionable.sourceDate) / 86400));
       const recencyLabel = daysAgo === 0 ? "today" : `${daysAgo} day${daysAgo === 1 ? "" : "s"} ago`;
+      if (isPendingSolicitationOutcome(actionable.factText, "solicitation")) {
+        return {
+          kind: "solicit",
+          action: `Follow up as previously noted -- do not repeat the original ask: ${actionable.factText}`,
+          why: `A solicitation note recorded ${recencyLabel} records a next step, not a concluded result -- the recorded action is to follow up, not to ask again.`,
+          evidence: [`Recorded relationship fact: "${actionable.factText}" (${dateLabel(actionable.sourceDate)}).`],
+          confidence: "medium",
+          timing: null,
+          certainty: "narrative",
+          specificity: 0.7,
+          recency: 0.5,
+          urgency: 0.4,
+          supportingDate: actionable.sourceDate,
+        };
+      }
       return {
         kind: "solicit",
         action: `Make a solicitation ask, following up on: ${actionable.factText}`,

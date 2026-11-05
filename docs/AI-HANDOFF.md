@@ -63465,3 +63465,86 @@ migration, or deployment was modified to perform this verification.
 - Not deployed. No application code, migration, or Production/Staging
   data was modified -- only the files listed in Section 4, committed to
   this branch, pending authorization to deploy.
+
+## Morning Agenda Repeat-Solicitation Fix -- Pending/Deferred Outcome Correction (2026-11-05, pre-deployment review)
+
+**Reviewer feedback on commit `f779e24`** (the Abdelhak fix above, not
+yet deployed): `isResolvedSolicitationFact()` treated EVERY `"Outcome:"`
+marker as a concluded ask. That is correct for Abdelhak's real case
+(`"Outcome: $10,000 donation."` -- a concluded, fulfilled result), but an
+outcome can just as validly record that the ask is still open and a
+specific next step is expected -- e.g. `"Outcome: Donor requested another
+meeting next month."` Suppressing that case entirely would silently drop
+a genuinely still-open solicitation; this round's instruction: completed
+or declined solicitations must still never be re-recommended, but
+pending/deferred ones must remain eligible for an appropriate follow-up
+recommendation, and must never be worded as "make the same ask again"
+when the recorded next action is to follow up.
+
+### Fix
+
+**`lib/relationships/fact-classification.ts`**:
+- Added `outcomeSegment(factText)` (internal) -- extracts everything
+  after the LAST `"Outcome:"` marker, so the classification below only
+  ever looks at the outcome itself, never the original ask/commitment
+  description preceding it (which commonly contains unrelated words like
+  "will"/"schedule" that must never be mistaken for the outcome's own
+  language).
+- Added `PENDING_SOLICITATION_OUTCOME_PATTERN` (exported) and
+  `isPendingSolicitationOutcome(factText, category)` -- a narrow,
+  evidence-gated vocabulary for deferral/follow-up language in the
+  outcome segment: `follow up`/`follow-up`, `another meeting`, `call
+  back`, `revisit`, `will think/decide/get back/discuss`, `thinking it
+  over`, `next month/week/year`, `pending`, `deferred`, `awaiting`,
+  `requested (more) time`. Reuses the same closed-vocabulary convention
+  this module already uses everywhere else (e.g.
+  `COMPLETED_WELL_WISH_PATTERN`, `COMPLETED_MILESTONE_EVENT_PATTERN`) --
+  not a speculative broader list.
+- `isResolvedSolicitationFact()` narrowed: a fact is only "resolved" when
+  it has a recorded outcome AND that outcome does NOT match
+  `isPendingSolicitationOutcome`. "Resolved" still covers BOTH a
+  fulfilled result and a declined one -- a negative outcome is just as
+  final as a positive one and must not be re-recommended either; only a
+  genuinely still-pending/deferred outcome is carved out.
+
+**`lib/relationships/recommendation-candidates.ts`** -- `solicitCandidate()`'s
+structured-facts branch now checks `isPendingSolicitationOutcome()`
+before building its `action`/`why`:
+- Pending/deferred case: `action` = `"Follow up as previously noted --
+  do not repeat the original ask: {factText}"`; `why` = "...records a
+  next step, not a concluded result -- the recorded action is to follow
+  up, not to ask again." Still `kind: "solicit"` (no new candidate kind
+  introduced -- this stays the smallest safe change, and keeps the
+  existing open-pledge-vetoes-solicit hard constraint in
+  `recommendation-rank.ts`, which keys off `candidate.kind`, applying
+  identically to this case).
+- Otherwise (no outcome, or a concluded-but-unmatched-by-resolved shape
+  that still reached this point): unchanged from the prior round's fix.
+
+### Regression tests (`tests/relationship-fact-recommendation-actionability.test.mjs`)
+
+Added:
+- `"Outcome: Donor requested another meeting next month."` (the
+  reviewer's own example) -- remains actionable (not suppressed);
+  `solicit` fires; action text does NOT say "Make a solicitation ask,
+  following up on"; action explicitly says not to repeat the original
+  ask; why text says the recorded action is to follow up; this can still
+  win as the overall recommendation.
+- `"Outcome: Thinking it over, will follow up in two weeks."` -- same
+  behavior with different evidenced phrasing, proving the fix is keyed
+  to deferral language, not to one exact sentence.
+- Abdelhak's original fulfilled-outcome fact, re-run unchanged -- still
+  fully suppressed, proving this round's correction does not regress the
+  prior fix.
+- A declined outcome (`"Outcome: Declined, not interested at this
+  time."`) -- still fully suppressed; "resolved" covers both fulfilled
+  and declined, only pending/deferred is carved out.
+
+All 257 test files pass (`node scripts/run-tests.mjs`); `tsc --noEmit`
+passes clean.
+
+### Status
+
+Not deployed, per explicit instruction. No application code, migration,
+or Production/Staging data was modified beyond the files listed above,
+committed to this branch, pending separate authorization to deploy.

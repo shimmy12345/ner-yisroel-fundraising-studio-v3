@@ -383,6 +383,58 @@ async function run() {
     assert.equal(rec?.kind, "solicit", "a structured solicitation fact postdating the pledge must survive the veto, same as the legacy/historical paths");
   }
 
+  // --- Pending/deferred-outcome correction (2026-11-05, post-review of
+  // the Abdelhak fix): an "Outcome:" marker does not always mean the ask
+  // concluded -- it can instead record that the ask is still open and a
+  // specific next step is expected. Such a fact must remain eligible for
+  // an appropriate follow-up recommendation, never silently suppressed
+  // like a truly resolved (fulfilled/declined) one -- but it must also
+  // never be worded as "make a solicitation ask... again," since the
+  // recorded next action is to follow up, not to repeat the ask. ---
+  {
+    const f = fact({ factText: "Discussed a $10,000 ask. Outcome: Donor requested another meeting next month.", category: "solicitation", lifecycle: "time_bound", sourceInteractionId: "int-pending-outcome", sourceInteractionOccurredAt: daysAgo(3) });
+    const evidence = evidenceFor({ relationshipFacts: [f], pendingAskSourceInteractionIds: [] });
+    assert.notEqual(evidence.factActionability.actionableSolicitationFact, null, "a pending/deferred outcome must remain actionable -- never silently suppressed like a resolved one");
+    const solicit = generateCandidates(evidence).find((c) => c.kind === "solicit");
+    assert.ok(solicit, "a pending/deferred solicitation outcome must still generate a recommendation, not disappear");
+    assert.doesNotMatch(solicit.action, /Make a solicitation ask, following up on/, "a pending outcome must never be worded as repeating the original ask");
+    assert.match(solicit.action, /do not repeat the original ask/i, "the action must explicitly say not to repeat the original ask");
+    assert.match(solicit.why, /follow up/i, "the why text must say the recorded next action is to follow up, not to ask again");
+    const rec = buildDonorRecommendation(evidence);
+    assert.equal(rec?.kind, "solicit", "the pending-outcome follow-up must still be able to win as the recommendation");
+  }
+
+  // --- Same principle, different evidenced phrasing ("will follow up in
+  // two weeks") -- proves the fix is keyed to deferral LANGUAGE in the
+  // outcome, not to this one exact sentence. ---
+  {
+    const f = fact({ factText: "Asked about renewing support. Outcome: Thinking it over, will follow up in two weeks.", category: "solicitation", lifecycle: "time_bound", sourceInteractionId: "int-pending-outcome-2", sourceInteractionOccurredAt: daysAgo(1) });
+    const evidence = evidenceFor({ relationshipFacts: [f], pendingAskSourceInteractionIds: [] });
+    const solicit = generateCandidates(evidence).find((c) => c.kind === "solicit");
+    assert.ok(solicit, "a differently-worded pending outcome must also remain actionable");
+    assert.doesNotMatch(solicit.action, /Make a solicitation ask, following up on/, "must not be worded as repeating the ask for this phrasing either");
+  }
+
+  // --- The original Abdelhak fix must be completely unaffected: an
+  // outcome that restates a concluded, fulfilled gift (no deferral
+  // language at all) must still be fully suppressed, exactly as before
+  // this round's correction. ---
+  {
+    const f = fact({ factText: "$10,000 donation. Outcome: $10,000 donation.", category: "solicitation", lifecycle: "time_bound", sourceInteractionId: "trip-meeting-abdelhak-2", sourceInteractionOccurredAt: daysAgo(1) });
+    const evidence = evidenceFor({ relationshipFacts: [f], pendingAskSourceInteractionIds: [] });
+    assert.equal(evidence.factActionability.actionableSolicitationFact, null, "the original Abdelhak fix (a concluded, fulfilled outcome) must still be fully suppressed after this round's pending/deferred correction");
+    assert.equal(candidateKinds(evidence).includes("solicit"), false, "a concluded outcome must still generate no solicit candidate at all");
+  }
+
+  // --- And a declined (negative, but still concluded) outcome must also
+  // remain fully suppressed -- "resolved" covers fulfilled AND declined,
+  // only deferred/pending is carved out. ---
+  {
+    const f = fact({ factText: "Asked for a $5,000 gift. Outcome: Declined, not interested at this time.", category: "solicitation", lifecycle: "time_bound", sourceInteractionId: "int-declined-2", sourceInteractionOccurredAt: daysAgo(1) });
+    const evidence = evidenceFor({ relationshipFacts: [f], pendingAskSourceInteractionIds: [] });
+    assert.equal(candidateKinds(evidence).includes("solicit"), false, "a declined outcome must remain fully suppressed, not reclassified as pending merely because it mentions a related word");
+  }
+
   console.log("relationship-fact-recommendation-actionability: ok");
 }
 
