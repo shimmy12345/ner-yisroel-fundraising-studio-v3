@@ -64162,3 +64162,173 @@ the actual server state, not a rendering of it):
 - **Production**: **NOT deployed.** Per the owner's explicit
   instruction, no Production deployment was attempted this round.
   Awaiting authorization.
+
+## Trip Planning Usability Fixes: Production Deployment (2026-11-06)
+
+Owner personally tested both features on Staging (Worker version
+`74fdc598-4dbe-4e71-b767-68bdd06c5963`) and explicitly authorized
+Production deployment, with the pre/post checks and constraints listed
+below.
+
+### 1. Pre-deployment: exact commit and diff scope
+
+- **Deployed commit**: `e0708baf898907cc1cbd61f97398d5d85c3a5853`
+  (local branch tip, confirmed identical to
+  `origin/trip-planner-multi-region-manual-prospects` via `git fetch` +
+  comparison -- no uncommitted or unpushed difference).
+- **Diff against the live Production commit**
+  (`073e3938660e3cbe4c320905195fce039deab495`, the commit the
+  currently-live Worker version `a6e9c009-...` was built from --
+  Section 1 of this round's "Staging" entry above): exactly 2 commits
+  ahead (`1aaf9a5`, a docs-only entry for the *prior* deployment, and
+  `e0708ba`, this round's feature commit). `git diff --stat` confirmed
+  exactly 6 files touched -- `TripDashboardExperience.tsx`,
+  `lib/relationships/trip-model.ts`, `scripts/run-tests.mjs`, two test
+  files, and `docs/AI-HANDOFF.md` -- no migration, no schema file, no
+  unrelated application code. **No unauthorized or unrelated changes
+  are included.**
+
+### 2. Pre-deployment: Production backup
+
+Independently verified directly against the real backup-status R2
+bucket this time (`wrangler r2 object get
+fundraising-os-production-backup-status/backup-latest-success.json
+--remote`) -- the R2 read that hung indefinitely in the prior
+("Morning Agenda") round worked cleanly this time:
+
+- Latest successful backup: **completed 2026-11-06T15:53:45Z**
+  (GitHub Actions run
+  [42247217905](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/42247217905)),
+  roughly 2 hours before this deployment (deployment started
+  2026-11-06T17:5x UTC) -- well inside the 36h "healthy" threshold
+  `lib/backup-status/freshness.ts` defines.
+- Latest *attempt* record matches the latest *success* record exactly
+  (same run ID, `attemptStatus: "success"`) -- no newer failed attempt
+  exists that would make the success record stale per
+  `hasNewerFailedAttempt()`'s own logic.
+- This is a real, independently-verified reading of the actual backup
+  status object, not an owner-reported confirmation.
+
+### 3. Pre-deployment: rollback target
+
+- **Rollback target**: Worker version
+  `a6e9c009-99e5-48ea-8793-77b738b40001` (commit `073e393`), confirmed
+  live at 100% via `wrangler deployments list --config
+  wrangler.production.jsonc` immediately before deploying.
+- **Rollback command**: `wrangler rollback
+  a6e9c009-99e5-48ea-8793-77b738b40001 --config
+  wrangler.production.jsonc`, or redeploy commit `073e393` via the
+  standard `deploy:production-independent` chain. No database rollback
+  is required -- this deployment applies no migration and writes no
+  data (Section 1).
+
+### 4. Pre-deployment: safety checks
+
+- `npx tsc --noEmit`: 0 errors.
+- `node scripts/run-tests.mjs`: **258/258 test files passed.** The
+  single reported failure, `check-main-restore-sync.mjs`, is addressed
+  separately in Section 5 below.
+- `node scripts/build-production-independent.mjs`: succeeded.
+- `node scripts/verify-build-manifest.mjs production-independent`: OK
+  (fresh build, correct environment).
+- `node scripts/check-production-feature-fingerprints.mjs`: all 7
+  feature fingerprints found; all 5 behavioral checks passed.
+- `PRODUCTION_LIVE_COMMIT=073e3938660e3cbe4c320905195fce039deab495 node
+  scripts/check-production-branch-ancestry.mjs`: confirmed
+  `e0708ba...` is a real descendant of the live Production commit.
+- All checks passed. Nothing required stopping.
+
+### 5. Pre-deployment: restore-sync failure, confirmed unrelated and not a data-safety risk
+
+Investigated directly rather than assumed, per the owner's explicit
+"stop if that cannot be established" instruction:
+
+- `scripts/check-main-restore-sync.mjs`'s own header comment and code
+  confirm it is a **git-file-only comparison**: it reads this branch's
+  generated schema/restore-order files and compares them, via `git
+  show`, against `origin/main`'s *committed* restore-tracking files
+  (`lib/operations/staging-reset.ts`, `d1-restore-order.ts`,
+  `lib/data-health/production-baseline.ts`,
+  `production-baseline/schema-manifest.json`). **It never queries or
+  touches any live D1 database, Staging or Production.**
+- The specific drift it reports is migration `0056_trip_archive_delete.sql`
+  (the `trips.archived_at` column and `trips_owner_archived_idx`
+  index) being present on this branch but not yet reflected in
+  `main`'s own tracking files.
+- Directly queried live Production D1 (`SELECT sql FROM sqlite_master
+  WHERE name = 'trips'` and the matching index query) and confirmed
+  **Production's real `trips` table already has both `archived_at`
+  and `trips_owner_archived_idx`** -- migration 0056 is in fact already
+  live on Production (superseding this round's earlier note, carried
+  over from an prior entry above, that it was "Staging only"). So the
+  drift this check reports is `main`'s own documentation/tracking
+  files lagging behind a schema change that is already safely live --
+  not a real difference between this branch and the actual Production
+  database.
+- This round's own diff (Section 1) touches zero migration, schema, or
+  restore-tracking files.
+- **Conclusion**: the failure is unrelated to this deployment and
+  presents no Production data-safety risk. Proceeding was safe to
+  establish; no stop was required.
+
+### 6. Deployment
+
+`wrangler deploy --config wrangler.production.jsonc` --
+**new Production Worker version: `638849da-e0a1-4068-bfa4-9471c3a0a874`**,
+confirmed live at 100% via `wrangler deployments status`.
+
+### 7. Post-deployment verification (live, real Production, read-only)
+
+Verified directly against `https://fundraising-os-production.sgoldstein.workers.dev`,
+using the real, pre-existing "NYC" trip
+(`59bc44cf-7b7d-4c1f-93de-25d98c8cd801`) -- no synthetic/test data was
+created in Production, and no real trip's dates were changed:
+
+1. **Back navigation**: "← Back to Trips" (`<a href="/travel-
+   planning">`) renders at the top of the trip page; clicking it
+   lands on the real Trip Planning list, which correctly shows the
+   "NYC" trip.
+2. **Edit Trip dates**: the "Edit Trip" button renders and opens two
+   date inputs correctly pre-filled with the trip's real dates
+   (`2026-10-27`/`2026-10-27`). Only "Cancel" was clicked -- no save
+   was performed, so this real trip's own dates were never touched.
+3. **Donor/pledge/donation/trip records intact**: before this
+   deployment, Production D1's `size_after` (the live database's own
+   reported size) was `10,547,200` bytes; after deployment and every
+   verification step above, a fresh read still reports the exact same
+   `10,547,200` bytes and `changed_db: false` on every query --
+   confirming **zero writes occurred** anywhere in Production D1
+   during this entire round. A full count/sum check also recorded, for
+   the record: 297 donors, 5,962 giving activities, 3 trips, 63 trip
+   prospects, $4,409,263.75 total committed, $4,037,134.93 total paid.
+4. No financial record was modified or "repaired." No manual email was
+   sent. No migration was applied.
+
+### 8. Unresolved issues
+
+- None.
+
+### Final report
+
+1. **Deployed commit**: `e0708baf898907cc1cbd61f97398d5d85c3a5853`
+   (contains only the two authorized Trip Planning usability fixes --
+   Back navigation and Edit Trip dates -- plus their tests and docs).
+2. **New Production Worker version**: `638849da-e0a1-4068-bfa4-9471c3a0a874`,
+   confirmed live at 100%.
+3. **Rollback target**: `a6e9c009-99e5-48ea-8793-77b738b40001` (commit
+   `073e393`).
+4. **Backup status**: independently verified -- latest successful
+   backup completed 2026-11-06T15:53:45Z (run `42247217905`), roughly
+   2 hours before deployment, well within the healthy threshold.
+5. **Restore-sync check**: confirmed unrelated to this deployment and
+   not a Production data-safety risk (Section 5) -- Production's real
+   schema already has what the check flags as "missing" from `main`'s
+   tracking files; this round touches no schema/migration files at
+   all.
+6. **Production verification**: both features confirmed live and
+   working on a real trip; donor, pledge, donation, and trip records
+   confirmed byte-for-byte unchanged (identical D1 size and
+   `changed_db: false` throughout).
+7. **No financial records modified or repaired. No migration applied.
+   No manual email sent.**
+8. **Unresolved issues**: none.
