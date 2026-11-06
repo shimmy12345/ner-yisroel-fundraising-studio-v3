@@ -11,7 +11,7 @@ import { DestinationRegionFieldset } from "../DestinationRegionFieldset";
 import { numericDonorCode } from "../../../lib/relationships/donor-identity";
 import type { TripRecord, TripProspectRecord, TripFinancialAttributionRow, EligibleGivingActivity, ReconcilableAttribution, FindProspectDonor } from "../../../lib/relationships/trips-data";
 import type { TripFinancialSummary } from "../../../lib/relationships/trip-financial-attribution";
-import { DEFAULT_MEETING_DURATION_MINUTES, TRIP_PROSPECT_STATUSES, timezoneForState, type TripProspectStatus } from "../../../lib/relationships/trip-model";
+import { DEFAULT_MEETING_DURATION_MINUTES, TRIP_PROSPECT_STATUSES, timezoneForState, meetingFallsOutsideTripDates, type TripProspectStatus } from "../../../lib/relationships/trip-model";
 import { DEFAULT_GOOGLE_CALENDAR_DURATION_MINUTES, googleCalendarTemplateUrl, formatDonorAddress } from "../../../lib/relationships/trip-calendar-link";
 import { FinancialSummaryCard, FinancialSummaryGrid } from "../../components/FinancialSummaryCard";
 import { ProgressBar } from "../../components/ProgressBar";
@@ -63,6 +63,17 @@ const dateLabel = (epoch: number) => new Date(epoch * 1000).toLocaleDateString("
 // this codebase.
 function dateTimeLabelInZone(epoch: number, timezone: string) {
   return new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(epoch * 1000));
+}
+// Edit Trip Dates (2026-11-06) -- `trip.startDate`/`trip.endDate` are
+// UTC-midnight calendar dates (same convention as `dateLabel` above),
+// so a `<input type="date">` value is read/written in UTC, matching
+// TravelPlanningExperience.tsx's own toEpoch() exactly rather than a
+// second, divergent date convention.
+function dateInputValue(epoch: number) {
+  return new Date(epoch * 1000).toISOString().slice(0, 10);
+}
+function toEpoch(value: string) {
+  return Math.floor(new Date(`${value}T00:00:00Z`).getTime() / 1000);
 }
 // Builds a `<input type="datetime-local">` value (`YYYY-MM-DDTHH:mm`)
 // representing `epoch` as WALL-CLOCK TIME IN `timezone`, via
@@ -262,6 +273,21 @@ export function TripDashboardExperience({
   }
 
   return <>
+    {/* Back Navigation (2026-11-06, see docs/AI-HANDOFF.md) -- a plain
+        link back to the Trip Planning list, reusing the SAME
+        `.donor-page-navigation`/`.donor-back-button` classes the donor
+        profile page's own back button already uses (including that
+        button's existing mobile styling at max-width:700px), rather
+        than a new, divergent back-button style. A plain anchor -- not
+        a client-side-only action -- so it works identically with or
+        without JS and never discards anything: every edit on this page
+        is already saved to the server the moment it's made (see e.g.
+        EditTripRegionsControl/EditTripDatesControl's own save()), so
+        there is no unsaved draft state this navigation could lose. */}
+    <nav className="donor-page-navigation travel-planning-back-nav" aria-label="Trip page navigation">
+      <a className="donor-back-button" href="/travel-planning">&larr; Back to Trips</a>
+    </nav>
+
     <header className="page-header travel-planning-header">
       <div>
         <p className="eyebrow">{trip.destinationRegionLabels.length > 0 ? trip.destinationRegionLabels.join(", ") : "No region selected"} &middot; <span className={`travel-planning-status-badge status-${trip.status}`}>{trip.status}</span>{trip.archivedAt !== null && <> &middot; <span className="travel-planning-archived-badge">Archived</span></>}</p>
@@ -272,6 +298,7 @@ export function TripDashboardExperience({
       </div>
       <div className="travel-planning-header-controls">
         <TripStatusControl tripId={trip.id} currentStatus={trip.status} onChanged={refresh} />
+        <EditTripDatesControl tripId={trip.id} startDate={trip.startDate} endDate={trip.endDate} prospects={prospects} fundraiserTimezone={fundraiserTimezone} onChanged={refresh} />
         <TripManagementMenu
           tripId={trip.id} tripName={trip.name} archivedAt={trip.archivedAt}
           onArchiveChanged={refresh} onDeleted={() => router.push("/travel-planning")}
@@ -486,6 +513,95 @@ function EditTripRegionsControl({ tripId, destinationRegionIds, onChanged }: { t
     <DestinationRegionFieldset regions={TRAVEL_REGIONS} selectedRegionIds={draft} onToggle={toggle} />
     <div className="travel-planning-confirm-actions">
       <button type="button" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save regions"}</button>
+      <button type="button" onClick={() => setEditing(false)} disabled={saving}>Cancel</button>
+    </div>
+  </div>;
+}
+
+// Edit Trip Dates (2026-11-06, see docs/AI-HANDOFF.md) -- "allow users
+// to modify the trip's start and end dates ... preserve all associated
+// donors, manual prospects, meetings, AI notes, pledges, donations, and
+// financial totals." PATCH /api/trips/:id's own startDate/endDate
+// fields already do exactly that: trips-data.ts's updateTrip() only
+// ever writes columns on the `trips` row itself (never
+// trip_prospects/interactions/giving_activities/attributions -- see its
+// own header comment), so reusing that existing endpoint, unchanged,
+// is sufficient -- this is a UI-only addition. Same end->=start rule
+// `validateTripDates` already enforces server-side (checked here too,
+// purely for immediate feedback before a round trip). The one thing
+// the server can't know: a previously-scheduled meeting that would now
+// fall outside the new range. That is NEVER auto-deleted or moved --
+// this only warns, via a confirm step (the same
+// `.travel-planning-confirm-panel` pattern TripManagementMenu's own
+// archive/delete confirmations already use) that requires an explicit
+// "Save dates anyway" before the PATCH is actually sent.
+function EditTripDatesControl({ tripId, startDate, endDate, prospects, fundraiserTimezone, onChanged }: {
+  tripId: string; startDate: number; endDate: number; prospects: readonly TripProspectRecord[]; fundraiserTimezone: string; onChanged: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [startDraft, setStartDraft] = useState(dateInputValue(startDate));
+  const [endDraft, setEndDraft] = useState(dateInputValue(endDate));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [outsideWarning, setOutsideWarning] = useState<{ newStart: number; newEnd: number; names: string[] } | null>(null);
+
+  function open() {
+    setStartDraft(dateInputValue(startDate));
+    setEndDraft(dateInputValue(endDate));
+    setError(null);
+    setOutsideWarning(null);
+    setEditing(true);
+  }
+
+  async function commit(newStart: number, newEnd: number) {
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/trips/${encodeURIComponent(tripId)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ startDate: newStart, endDate: newEnd }) });
+      if (!response.ok) { const payload = await response.json().catch(() => ({})) as { error?: string }; throw new Error(payload.error ?? "Could not save trip dates."); }
+      setEditing(false);
+      setOutsideWarning(null);
+      onChanged();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not save trip dates.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function save() {
+    setError(null);
+    if (!startDraft || !endDraft) { setError("Choose a start and end date."); return; }
+    const newStart = toEpoch(startDraft);
+    const newEnd = toEpoch(endDraft);
+    if (newEnd < newStart) { setError("The end date can't be before the start date."); return; }
+    const affected = prospects.filter((prospect) => prospect.meetingAt !== null && meetingFallsOutsideTripDates(prospect.meetingAt, newStart, newEnd));
+    if (affected.length > 0) {
+      setOutsideWarning({ newStart, newEnd, names: affected.map((prospect) => `${prospect.donorDisplayName} (${dateTimeLabelInZone(prospect.meetingAt!, fundraiserTimezone)})`) });
+      return;
+    }
+    commit(newStart, newEnd);
+  }
+
+  if (!editing) return <button type="button" className="travel-planning-trip-menu-toggle" onClick={open}>Edit Trip</button>;
+
+  if (outsideWarning) return <div className="travel-planning-confirm-panel travel-planning-trip-action-confirm" role="alertdialog" aria-label="Meetings outside new trip dates">
+    <p className="travel-planning-delete-warning">
+      {outsideWarning.names.length === 1 ? "1 scheduled meeting" : `${outsideWarning.names.length} scheduled meetings`} will fall outside the new trip dates: {outsideWarning.names.join(", ")}. {outsideWarning.names.length === 1 ? "It" : "They"} will not be changed, cancelled, or rescheduled automatically -- review and update {outsideWarning.names.length === 1 ? "it" : "them"} yourself if needed.
+    </p>
+    {error && <p className="travel-planning-error" role="alert">{error}</p>}
+    <div className="travel-planning-confirm-actions">
+      <button type="button" onClick={() => commit(outsideWarning.newStart, outsideWarning.newEnd)} disabled={saving}>{saving ? "Saving…" : "Save dates anyway"}</button>
+      <button type="button" onClick={() => setOutsideWarning(null)} disabled={saving}>Back</button>
+    </div>
+  </div>;
+
+  return <div className="travel-planning-confirm-panel travel-planning-trip-action-confirm travel-planning-edit-dates-form" aria-label="Edit trip dates">
+    {error && <p className="travel-planning-error" role="alert">{error}</p>}
+    <label>Start date<input type="date" value={startDraft} onChange={(event) => setStartDraft(event.target.value)} /></label>
+    <label>End date<input type="date" value={endDraft} onChange={(event) => setEndDraft(event.target.value)} /></label>
+    <div className="travel-planning-confirm-actions">
+      <button type="button" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save dates"}</button>
       <button type="button" onClick={() => setEditing(false)} disabled={saving}>Cancel</button>
     </div>
   </div>;

@@ -217,6 +217,18 @@ export function validateTripDates(startDate: unknown, endDate: unknown): { ok: t
   return { ok: true, startDate, endDate };
 }
 
+// Edit Trip Dates (2026-11-06, see docs/AI-HANDOFF.md) -- "if existing
+// meetings fall outside the revised date range, warn the user without
+// automatically deleting or rescheduling them." Trip start/end are
+// UTC-midnight CALENDAR DATES (see TravelPlanningExperience.tsx's own
+// toEpoch()), so a meeting scheduled any time on the trip's own last
+// day must still count as within range even though its exact instant
+// is numerically after `endDate` itself -- the comparison is against
+// the end of that day (endDate + one full day), never endDate alone.
+export function meetingFallsOutsideTripDates(meetingAt: number, startDate: number, endDate: number): boolean {
+  return meetingAt < startDate || meetingAt >= endDate + 86400;
+}
+
 export function validateFundraisingGoalCents(value: unknown): { ok: true; goalCents: number | null } | { ok: false } {
   if (value === undefined || value === null) return { ok: true, goalCents: null };
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) return { ok: false };

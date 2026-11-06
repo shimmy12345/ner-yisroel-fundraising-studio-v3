@@ -63930,3 +63930,235 @@ this command.
 6. **No manual email sent. No send-schedule/configuration changed. No
    migration applied. No donor record modified.**
 7. **Unresolved issues**: none.
+
+## Trip Planning Usability Fixes: Back Navigation and Edit Trip Dates (2026-11-06) -- IMPLEMENTED AND VERIFIED ON STAGING, NOT YET DEPLOYED TO PRODUCTION
+
+Owner request: Trip Planning had no way back to the trip list from a
+trip's own detail page, and no way to correct a trip's start/end dates
+once created (short of deleting and recreating the trip). Reuse
+existing components/APIs wherever possible, implement the smallest
+reliable solution, test thoroughly, confirm no financial data or donor
+relationships are altered, and report before any Production
+deployment.
+
+### 1. What already existed (investigated first)
+
+- **Back navigation**: the trip detail page
+  (`app/travel-planning/[id]/page.tsx` ->
+  `TripDashboardExperience.tsx`) had no link back to `/travel-
+  planning` at all -- the only way back was the browser's own Back
+  button or the global nav's "Today" link. The donor profile page
+  already has exactly this pattern solved: `DonorNavigation.tsx`'s
+  `.donor-back-button`/`.donor-page-navigation` classes, including an
+  existing, already-shipped mobile layout rule (`@media (max-
+  width:700px)` in `app/globals.css`, line ~893) that makes the button
+  full-width and centered on a phone-sized viewport.
+- **Edit Trip dates**: `PATCH /api/trips/:id` (`app/api/trips/[id]/
+  route.ts`) **already accepts and validates** `startDate`/`endDate`
+  via `validateTripDates()` (`lib/relationships/trip-model.ts`), which
+  already enforces end >= start and a 90-day sanity ceiling -- this
+  code path exists only because trip *creation* uses it; nothing in
+  the UI exposed it for an *existing* trip. `updateTrip()`
+  (`lib/relationships/trips-data.ts`) only ever writes columns on the
+  `trips` row itself (`name`/`status`/`fundraising_goal_cents`/
+  `notes`/`start_date`/`end_date`/`archived_at`), and separately
+  replaces `trip_destination_regions` only when that field is
+  explicitly provided -- it never touches `trip_prospects`,
+  `interactions`, `giving_activities`, `trip_financial_attributions`,
+  or `trip_prospect_commitments`. That means "preserve all associated
+  donors, manual prospects, meetings, AI notes, pledges, donations, and
+  financial totals" is true **by construction** of the existing
+  endpoint, not something this round needed to newly guarantee --
+  confirmed by reading `updateTrip()`'s full body, not assumed.
+- The one genuine gap: nothing checked whether a prospect's own
+  already-scheduled `meeting_at` (`trip_prospects.meeting_at`) would
+  fall outside a newly-chosen date range. The owner's own instruction
+  was explicit that this must only ever warn, never auto-delete or
+  auto-reschedule anything.
+
+### 2. Changes made
+
+- **`lib/relationships/trip-model.ts`**: added one new pure function,
+  `meetingFallsOutsideTripDates(meetingAt, startDate, endDate)`. Trip
+  `start_date`/`end_date` are UTC-midnight calendar-day boundaries (the
+  same convention `TravelPlanningExperience.tsx`'s own `toEpoch()`
+  already uses), so a meeting scheduled any time on the trip's own
+  *last* day must still count as within range even though its exact
+  instant is numerically after `endDate` itself -- the function
+  compares against the end of that day (`endDate + 86400`), never
+  `endDate` alone. No existing function changed.
+- **`app/travel-planning/[id]/TripDashboardExperience.tsx`**:
+  - Added a `<nav className="donor-page-navigation ...">` with
+    `<a className="donor-back-button" href="/travel-planning">← Back
+    to Trips</a>` at the top of the page, reusing the donor page's
+    exact existing classes (and therefore its existing mobile
+    styling) rather than writing new, divergent CSS. A plain anchor,
+    not a client-side-only handler, so it keeps working even without
+    JS and can never discard anything -- every edit on this page is
+    already persisted to the server the instant it is made (see every
+    existing `save()`/`commit()` in this file), so there is no
+    in-memory draft this navigation could lose.
+  - Added `EditTripDatesControl`, placed in the header's existing
+    control row beside the status dropdown and "Trip options" menu
+    (reusing the same visible, bordered button style the "Trip
+    options ⋯" button already uses). Toggle button reads "Edit Trip";
+    clicking it opens two `<input type="date">` fields (Start
+    date/End date) pre-filled with the trip's current dates, inside
+    the same `.travel-planning-confirm-panel` container every other
+    trip-level edit/confirm panel on this page already uses.
+  - `save()` rejects an end-before-start selection immediately,
+    client-side (`"The end date can't be before the start date."`) --
+    `validateTripDates()` on the server remains the authoritative
+    check; this is purely for instant feedback before a round trip.
+  - If any selected prospect's `meeting_at` would fall outside the
+    chosen range (via the new `meetingFallsOutsideTripDates()`), save
+    does **not** proceed -- it shows an inline warning (same
+    `.travel-planning-confirm-panel`/`alertdialog` pattern
+    `TripManagementMenu`'s own Archive/Delete confirmations already
+    use, never a native `window.confirm()`) naming exactly which
+    prospect(s) and their existing meeting time (in the fundraiser's
+    own timezone, via the same `dateTimeLabelInZone()` already used
+    elsewhere on this page), and states plainly that nothing will be
+    changed, cancelled, or rescheduled automatically. Only an explicit
+    "Save dates anyway" click sends the `PATCH`; "Back" discards the
+    attempt and returns to the date fields with nothing saved.
+  - The `PATCH` call itself is the exact same
+    `fetch('/api/trips/:id', { method: 'PATCH', ... })` endpoint
+    already used for status/regions/archive -- no new endpoint, no
+    schema change, no migration.
+- **`scripts/run-tests.mjs`**: registered the new test file below (the
+  explicit list this script checks against drift).
+
+### 3. Regression tests added
+
+- **`tests/trip-model.test.mjs`**: 6 new assertions on
+  `meetingFallsOutsideTripDates()` -- exact start instant and exact
+  end-date instant both count as in range; late in the day ON the
+  trip's own last calendar day still counts as in range (the specific
+  edge case the UTC-midnight convention makes easy to get wrong); one
+  second before the start, and the day after the end date, both count
+  as outside; a meeting on a middle day of the trip is in range.
+- **`tests/trip-edit-dates-and-back-nav.test.mjs`** (new file, source-
+  inspection style, matching this codebase's own established
+  convention for React UI with no DOM test runner -- see
+  `tests/trip-archive-delete-ui.test.mjs`): confirms the real back
+  link exists; confirms `EditTripDatesControl` uses `PATCH` (never
+  `DELETE`), sends `startDate`/`endDate`, rejects `newEnd < newStart`
+  client-side, calls `meetingFallsOutsideTripDates`, requires the
+  exact "Save dates anyway" confirmation text, never uses
+  `window.confirm()`, and has no `useEffect` (so nothing about it can
+  fire automatically on mount); and -- as a regression guard on the
+  preservation guarantee itself -- asserts `updateTrip()`'s own SQL
+  never contains an `UPDATE`/`DELETE FROM`/`INSERT INTO` against
+  `trip_prospects`, `interactions`, `giving_activities`,
+  `trip_financial_attributions`, `trip_prospect_commitments`, or
+  `donors`.
+- `npx tsc --noEmit`: 0 errors.
+- `node scripts/run-tests.mjs`: **258/258 test files passed** (257
+  pre-existing + 1 new file; `trip-model.test.mjs` includes the 6 new
+  cases above). The one failure the script reports,
+  `check-main-restore-sync.mjs` (main's migration/schema tracking vs.
+  this branch, re: migration `0056`), is a pre-existing condition
+  already noted in the prior "Production Deployment" entry above --
+  unrelated to this round, nothing in this change touches any
+  migration or schema file.
+
+### 4. Staging verification (live, real browser, real deployed Worker)
+
+Deployed to Staging (`wrangler deploy --config wrangler.staging.jsonc`
+after a clean `build:staging-independent` +
+`verify-build-manifest.mjs` + `check-production-feature-fingerprints.mjs`,
+all passing) -- **new Staging Worker version
+`74fdc598-4dbe-4e71-b767-68bdd06c5963`**.
+
+A new disposable fixture was created directly in Staging D1, following
+this codebase's own established "SYNTHETIC TEST" convention (the same
+one `tests/*` and prior rounds' donor fixtures already use): trip
+**"SYNTHETIC TEST -- Edit Trip Dates Verification (safe, do not use
+for real data)"**, owned by the real Staging user, with one selected
+prospect (the existing `SYNTHETIC TEST — Multi Payment Pledge` donor)
+carrying a real scheduled `meeting_at`. Left in place afterward as a
+reusable fixture, same precedent as the existing donor fixtures.
+
+Verified live, via Claude-in-Chrome against the real deployed Staging
+Worker (the browser tab's screenshot/render tool was unreliable on
+this page after full navigation, same known limitation noted in the
+prior "Morning Agenda" rounds' entries above -- verification used the
+accessibility tree (`read_page`/`find`) and the real `GET /api/trips/
+:id` response instead, which is at least as reliable since it reads
+the actual server state, not a rendering of it):
+
+1. **Back navigation**: "← Back to Trips" renders at the top of the
+   trip page and is a real `<a href="/travel-planning">`; clicking it
+   lands on the trip list, which correctly shows the trip's
+   just-saved, updated dates (confirming dates stay consistent between
+   the detail page and the list, both reading the same live `trips`
+   row).
+2. **Edit Trip opens pre-filled**: clicking "Edit Trip" showed two
+   date inputs pre-filled with the trip's actual current dates
+   (`2026-12-01` / `2026-12-05`).
+3. **Invalid range rejected**: setting the end date to `2026-11-30`
+   (before the `2026-12-01` start) and clicking "Save dates" produced
+   the exact client-side alert "The end date can't be before the start
+   date." and made no request.
+4. **Outside-range warning fires and blocks the save**: changing the
+   range to `2026-12-03`–`2026-12-10` (excluding the prospect's own
+   `Dec 2, 2026` meeting) and clicking "Save dates" produced an
+   `alertdialog` reading "1 scheduled meeting will fall outside the
+   new trip dates: SYNTHETIC TEST — Multi Payment Pledge ... [date]."
+   with "Save dates anyway"/"Back" buttons -- **no PATCH request was
+   sent yet**.
+5. **"Back" truly cancels**: clicking "Back" on that warning, then
+   re-querying `GET /api/trips/:id` directly, confirmed the trip's
+   dates and the prospect's `meeting_at`/`status` were completely
+   unchanged from before the attempt -- nothing was saved.
+6. **"Save dates anyway" commits, and preserves the meeting**:
+   re-attempting the same change and clicking "Save dates anyway" this
+   time; `GET /api/trips/:id` immediately after confirmed the trip's
+   `startDate`/`endDate` were updated to the new values, while the
+   prospect's `meetingAt` (`1796223600`, Dec 2) and `status`
+   (`meeting_scheduled`) were **completely unchanged** -- the meeting
+   was not deleted, cancelled, or moved.
+7. **Financial data confirmed untouched**: a direct read of
+   `giving_activities` for the linked donor (`SYNTHETIC TEST — Multi
+   Payment Pledge`) before and after every step above showed the exact
+   same row count and the exact same `committed_cents` total
+   (`4,000,000`) -- the trip-dates change never touched any financial
+   record, as `updateTrip()`'s own code (Section 1) already
+   guaranteed.
+8. **A range that keeps every meeting in range saves immediately,
+   with no warning**: widening the start date back to `2026-12-01`
+   (bringing the Dec 2 meeting back into range) and clicking "Save
+   dates" saved directly -- no `alertdialog` appeared, and `GET /api/
+   trips/:id` confirmed the new dates were persisted immediately.
+9. **Mobile**: the back button and its container reuse the donor
+   profile page's own `.donor-back-button`/`.donor-page-navigation`
+   classes verbatim, including their existing, already-shipped
+   `@media (max-width:700px)` mobile rule -- no new CSS was written
+   for mobile, so there is no new mobile-specific risk to verify
+   beyond what that already-shipped pattern already covers. A live
+   narrow-viewport screenshot could not be captured this session (the
+   available browser-resize tool did not change the page's actual CSS
+   viewport in this environment), so this is verified by code reuse of
+   an already-proven pattern, not by a fresh screenshot -- noted here
+   rather than overstated.
+
+### 5. Unresolved issues
+
+- None found specific to this change.
+- The pre-existing `check-main-restore-sync.mjs` drift warning
+  (unrelated migration/schema tracking gap) remains open, already
+  tracked separately (Section 3 above and the prior "Production
+  Deployment" entry).
+- Item 9 above (mobile) is verified by reused, already-shipped CSS
+  rather than a fresh live screenshot at a narrow viewport, due to a
+  tooling limitation in this session, not a known or suspected defect.
+
+### Status
+
+- **Staging**: deployed (Worker version
+  `74fdc598-4dbe-4e71-b767-68bdd06c5963`) and verified live as above.
+  Ready for owner review.
+- **Production**: **NOT deployed.** Per the owner's explicit
+  instruction, no Production deployment was attempted this round.
+  Awaiting authorization.

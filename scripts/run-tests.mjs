@@ -115,6 +115,7 @@ const TEST_FILES = [
   "tests/trip-archive-delete-schema.test.mjs",
   "tests/trip-archive-delete.test.mjs",
   "tests/trip-archive-delete-ui.test.mjs",
+  "tests/trip-edit-dates-and-back-nav.test.mjs",
   "tests/data-health.test.mjs",
   "tests/data-health-timestamp-formatting.test.mjs",
   "tests/data-health-repair.test.mjs",

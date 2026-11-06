@@ -4,7 +4,7 @@ import {
   statusRequiresInteraction, isConflictingProspectStatus, findCrossTripConflicts,
   buildSuggestionSnapshot, timezoneForState, parseLocalDateTimeInput,
   tripScheduledInteractionSource, tripCompletedInteractionSource, tripCancelledInteractionSource, tripMeetingInteractionId,
-  validateTripName, validateTripDates, validateFundraisingGoalCents, validateNotes, validateMeetingLocation, validateNextAction,
+  validateTripName, validateTripDates, meetingFallsOutsideTripDates, validateFundraisingGoalCents, validateNotes, validateMeetingLocation, validateNextAction,
   validateMeetingCompletion, validateMeetingScheduling,
   matchExistingGivingActivityForCommitment, validateDestinationRegionIds,
 } from "../lib/relationships/trip-model.ts";
@@ -175,6 +175,21 @@ async function run() {
   assert.equal(validateTripDates(NOW, NOW - 86400).ok, false, "end before start must fail");
   assert.equal(validateTripDates(NOW, NOW + 86400 * 365).ok, false, "an implausibly long span must fail");
   assert.equal(validateTripDates("not-a-number", NOW).ok, false);
+
+  // --- meetingFallsOutsideTripDates (2026-11-06, "Edit Trip" dates --
+  // see docs/AI-HANDOFF.md). Trip start/end are UTC-midnight calendar
+  // dates, so a meeting scheduled any time on the LAST day must still
+  // count as within range, not just at the exact `endDate` instant. ---
+  {
+    const tripStart = NOW; // a UTC-midnight day boundary, same convention trips use
+    const tripEnd = NOW + 86400 * 3; // a 3-day trip: day 0, day 1, day 2
+    assert.equal(meetingFallsOutsideTripDates(tripStart, tripStart, tripEnd), false, "a meeting at the exact start instant is within range");
+    assert.equal(meetingFallsOutsideTripDates(tripEnd, tripStart, tripEnd), false, "a meeting at the exact end-date instant is within range");
+    assert.equal(meetingFallsOutsideTripDates(tripEnd + 60 * 60 * 20, tripStart, tripEnd), false, "a meeting late on the trip's own last calendar day must still count as within range");
+    assert.equal(meetingFallsOutsideTripDates(tripStart - 1, tripStart, tripEnd), true, "one second before the start date is outside range");
+    assert.equal(meetingFallsOutsideTripDates(tripEnd + 86400, tripStart, tripEnd), true, "the day AFTER the end date is outside range");
+    assert.equal(meetingFallsOutsideTripDates(tripStart + 86400, tripStart, tripEnd), false, "a meeting on a middle day of the trip is within range");
+  }
 
   assert.deepEqual(validateFundraisingGoalCents(undefined), { ok: true, goalCents: null });
   assert.deepEqual(validateFundraisingGoalCents(null), { ok: true, goalCents: null });
